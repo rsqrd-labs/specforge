@@ -1117,7 +1117,9 @@ async def _open_increment_pr(
     base_sha = await client.get_ref(repo, f"heads/{_DEFAULT_BRANCH}")
     await client.create_branch(repo, branch, base_sha)
 
-    harness_files = parse_harness_files(stages["harness"].content or "")
+    harness_files = parse_harness_files(
+        stages["harness"].content or "", workspace_id=push.workspace_id
+    )
     stacks = pr_export_builder.detect_stacks(
         stages["plan"].content or "", harness_files
     )

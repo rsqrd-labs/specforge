@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Stage, Workspace
 from services.pipeline import agent_manual_service, demo_day_verdict
+from services.security.downstream_command_guard import redact_unsafe_lines
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +31,47 @@ _WINDOWS_RESERVED_NAMES = frozenset(
     | {f"LPT{i}" for i in range(1, 10)}
 )
 
+# Audit-event name written whenever an exported doc/harness-fallback body has an
+# unsafe line stripped (mirrors AUDIT_EVENT_CRITIC_DISABLED in critic.py: a
+# module-owned constant next to the check it names, not the DB — there is no
+# AuditEvent table). Kept local rather than in observability.py's
+# GITHUB_AUDIT_* vocabulary because this fires for the plain ZIP export too,
+# not just the GitHub push path.
+AUDIT_EVENT_UNSAFE_CONTENT_REDACTED = "export.unsafe_content_redacted"
+
 
 class ExportNotReadyError(Exception):
     pass
+
+
+def _redact_stage_content(
+    content: str, *, workspace_id: UUID | str, file_path: str
+) -> str:
+    """Strip unsafe shell-injection lines from a raw stage-derived file body
+    before it is written into an exported artifact (ZIP or GitHub push).
+
+    ``redact_unsafe_lines`` is already applied to the small harvested snippets
+    folded into AGENTS.md/CLAUDE.md (``_named_section``/``_validation_commands``
+    in ``agents_md_builder.py``); this closes the gap for the raw SPEC.md /
+    PLAN.md / TASKS.md bodies, which are the actual files a downstream coding
+    agent reads directly and a shared repo commits. Deliberately NOT applied to
+    harness files extracted from labelled ``## File:`` blocks — those are real,
+    executable scripts/tests/config where the same patterns (bare ``sudo``,
+    ``curl``, ``rm -rf``) are ordinary and legitimate; see ``parse_harness_files``.
+    """
+    cleaned = redact_unsafe_lines(content)
+    if cleaned != content:
+        removed = len(content.splitlines()) - len(cleaned.splitlines())
+        logger.info(
+            AUDIT_EVENT_UNSAFE_CONTENT_REDACTED,
+            extra={
+                "audit_event": AUDIT_EVENT_UNSAFE_CONTENT_REDACTED,
+                "workspace_id": str(workspace_id),
+                "file_path": file_path,
+                "redacted_lines": removed,
+            },
+        )
+    return cleaned
 
 
 def _safe_harness_path(filename: str) -> str | None:
@@ -127,11 +166,21 @@ def _parse_labelled_harness_files(harness_content: str) -> tuple[dict[str, str],
     return files, found_labelled_block
 
 
-def parse_harness_files(harness_content: str) -> dict[str, str]:
+def parse_harness_files(
+    harness_content: str, *, workspace_id: UUID | str | None = None
+) -> dict[str, str]:
     files, found_labelled_block = _parse_labelled_harness_files(harness_content)
     if files or found_labelled_block:
+        # Real, executable code extracted from labelled ## File: blocks — never
+        # redacted (see _redact_stage_content's docstring).
         return files
-    return {_HARNESS_FALLBACK: harness_content}
+    if workspace_id is not None:
+        fallback_body = _redact_stage_content(
+            harness_content, workspace_id=workspace_id, file_path=_HARNESS_FALLBACK
+        )
+    else:
+        fallback_body = redact_unsafe_lines(harness_content)
+    return {_HARNESS_FALLBACK: fallback_body}
 
 
 async def build_export(workspace_id: UUID, user_id: UUID, db: AsyncSession) -> bytes:
@@ -155,10 +204,15 @@ async def build_export(workspace_id: UUID, user_id: UUID, db: AsyncSession) -> b
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for stage_type, filename in _STAGE_FILES.items():
-            zf.writestr(filename, stages[stage_type].content or "")
+            content = _redact_stage_content(
+                stages[stage_type].content or "",
+                workspace_id=workspace_id,
+                file_path=filename,
+            )
+            zf.writestr(filename, content)
 
         harness_content = stages["harness"].content or ""
-        harness_files = parse_harness_files(harness_content)
+        harness_files = parse_harness_files(harness_content, workspace_id=workspace_id)
         if harness_files.keys() == {_HARNESS_FALLBACK}:
             logger.warning(
                 "harness parse yielded no files for workspace_id=%s, using fallback",
