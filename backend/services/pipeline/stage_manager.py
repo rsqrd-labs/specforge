@@ -944,18 +944,31 @@ def _rate_limit_retry_delay(attempt: int, retry_after: float | None) -> float:
 
     Honors the provider's ``Retry-After`` hint when present (clamped to
     ``_RATE_LIMIT_RETRY_AFTER_CAP``); otherwise applies exponential backoff with
-    full jitter, capped at ``provider_rate_limit_backoff_max_seconds``. ``attempt``
-    is 0-based (the count of retries already performed). Full jitter spreads a
-    thundering herd of simultaneously-throttled generations so they do not all
-    re-fire at the same instant.
+    *equal* jitter, capped at ``provider_rate_limit_backoff_max_seconds``.
+    ``attempt`` is 0-based (the count of retries already performed).
+
+    Jitter spreads a thundering herd of simultaneously-throttled generations so
+    they do not all re-fire at the same instant, but it is drawn over
+    ``[ceiling/2, ceiling]`` rather than ``[0, ceiling]``: full jitter can return
+    a near-zero delay, which re-fires inside the provider's still-closed quota
+    window, wastes one of only ``provider_rate_limit_max_retries`` attempts, and
+    adds load to an already-throttled org. Half the range still de-synchronizes
+    the herd while guaranteeing every retry actually waits.
     """
-    if retry_after is not None and retry_after >= 0:
-        return min(retry_after, _RATE_LIMIT_RETRY_AFTER_CAP)
     base = max(0.0, settings.provider_rate_limit_backoff_base_seconds)
+    if retry_after is not None and retry_after >= 0:
+        # Parallel chunks of one generation are throttled within milliseconds of
+        # each other and are handed near-identical hints, so obeying the hint
+        # verbatim wakes them all at the same instant and re-collides on the
+        # quota. Spread them with a small additive jitter, still bounded by the
+        # cap so a hostile hint can never pin the generation.
+        # nosec B311 — jitter for load-spreading, not a security/crypto draw.
+        spread = random.uniform(0.0, base)  # nosec B311
+        return min(retry_after + spread, _RATE_LIMIT_RETRY_AFTER_CAP)
     cap = max(base, settings.provider_rate_limit_backoff_max_seconds)
     ceiling = min(base * (2**attempt), cap)
     # nosec B311 — jitter for load-spreading, not a security/crypto draw.
-    return random.uniform(0.0, ceiling)  # nosec B311
+    return random.uniform(ceiling / 2.0, ceiling)  # nosec B311
 
 
 def _route_for_refine(

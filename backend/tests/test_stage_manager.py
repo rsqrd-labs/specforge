@@ -1178,7 +1178,7 @@ def test_complexity_classifier_does_not_raise_for_google(monkeypatch) -> None:
     signals = sm._build_complexity_signals(stage, workspace)
     route = sm._route_for_stage_generation("spec", workspace, signals=signals)
     assert route.model_tier == "mid"
-    assert route.model == "gemini-3.5-flash"
+    assert route.model == "gemini-3.6-flash"
 
 
 def test_prior_quality_gate_block_escalates_starting_tier(monkeypatch) -> None:
@@ -3275,13 +3275,18 @@ async def test_handle_content_edit_schedules_eval_for_new_version() -> None:
     assert version.content == "new harness"
     run_eval_background.assert_awaited_once()
     args = run_eval_background.await_args.args
+    # The online eval runs on the server-owned PLATFORM judge route, not on the
+    # workspace's legacy `provider`/`model` columns. That distinction was
+    # invisible while the platform primary happened to match the fixture's
+    # workspace provider; with Google as the primary it is explicit, so assert
+    # the judge route directly rather than echoing workspace.provider.
     assert args[:6] == (
         version.id,
         "harness",
         "new harness",
         "spec content",
-        workspace.provider,
-        "claude-haiku-4-5-20251001",
+        "google",
+        "gemini-3.5-flash-lite",
     )
 
 
@@ -3717,7 +3722,12 @@ async def test_focused_refine_uses_small_budget_and_context_window() -> None:
         await svc.refine(stage.id, request, user, db)
 
     system_prompt, user_prompt = mock_adapter.complete.await_args.args[:2]
-    assert mock_adapter.complete.await_args.kwargs["max_tokens"] == 768
+    # Google is the platform primary, so focused refine lands on Gemini 3.6 Flash
+    # and picks up the ("refine.focused", "google") thinking-headroom override —
+    # Gemini bills thought tokens against max_output_tokens, so the 768-token
+    # cross-provider default would be consumed by thinking alone. Other providers
+    # keep 768 (pinned in test_model_catalog).
+    assert mock_adapter.complete.await_args.kwargs["max_tokens"] == 4096
     # Match the distinctive phrase, not a leading verb whose casing shifts when
     # the sentence is reflowed (the f264269 prompt rewrite made "Keep" a sentence
     # start; asserting the case-sensitive full clause is what broke this).
@@ -4954,10 +4964,21 @@ async def test_generate_spec_skips_score_judge_by_default(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_falls_back_only_failed_chunk_on_same_provider() -> None:
+async def test_generate_falls_back_only_failed_chunk_on_same_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A cheap-tier provider failure retries that chunk on the mid tier and the
-    fallback generation is persisted normally with no refund."""
+    fallback generation is persisted normally with no refund.
+
+    Pinned to Anthropic explicitly: this exercises the *escalation mechanism*,
+    which needs a provider whose ladder actually has a higher active tier. The
+    platform primary (Google) deliberately has no active ``strong`` model — see
+    the sibling test below for that path.
+    """
     from services.llm.base import ProviderError
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "llm_provider_priority", "anthropic,openai,google")
 
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
@@ -5014,6 +5035,84 @@ async def test_generate_falls_back_only_failed_chunk_on_same_provider() -> None:
     assert spec_stage.content == _VALID_SPEC
     assert _streamed_artifact(tokens) == _VALID_SPEC
     assert any("done" in token for token in tokens)
+
+
+@pytest.mark.asyncio
+async def test_google_chunk_failure_surfaces_instead_of_escalating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Google is the platform primary and has NO active ``strong`` model, so a
+    core-generation failure surfaces instead of retrying on a second model.
+
+    This is the load-bearing behavioural difference from the OpenAI/Anthropic
+    ladders. What this pins is that it degrades *cleanly*:
+    ``_runtime_fallback_route`` catches the ``LLMRoutingError`` from the
+    unresolvable ``strong`` tier and returns None, so the failure surfaces as a
+    normal generation error — never an unhandled exception — and the user's
+    credits are refunded rather than silently burned on an un-retried chunk.
+    """
+    from services.llm.base import ProviderError
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "llm_provider_priority", "google,anthropic,openai")
+
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    deduction = CreditLedger(id=uuid4(), user_id=user.id, amount=-10, reason="generate")
+    db = _MultiQueryDB([spec_stage, workspace, [], deduction])
+    svc = StageManager(redis_client=_FakeRedis())
+
+    requested_models: list[str] = []
+
+    async def failing_stream(*args, **kwargs) -> AsyncGenerator[str, None]:
+        raise ProviderError("google", RuntimeError("upstream 5xx"))
+        yield  # pragma: no cover — makes this an AsyncGenerator
+
+    def fake_get_llm(provider: str, model: str, **kwargs):
+        requested_models.append(model)
+        adapter = MagicMock()
+        adapter.last_completion = None
+        adapter.stream = failing_stream
+        return adapter
+
+    with (
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+            return_value=deduction,
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.refund",
+            new_callable=AsyncMock,
+            return_value=10,
+        ) as mock_refund,
+        patch(
+            "services.pipeline.stage_manager.build_prompt",
+            new_callable=AsyncMock,
+            return_value=("sys", "user", "0"),
+        ),
+        patch("services.pipeline.stage_manager.get_llm", side_effect=fake_get_llm),
+    ):
+        tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
+
+    # Every attempt stayed on the one Google core-gen model: no escalation model
+    # exists, and crucially no attempt leaked cross-provider mid-artifact.
+    assert requested_models, "generation should have attempted at least one call"
+    assert set(requested_models) == {"gemini-3.6-flash"}
+    # The failure is surfaced to the client as an error event, not swallowed and
+    # not raised out of the generator.
+    # Surfaced as a normal terminal failure event with the credits returned —
+    # not an unhandled exception, and not a silently burned generation.
+    import json as _json
+
+    terminal = [_json.loads(t) for t in tokens if "generation_terminal" in t]
+    assert terminal, f"expected a terminal event, got {tokens}"
+    assert terminal[0]["generation_terminal"]["status"] == "failed"
+    assert terminal[0]["generation_terminal"]["refunded_credits"] == 10
+    assert spec_stage.content != _VALID_SPEC
+    mock_refund.assert_awaited()
 
 
 @pytest.mark.asyncio

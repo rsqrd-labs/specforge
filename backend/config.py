@@ -26,7 +26,16 @@ class Settings(BaseSettings):
     google_api_key: str
     # Server-owned LLM provider precedence. This is deliberately never exposed
     # through a user API: product traffic is routed by backend policy.
-    llm_provider_priority: str = "anthropic,openai,google"
+    #
+    # Google leads: Gemini is the platform's funded provider (Gemini 3.6 Flash
+    # for core generation, Gemini 3.5 Flash-Lite for judge/eval). Anthropic and
+    # OpenAI stay in the list as fallbacks and are only reachable when Google's
+    # key is unset/placeholder or its circuit is open — routing skips any
+    # provider that is not configured (see provider_status.is_provider_configured),
+    # so an unconfigured fallback simply never wins. Reverting the cutover is an
+    # env change only: set this to "openai,anthropic,google" and restore
+    # OPENAI_API_KEY.
+    llm_provider_priority: str = "google,anthropic,openai"
 
     @field_validator("llm_provider_priority")
     @classmethod

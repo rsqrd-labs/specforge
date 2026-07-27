@@ -29,12 +29,12 @@ def test_model_tier_lookup_and_tier_filtering() -> None:
 
 
 def test_model_cost_lookup_returns_copy() -> None:
-    model_cost = get_model_cost("google", "gemini-3.5-flash")
+    model_cost = get_model_cost("google", "gemini-3.6-flash")
     model_cost["tier"] = "strong"
 
     assert model_cost["tier"] == "strong"
     assert (
-        PROVIDER_CAPABILITY_REGISTRY["google"]["models"]["gemini-3.5-flash"]["tier"]
+        PROVIDER_CAPABILITY_REGISTRY["google"]["models"]["gemini-3.6-flash"]["tier"]
         == "mid"
     )
 
@@ -43,8 +43,35 @@ def test_google_registry_excludes_shutdown_gemini_flash_model() -> None:
     google_models = PROVIDER_CAPABILITY_REGISTRY["google"]["models"]
 
     assert "gemini-2.0-flash" not in google_models
-    assert "gemini-3.5-flash" in google_models
+    assert "gemini-3.6-flash" in google_models
+    assert google_models["gemini-3.6-flash"]["status"] == "active"
     assert google_models["gemini-1.5-flash"]["status"] == "deprecated"
+    # Superseded by the 3.6 Flash / 3.5 Flash-Lite cutover: retained for
+    # historical row resolution, but demoted so they can never route again.
+    assert google_models["gemini-3.5-flash"]["status"] == "deprecated"
+    assert google_models["gemini-3.1-flash-lite"]["status"] == "deprecated"
+
+
+def test_live_google_models_are_priceable() -> None:
+    """Google is the platform provider, so every live Google model must carry
+    real per-token rates.
+
+    ``usage.estimate_cost_usd`` returns None the moment any needed rate is None,
+    which silently records a zero-cost ledger row. The superseded 3.1 Flash-Lite
+    entry had None for all three rates — harmless while Google was unconfigured,
+    wrong now that Flash-Lite owns the entire judge/eval path.
+    """
+    google_models = PROVIDER_CAPABILITY_REGISTRY["google"]["models"]
+
+    for model_id in ("gemini-3.6-flash", "gemini-3.5-flash-lite"):
+        config = google_models[model_id]
+        for field in (
+            "input_cost_per_million",
+            "cached_input_cost_per_million",
+            "output_cost_per_million",
+        ):
+            assert config[field] is not None, f"{model_id}.{field} must be priced"
+            assert config[field] > 0
 
 
 def test_registry_exposes_model_policy_fields() -> None:

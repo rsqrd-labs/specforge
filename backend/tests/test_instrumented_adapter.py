@@ -156,7 +156,7 @@ async def test_stream_records_exactly_one_generation_with_full_output() -> None:
         span_id="span-X",
         trace_id="trace-Y",
         provider="google",
-        model="gemini-3.5-flash",
+        model="gemini-3.6-flash",
         stage_type="harness",
         action="generate",
     )
@@ -174,7 +174,7 @@ async def test_stream_records_exactly_one_generation_with_full_output() -> None:
     assert kwargs["span_id"] == "span-X"
     assert kwargs["trace_id"] == "trace-Y"
     assert kwargs["provider"] == "google"
-    assert kwargs["model"] == "gemini-3.5-flash"
+    assert kwargs["model"] == "gemini-3.6-flash"
     assert kwargs["metadata"]["stage_type"] == "harness"
     assert kwargs["metadata"]["action"] == "generate"
     assert "latency_ms" in kwargs["metadata"]
@@ -358,6 +358,93 @@ async def test_wrapped_complete_exception_still_records_empty_output() -> None:
     mock_client.create_generation.assert_awaited_once()
     kwargs = mock_client.create_generation.await_args.kwargs
     assert kwargs["output"] == ""
+
+
+# ---------------------------------------------------------------------------
+# A throttled call is never billed by the provider, so it must not book cost
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_throttled_stream_books_no_cost() -> None:
+    """Regression: a 429 rejected before any token arrived was still recorded as
+    a tokenizer-estimated generation, inflating llm_cost_events with spend that
+    the provider never charged (a throttled 4-chunk tasks stage logged ~$0.48)."""
+    from services.llm.base import ProviderRateLimitError
+
+    err = ProviderRateLimitError("google", RuntimeError("429"), retry_after=40.0)
+    adapter = _FakeAdapter(stream_tokens=["never"], raise_during_stream=err)
+    wrapped = InstrumentedAdapter(
+        adapter,
+        provider="google",
+        model="gemini-3.6-flash",
+        stage_type="tasks",
+        action="generate",
+    )
+    mock_client = _mock_langfuse()
+
+    with patch.object(
+        langfuse_service, "get_langfuse_client", return_value=mock_client
+    ):
+        with pytest.raises(ProviderRateLimitError):
+            async for _ in wrapped.stream("sys", "user", 100):
+                pass
+
+    mock_client.create_generation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_throttled_complete_books_no_cost() -> None:
+    from services.llm.base import ProviderRateLimitError
+
+    err = ProviderRateLimitError("google", RuntimeError("429"), retry_after=40.0)
+    adapter = _FakeAdapter(raise_during_complete=err)
+    wrapped = InstrumentedAdapter(
+        adapter,
+        provider="google",
+        model="gemini-3.5-flash-lite",
+        stage_type="spec",
+        action="generate",
+    )
+    mock_client = _mock_langfuse()
+
+    with patch.object(
+        langfuse_service, "get_langfuse_client", return_value=mock_client
+    ):
+        with pytest.raises(ProviderRateLimitError):
+            await wrapped.complete("sys", "user", 10)
+
+    mock_client.create_generation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_throttle_after_partial_stream_still_books_the_consumed_tokens() -> None:
+    """Tokens that did arrive were generated and billed, so a mid-stream throttle
+    must still record them — only a rejection with nothing received is free."""
+    from services.llm.base import ProviderRateLimitError
+
+    err = ProviderRateLimitError("google", RuntimeError("429"))
+    adapter = _FakeAdapter(
+        stream_tokens=["real-1", "real-2", "boom"], raise_during_stream=err
+    )
+    wrapped = InstrumentedAdapter(
+        adapter,
+        provider="google",
+        model="gemini-3.6-flash",
+        stage_type="tasks",
+        action="generate",
+    )
+    mock_client = _mock_langfuse()
+
+    with patch.object(
+        langfuse_service, "get_langfuse_client", return_value=mock_client
+    ):
+        with pytest.raises(ProviderRateLimitError):
+            async for _ in wrapped.stream("sys", "user", 100):
+                pass
+
+    mock_client.create_generation.assert_awaited_once()
+    assert mock_client.create_generation.await_args.kwargs["output"] == "real-1real-2"
 
 
 @pytest.mark.asyncio

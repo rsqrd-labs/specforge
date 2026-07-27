@@ -40,7 +40,7 @@ from uuid import uuid4
 import structlog
 
 from services import langfuse_service
-from services.llm.base import BaseLLMAdapter
+from services.llm.base import BaseLLMAdapter, ProviderRateLimitError
 from services.llm.completion import LLMCompletionInfo
 from services.llm.cost_ledger import LLMCostContext, persist_cost_event
 from services.llm.prompt_cache import PromptCachePolicy
@@ -156,6 +156,12 @@ class InstrumentedAdapter(BaseLLMAdapter):
         first_event_latency_ms: int | None = None
         outcome = "failed"
         error_type: str | None = None
+        # A provider that throttled the call before emitting a single token never
+        # processed it and never bills for it. Booking a tokenizer-estimated row
+        # anyway inflates llm_cost_events (a throttled 4-chunk tasks stage logged
+        # ~$0.48 of spend that never happened) and pollutes the ledger that the
+        # output-budget evidence gate reads.
+        rejected_unbilled = False
         self._provider_request_id = str(uuid4())
         logger.info("llm.request_started", **self._request_log_fields())
         try:
@@ -169,6 +175,9 @@ class InstrumentedAdapter(BaseLLMAdapter):
                 yield token
         except Exception as exc:
             error_type = type(exc).__name__
+            rejected_unbilled = isinstance(exc, ProviderRateLimitError) and not (
+                accumulated
+            )
             record_provider_failure(self._provider, exc)
             raise
         else:
@@ -184,14 +193,15 @@ class InstrumentedAdapter(BaseLLMAdapter):
                 outcome=outcome,
                 error_type=error_type,
             )
-            await self._record_generation_bounded(
-                system=system,
-                user=user,
-                output="".join(accumulated),
-                start=start,
-                cache_policy=cache_policy,
-                first_event_latency_ms=first_event_latency_ms,
-            )
+            if not rejected_unbilled:
+                await self._record_generation_bounded(
+                    system=system,
+                    user=user,
+                    output="".join(accumulated),
+                    start=start,
+                    cache_policy=cache_policy,
+                    first_event_latency_ms=first_event_latency_ms,
+                )
 
     async def complete(
         self,
@@ -206,6 +216,7 @@ class InstrumentedAdapter(BaseLLMAdapter):
         response: str = ""
         outcome = "failed"
         error_type: str | None = None
+        rejected_unbilled = False  # see stream(): a throttled call is not billed
         self._provider_request_id = str(uuid4())
         logger.info("llm.request_started", **self._request_log_fields())
         try:
@@ -222,6 +233,7 @@ class InstrumentedAdapter(BaseLLMAdapter):
             return response
         except Exception as exc:
             error_type = type(exc).__name__
+            rejected_unbilled = isinstance(exc, ProviderRateLimitError)
             record_provider_failure(self._provider, exc)
             raise
         finally:
@@ -236,13 +248,14 @@ class InstrumentedAdapter(BaseLLMAdapter):
             )
             # response stays "" if the wrapped call raised; recording an empty
             # output preserves trace context without re-raising the error.
-            await self._record_generation_bounded(
-                system=system,
-                user=user,
-                output=response,
-                start=start,
-                cache_policy=cache_policy,
-            )
+            if not rejected_unbilled:
+                await self._record_generation_bounded(
+                    system=system,
+                    user=user,
+                    output=response,
+                    start=start,
+                    cache_policy=cache_policy,
+                )
 
     async def _record_generation_bounded(self, **kwargs: Any) -> None:
         """Keep optional observability off the provider cleanup critical path."""

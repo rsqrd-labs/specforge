@@ -237,8 +237,8 @@ def test_score_comment_omits_unknown_route() -> None:
     assert _score_comment("plan", "anthropic", None) == "plan · anthropic"
     assert _score_comment("tasks", None, "gpt-5.4-mini") == "tasks · gpt-5.4-mini"
     assert (
-        _score_comment("harness", "google", "gemini-3.5-flash")
-        == "harness · google/gemini-3.5-flash"
+        _score_comment("harness", "google", "gemini-3.6-flash")
+        == "harness · google/gemini-3.6-flash"
     )
 
 
@@ -741,7 +741,7 @@ async def test_run_eval_retries_tasks_with_compact_prompt_after_timeout() -> Non
     [
         ("anthropic", "claude-haiku-4-5-20251001"),
         ("openai", "gpt-5.4-mini"),
-        ("google", "gemini-3.1-flash-lite"),
+        ("google", "gemini-3.5-flash-lite"),
     ],
 )
 async def test_run_eval_uses_provider_specific_judge_model(

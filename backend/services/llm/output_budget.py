@@ -78,12 +78,27 @@ OUTPUT_TOKEN_BUDGETS: dict[str, int] = {
 
 # Per-(operation, provider) budget overrides — the Phase-4 right-sizing surface.
 #
-# EMPTY BY DESIGN. Add a key here ONLY after the ledger analysis clears the
-# promotion gate for that exact (operation, provider) pair (see module docstring
-# and docs/evals/OUTPUT_BUDGET_TUNING.md). Keys not present fall through to the
+# Add a REDUCTION here ONLY after the ledger analysis clears the promotion gate
+# for that exact (operation, provider) pair (see module docstring and
+# docs/evals/OUTPUT_BUDGET_TUNING.md). Keys not present fall through to the
 # per-operation default in OUTPUT_TOKEN_BUDGETS, so an unmeasured provider is
 # never silently shrunk.
-OUTPUT_TOKEN_BUDGET_OVERRIDES: dict[tuple[str, str], int] = {}
+#
+# The single entry below is an INCREASE, not a right-sizing reduction, and is
+# therefore outside the evidence gate (which only ever proposes reductions —
+# `recommend_output_budget` refuses to return a value >= the current budget).
+# Rationale: Gemini bills thought tokens against `max_output_tokens`, and on
+# Google `refine.focused` resolves to the MID entry (Gemini 3.6 Flash,
+# thinking_level="high") rather than to Flash-Lite — the cheap `small` tier is
+# unreachable for this operation because the Google tier policy is ("mid",
+# "strong"). At the 768-token cross-provider default a single thinking burst
+# consumes the entire budget and the call returns finish_reason=MAX_TOKENS with
+# empty text. 4096 leaves the thinking headroom that a focused patch needs while
+# staying far below the model's 64000 ceiling. Anthropic/OpenAI keep the 768
+# default: their focused-refine models are not billed this way.
+OUTPUT_TOKEN_BUDGET_OVERRIDES: dict[tuple[str, str], int] = {
+    ("refine.focused", "google"): 4096,
+}
 
 # Conservative absolute floors below which the *recommender* will never drop a
 # budget, regardless of observed p95. These backstop a pathological sample (e.g.

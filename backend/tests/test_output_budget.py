@@ -48,9 +48,28 @@ def test_resolve_output_budget_honors_override_then_clamps(monkeypatch) -> None:
     )
 
 
-def test_overrides_dict_ships_empty() -> None:
-    # The promotion surface must ship empty — no provider silently shrunk.
-    assert OUTPUT_TOKEN_BUDGET_OVERRIDES == {}
+def test_no_override_shrinks_a_budget_without_the_evidence_gate() -> None:
+    """The invariant this surface protects is that no provider is silently
+    *shrunk* below the per-operation default.
+
+    Reductions are the evidence-gated promotion path (``recommend_output_budget``
+    only ever proposes a value strictly below the current budget), so any entry
+    here that is smaller than its per-operation default would be an ungated
+    shrink. Increases are outside that gate and permitted: the only one today is
+    Gemini's ``refine.focused`` headroom, because Gemini bills thought tokens
+    against ``max_output_tokens`` (see the dict's comment).
+    """
+    for (operation, provider), budget in OUTPUT_TOKEN_BUDGET_OVERRIDES.items():
+        default = OUTPUT_TOKEN_BUDGETS[operation]
+        assert budget >= default, (
+            f"({operation}, {provider}) shrinks the budget {default} -> {budget} "
+            "without clearing the docs/evals/OUTPUT_BUDGET_TUNING.md gate"
+        )
+
+
+def test_google_focused_refine_is_the_only_shipped_override() -> None:
+    # Pin the shipped set so a future addition is a deliberate, reviewed edit.
+    assert OUTPUT_TOKEN_BUDGET_OVERRIDES == {("refine.focused", "google"): 4096}
 
 
 def test_build_eval_request_threads_provider_override(monkeypatch) -> None:

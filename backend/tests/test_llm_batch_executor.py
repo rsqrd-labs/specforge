@@ -105,7 +105,7 @@ async def test_failed_background_job_is_dead_lettered() -> None:
             await complete_background_llm(
                 operation="eval.score",
                 provider="google",
-                model="gemini-3.1-flash-lite",
+                model="gemini-3.5-flash-lite",
                 system="sys",
                 user="user",
                 max_tokens=100,
