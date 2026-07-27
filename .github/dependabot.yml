@@ -4,33 +4,54 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    groups:
+      github-actions:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: docker
     directory: "/backend"
     schedule:
       interval: weekly
+    groups:
+      backend-docker:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: docker
     directory: "/deploy/smee"
     schedule:
       interval: weekly
+    groups:
+      smee-docker:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: pip
     directory: "/backend"
     schedule:
       interval: weekly
+    groups:
+      backend-pip:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: npm
     directory: "/frontend"
     schedule:
       interval: weekly
+    groups:
+      frontend-npm:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: npm
     directory: "/apps/marketing"
     schedule:
       interval: weekly
+    groups:
+      marketing-npm:
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: npm
     directory: "/apps/marketing/sanity"
     schedule:
       interval: weekly
+    groups:
+      marketing-sanity-npm:
+        update-types: ["minor", "patch"]
