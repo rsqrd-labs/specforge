@@ -35,7 +35,7 @@ dependencies = [
     "sentry-sdk[fastapi]==2.*",
     "httpx==0.28.*",
     "python-multipart==0.0.*",
-    "langfuse>=2.60,<3",
+    "langfuse>=2.60,<5",
     "weasyprint==69.*",
     "jinja2==3.*",
     "pygments==2.*",
