@@ -5,7 +5,7 @@ def test_google_gemini3_config_includes_thinking_level() -> None:
     from services.llm.google_adapter import GoogleAdapter
 
     adapter = GoogleAdapter.__new__(GoogleAdapter)
-    adapter.model = "gemini-3.5-flash"
+    adapter.model = "gemini-3.6-flash"
     adapter._request_policy = {
         "adapter_api": "generate_content",
         "thinking_level": "high",
@@ -72,7 +72,7 @@ def test_core_stage_low_reasoning_reaches_provider_payloads(monkeypatch) -> None
     assert openai_request["reasoning"] == {"effort": "low", "summary": "auto"}
 
     google_adapter = GoogleAdapter.__new__(GoogleAdapter)
-    google_adapter.model = "gemini-3.5-flash"
+    google_adapter.model = "gemini-3.6-flash"
     google_adapter._request_policy = model_request_policy(
         "google",
         google_adapter.model,

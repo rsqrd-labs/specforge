@@ -45,7 +45,7 @@ CORE_GENERATION_OPERATIONS = (
 _LOW_REASONING_CORE_MODELS = {
     ("anthropic", "claude-haiku-4-5-20251001"),
     ("openai", "gpt-5.4-mini"),
-    ("google", "gemini-3.5-flash"),
+    ("google", "gemini-3.6-flash"),
 }
 
 # --- Core-generation tier ladder (issue #26 Phase 5b) -------------------------
@@ -72,6 +72,11 @@ _LOW_REASONING_CORE_MODELS = {
 #     ``mid`` (Flash). Its ``strong`` escalation has no *active* model today
 #     (Pro Preview is preview-only), so a failure surfaces directly; the ladder
 #     still declares ``strong`` as the escalation slot for when one ships.
+#     NOTE: Google is now the platform's primary provider, so this "no active
+#     strong tier" is load-bearing rather than theoretical — a core-gen failure
+#     on Flash is surfaced, not retried. ``_runtime_fallback_route`` handles the
+#     unresolvable escalation by returning None (it catches ``LLMRoutingError``),
+#     so this degrades cleanly instead of raising.
 #
 # Lowering any provider's floor (e.g. Google → ``small``) changes which model
 # actually runs and therefore requires the Phase-5 golden-corpus live gate
@@ -500,8 +505,8 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
     ),
     ModelCatalogEntry(
         provider="google",
-        model_id="gemini-3.5-flash",
-        display_name="Gemini 3.5 Flash",
+        model_id="gemini-3.6-flash",
+        display_name="Gemini 3.6 Flash",
         # Flash is Google's fast/cheap core-generation model, so it sits on
         # the mid tier — the primary core-generation route. Google has no
         # active strong-tier escalation model; a runtime failure surfaces
@@ -516,7 +521,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         adapter_api="generate_content",
         input_cost_per_million=1.5,
         cached_input_cost_per_million=0.15,
-        output_cost_per_million=9.0,
+        output_cost_per_million=7.5,
         max_context_tokens=1_048_576,
         # 64K cross-provider core-gen ceiling. Gemini Flash caps output at
         # 65536, so 64000 sits just below the real cap (no >cap max_tokens 400)
@@ -536,31 +541,95 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
             "storyboard.generate",
         ),
         supports_thinking=True,
+        # Unchanged from the Gemini 3.5 Flash entry this supersedes, so the
+        # effective per-operation thinking policy does not drift with the model
+        # swap: core generation is lowered to "low" by
+        # _LOW_REASONING_CORE_MODELS when core_generation_low_reasoning is on
+        # (the shipped default), and every other operation keeps "high".
         thinking_level="high",
         rollout_notes=(
             "Stable Gemini 3-family core ASDD generation default and "
-            "storyboard primary on Google (no sub-Flash core-gen model)."
+            "storyboard primary on Google (no sub-Flash core-gen model). "
+            "Platform core-generation primary since the Gemini cutover."
         ),
         routing_priority=1,
+    ),
+    ModelCatalogEntry(
+        provider="google",
+        model_id="gemini-3.5-flash-lite",
+        display_name="Gemini 3.5 Flash-Lite",
+        tier="small",
+        status="active",
+        adapter_api="generate_content",
+        # Real published rates. The superseded 3.1 Flash-Lite entry carried
+        # None for all three, which makes estimate_cost_usd() return None and
+        # silently records a zero-cost ledger row for every judge/eval call —
+        # harmless while Google was unconfigured, wrong now that it is the
+        # platform provider and owns the whole judge/eval path.
+        input_cost_per_million=0.30,
+        cached_input_cost_per_million=0.03,
+        output_cost_per_million=2.50,
+        max_context_tokens=1_048_576,
+        default_max_output_tokens=8192,
+        recommended_operations=("refine.focused", "summary.create", "eval.score"),
+        default_operations=("refine.focused", "summary.create", "eval.score"),
+        supports_thinking=True,
+        # "minimal" (this model's own documented default), NOT "low". Gemini
+        # bills thought tokens against max_output_tokens, and every call site
+        # that lands here runs on a tight budget (eval.score 1024,
+        # call_judge_model 2048, summary.create 2048). At a higher thinking
+        # level a reasoning burst consumes the whole budget and the response
+        # comes back with finish_reason=MAX_TOKENS and empty text. Minimal is
+        # also what Google recommends for routing/classification/extraction —
+        # exactly what these judge call sites do.
+        thinking_level="minimal",
+        rollout_notes="Stable Gemini 3-family lightweight routing and judge model.",
+        routing_priority=30,
+    ),
+    ModelCatalogEntry(
+        provider="google",
+        model_id="gemini-3.5-flash",
+        display_name="Gemini 3.5 Flash",
+        tier="mid",
+        status="deprecated",
+        adapter_api="generate_content",
+        input_cost_per_million=1.5,
+        cached_input_cost_per_million=0.15,
+        output_cost_per_million=9.0,
+        max_context_tokens=1_048_576,
+        default_max_output_tokens=64000,
+        recommended_operations=("summary.create",),
+        default_operations=(),
+        supports_thinking=True,
+        thinking_level="high",
+        rollout_notes=(
+            "Superseded by Gemini 3.6 Flash. Retained (deprecate-don't-delete) "
+            "so historical cost-ledger and stage rows still resolve a catalog "
+            "entry and can be priced."
+        ),
+        routing_priority=500,
     ),
     ModelCatalogEntry(
         provider="google",
         model_id="gemini-3.1-flash-lite",
         display_name="Gemini 3.1 Flash-Lite",
         tier="small",
-        status="active",
+        status="deprecated",
         adapter_api="generate_content",
         input_cost_per_million=None,
         cached_input_cost_per_million=None,
         output_cost_per_million=None,
         max_context_tokens=1_048_576,
         default_max_output_tokens=4096,
-        recommended_operations=("refine.focused", "summary.create", "eval.score"),
-        default_operations=("refine.focused", "summary.create", "eval.score"),
+        recommended_operations=("summary.create",),
+        default_operations=(),
         supports_thinking=True,
         thinking_level="low",
-        rollout_notes="Stable Gemini 3-family lightweight routing and judge model.",
-        routing_priority=30,
+        rollout_notes=(
+            "Superseded by Gemini 3.5 Flash-Lite. Retained "
+            "(deprecate-don't-delete) for historical row resolution."
+        ),
+        routing_priority=500,
     ),
     ModelCatalogEntry(
         provider="google",

@@ -68,7 +68,7 @@ def _make_openai_adapter() -> OpenAIAdapter:
 
 def _make_google_adapter() -> GoogleAdapter:
     adapter = GoogleAdapter.__new__(GoogleAdapter)
-    adapter.model = "gemini-3.5-flash"
+    adapter.model = "gemini-3.6-flash"
     adapter.last_completion = None
     from services.llm.model_catalog import model_request_policy
 

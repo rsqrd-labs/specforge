@@ -84,7 +84,7 @@ def _make_primary_route(provider: str = "anthropic") -> LLMRoute:
     if provider == "anthropic":
         model, tier, fallback = "claude-haiku-4-5-20251001", "small", "mid"
     else:  # google
-        model, tier, fallback = "gemini-3.5-flash", "mid", "strong"
+        model, tier, fallback = "gemini-3.6-flash", "mid", "strong"
     return LLMRoute(
         provider=provider,
         model=model,
@@ -170,7 +170,7 @@ def test_resolve_primary_route_google_floors_at_mid(monkeypatch):
     monkeypatch.setattr(provider_status, "can_route", lambda *_args: True)
     monkeypatch.setattr(provider_status, "is_provider_configured", lambda *_args: True)
     route = _resolve_storyboard_primary_route(_make_source("google"))
-    assert route.model == "gemini-3.5-flash"
+    assert route.model == "gemini-3.6-flash"
     assert route.model_tier == "mid"
     assert route.fallback_tier == "strong"
 

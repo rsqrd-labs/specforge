@@ -236,7 +236,7 @@ def test_output_budgets_carry_reasoning_headroom() -> None:
 
 
 def test_resolve_output_budget_clamps_to_model_ceiling() -> None:
-    # Gemini Flash-Lite's catalog ceiling (4096) is below the spec budget — the
+    # Gemini Flash-Lite's catalog ceiling (8192) is below the spec budget — the
     # budget is clamped down to the model's hard ceiling. (The core-gen ceilings
     # across all three providers were raised to 64K — below every current-gen
     # model's real output cap — so the cheap primaries are never clamped and the
@@ -245,9 +245,9 @@ def test_resolve_output_budget_clamps_to_model_ceiling() -> None:
         resolve_output_budget(
             "spec.generate",
             provider="google",
-            model="gemini-3.1-flash-lite",
+            model="gemini-3.5-flash-lite",
         )
-        == 4096
+        == 8192
     )
     # Opus's ceiling (64000) is above the spec budget — budget wins.
     assert (

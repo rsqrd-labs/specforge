@@ -22,7 +22,7 @@ parallel dict to drift.
 | --------- | ------------------------------ | ------------------------- | ---------- |
 | anthropic | `(small, mid, strong)`         | Haiku 4.5 (`small`)       | Sonnet 4.6 (`mid`) → Opus 4.8 (`strong`) |
 | openai    | `(mini, mid, strong)`          | GPT-5.4 Mini (`mini`)     | GPT-5.4 (`mid`) → GPT-5.5 (`strong`) |
-| google    | `(mid, strong)`                | Gemini 3.5 Flash (`mid`)  | (`strong` slot — no active model; surfaces directly) |
+| google    | `(mid, strong)`                | Gemini 3.6 Flash (`mid`)  | (`strong` slot — no active model; surfaces directly) |
 
 **"How far below mid is safe" is a per-provider decision, documented here:**
 
@@ -88,7 +88,7 @@ Run this review **quarterly** and **on any provider model release**:
 ## 4. Deferred (not built): cheapest-provider-first for platform keys
 
 The plan's third Phase-5b lever — routing *platform-key* (non-BYO) core generation
-to the cheapest-mid **provider** (Gemini 3.5 Flash, the cheapest mid by output)
+to the cheapest-mid **provider** (Gemini 3.6 Flash, the cheapest mid by output)
 rather than the user's nominal provider — is **intentionally not implemented**. It
 changes *which provider* a user's output comes from, so it ships only behind both
 golden-corpus quality parity **and** an explicit product decision. BYO-key users

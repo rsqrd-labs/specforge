@@ -27,7 +27,7 @@ def test_catalog_validates_at_startup() -> None:
     [
         ("anthropic", "claude-haiku-4-5-20251001"),
         ("openai", "gpt-5.4-mini"),
-        ("google", "gemini-3.5-flash"),
+        ("google", "gemini-3.6-flash"),
     ],
 )
 def test_core_generation_defaults_are_cheap_primary_models(
@@ -46,6 +46,11 @@ def test_no_deprecated_model_is_an_active_default() -> None:
         "o1-preview",
         "gemini-1.5-pro",
         "gemini-1.5-flash",
+        # Superseded by the Gemini 3.6 Flash / 3.5 Flash-Lite cutover. Retained
+        # in the catalog (deprecate-don't-delete) so historical cost-ledger and
+        # stage rows still resolve an entry, but never routable again.
+        "gemini-3.5-flash",
+        "gemini-3.1-flash-lite",
     }
 
     for entry in MODEL_CATALOG:
@@ -88,12 +93,64 @@ def test_stage_manager_policy_derives_from_catalog_ladder() -> None:
         )
 
 
+def test_google_judge_model_is_flash_lite_not_the_core_gen_primary() -> None:
+    """The Google judge/eval path must stay on the cheap small tier.
+
+    ``provider_config.JUDGE_MODELS`` is derived from
+    ``default_model_for_operation(provider, "eval.score")``. If the mid entry
+    (3.6 Flash) ever declares ``eval.score``, routing_priority 1 would beat
+    Flash-Lite's 30 and every judge/critic/eval call would silently move onto
+    the 5x-more-expensive core-generation model.
+    """
+    from services.llm.provider_config import JUDGE_MODELS
+
+    assert JUDGE_MODELS["google"] == "gemini-3.5-flash-lite"
+    flash = model_entry("google", "gemini-3.6-flash")
+    assert "eval.score" not in flash.recommended_operations
+    assert "summary.create" not in flash.recommended_operations
+
+
+def test_google_flash_lite_uses_minimal_thinking_for_tight_judge_budgets() -> None:
+    """Gemini bills thought tokens against ``max_output_tokens``.
+
+    Every operation that lands on Flash-Lite runs on a tight budget
+    (eval.score 1024, call_judge_model 2048, summary.create 2048). A higher
+    thinking level lets a reasoning burst consume the whole budget and return
+    finish_reason=MAX_TOKENS with empty text.
+    """
+    assert model_entry("google", "gemini-3.5-flash-lite").thinking_level == "minimal"
+    for operation in ("eval.score", "summary.create", None):
+        policy = model_request_policy("google", "gemini-3.5-flash-lite", operation)
+        assert policy["thinking_level"] == "minimal"
+
+
+def test_google_focused_refine_budget_clears_thinking_overhead() -> None:
+    """On Google, ``refine.focused`` resolves to the MID entry (3.6 Flash at
+    thinking_level="high"), not to Flash-Lite — the ``small`` tier is
+    unreachable because Google's tier policy is ("mid", "strong").
+
+    At the 768-token cross-provider default, thinking alone exhausts the budget.
+    The per-(operation, provider) override must keep real headroom, and must not
+    leak onto the other providers, whose refine models are not billed this way.
+    """
+    from services.llm.output_budget import resolve_output_budget
+
+    google_budget = resolve_output_budget(
+        "refine.focused", provider="google", model="gemini-3.6-flash"
+    )
+    assert google_budget >= 4096
+    assert (
+        resolve_output_budget("refine.focused", provider="openai", model="gpt-5.4-mini")
+        == 768
+    )
+
+
 def test_google_floor_stays_mid_flash_lite_is_not_a_core_gen_default() -> None:
     # Flash-Lite (small) exists and is active, but is deliberately NOT a core-gen
     # default — Google's documented floor is mid (Flash). Lowering it is a routing
     # change gated by the Phase-5 live eval, not a Phase-5b edit.
     assert core_generation_ladder("google")[0] == "mid"
-    flash_lite = model_entry("google", "gemini-3.1-flash-lite")
+    flash_lite = model_entry("google", "gemini-3.5-flash-lite")
     assert flash_lite.tier == "small"
     assert not any(
         op in flash_lite.default_operations for op in CORE_GENERATION_OPERATIONS
@@ -154,7 +211,7 @@ def test_frontier_adapter_policy_is_explicit() -> None:
         "minimum_cacheable_input_tokens": 1024,
     }
     assert (
-        model_request_policy("google", "gemini-3.5-flash")["thinking_level"] == "high"
+        model_request_policy("google", "gemini-3.6-flash")["thinking_level"] == "high"
     )
     assert (
         model_request_policy("anthropic", "claude-opus-4-8")["reasoning_effort"]
@@ -184,7 +241,7 @@ def test_core_generation_low_reasoning_is_flagged_and_operation_scoped(
         == "low"
     )
     assert (
-        model_request_policy("google", "gemini-3.5-flash", "harness.generate")[
+        model_request_policy("google", "gemini-3.6-flash", "harness.generate")[
             "thinking_level"
         ]
         == "low"
@@ -205,7 +262,7 @@ def test_core_generation_low_reasoning_is_flagged_and_operation_scoped(
         == "medium"
     )
     assert (
-        model_request_policy("google", "gemini-3.5-flash", "storyboard.generate")[
+        model_request_policy("google", "gemini-3.6-flash", "storyboard.generate")[
             "thinking_level"
         ]
         == "high"
@@ -234,7 +291,7 @@ def test_core_generation_low_reasoning_flag_off_preserves_catalog_policy(
         == "medium"
     )
     assert (
-        model_request_policy("google", "gemini-3.5-flash", "spec.generate")[
+        model_request_policy("google", "gemini-3.6-flash", "spec.generate")[
             "thinking_level"
         ]
         == "high"

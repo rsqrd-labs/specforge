@@ -33,7 +33,7 @@ def test_routes_to_active_operation_default_for_tier_and_operation() -> None:
     )
 
     assert route.provider == "google"
-    assert route.model == "gemini-3.5-flash"
+    assert route.model == "gemini-3.6-flash"
     assert route.model_tier == "mid"
     assert route.cross_provider_fallback is False
     assert route.selection_reason == "active_default"
@@ -123,7 +123,7 @@ def test_preferred_model_must_support_operation() -> None:
     [
         ("anthropic", "small", "claude-haiku-4-5-20251001"),
         ("openai", "mini", "gpt-5.4-mini"),
-        ("google", "mid", "gemini-3.5-flash"),
+        ("google", "mid", "gemini-3.6-flash"),
     ],
 )
 def test_core_generation_routes_use_cheap_primary_defaults(

@@ -34,7 +34,7 @@ def test_get_llm_openai_returns_adapter() -> None:
 
 
 def test_get_llm_google_returns_adapter() -> None:
-    adapter = get_llm("google", "gemini-3.5-flash")
+    adapter = get_llm("google", "gemini-3.6-flash")
     assert adapter.__class__.__name__ == "GoogleAdapter"
 
 

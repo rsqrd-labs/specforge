@@ -151,6 +151,102 @@ def test_google_wrap_other_error_stays_plain() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Gemini carries its retry hint in the error BODY, never in a Retry-After header
+# ---------------------------------------------------------------------------
+
+
+def _gemini_429(*, retry_delay: str | None, message: str = "quota exceeded"):
+    """A 429 shaped exactly like a live generativelanguage.googleapis.com reply."""
+    entries: list[dict] = [
+        {
+            "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+            "violations": [{"quotaValue": "5"}],
+        }
+    ]
+    if retry_delay is not None:
+        entries.append(
+            {
+                "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                "retryDelay": retry_delay,
+            }
+        )
+    return SimpleNamespace(
+        code=429,
+        message=message,
+        details={
+            "error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "details": entries}
+        },
+        response=_resp(429),  # no Retry-After header — Gemini never sets one
+    )
+
+
+def test_google_reads_retry_delay_from_structured_error_body() -> None:
+    """Regression: Gemini sets no Retry-After header, so the header-only reader
+    returned None and the pipeline retried after ~50ms against a quota window
+    that stays closed for 40s — burning every retry and failing the stage."""
+    from services.llm.google_adapter import _wrap_google_error
+
+    wrapped = _wrap_google_error(_gemini_429(retry_delay="40s"))  # type: ignore[arg-type]
+    assert isinstance(wrapped, ProviderRateLimitError)
+    assert wrapped.retry_after == 40.0
+
+
+def test_google_reads_fractional_retry_delay() -> None:
+    from services.llm.google_adapter import _wrap_google_error
+
+    wrapped = _wrap_google_error(_gemini_429(retry_delay="1.5s"))  # type: ignore[arg-type]
+    assert wrapped.retry_after == 1.5  # type: ignore[union-attr]
+
+
+def test_google_falls_back_to_the_delay_restated_in_the_message() -> None:
+    from services.llm.google_adapter import _wrap_google_error
+
+    exc = _gemini_429(
+        retry_delay=None,
+        message="You exceeded your current quota. Please retry in 40.063716105s.",
+    )
+    wrapped = _wrap_google_error(exc)  # type: ignore[arg-type]
+    assert wrapped.retry_after == pytest.approx(40.063716105)  # type: ignore[union-attr]
+
+
+def test_google_retry_after_header_wins_when_present() -> None:
+    from services.llm.google_adapter import _wrap_google_error
+
+    exc = _gemini_429(retry_delay="40s")
+    exc.response = _resp(429, retry_after="7")
+    wrapped = _wrap_google_error(exc)  # type: ignore[arg-type]
+    assert wrapped.retry_after == 7.0  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        None,
+        "not-a-dict",
+        {"error": "not-a-dict"},
+        {"error": {"details": "not-a-list"}},
+        {"error": {"details": [{"@type": "other.Type", "retryDelay": "9s"}]}},
+        {"error": {"details": [{"@type": "google.rpc.RetryInfo"}]}},
+        {
+            "error": {
+                "details": [{"@type": "google.rpc.RetryInfo", "retryDelay": "soon"}]
+            }
+        },
+    ],
+)
+def test_google_malformed_hint_degrades_to_backoff(details) -> None:
+    """A missing or malformed hint must never raise — it falls back to backoff."""
+    from services.llm.google_adapter import _wrap_google_error
+
+    exc = SimpleNamespace(
+        code=429, message="throttled", details=details, response=_resp(429)
+    )
+    wrapped = _wrap_google_error(exc)  # type: ignore[arg-type]
+    assert isinstance(wrapped, ProviderRateLimitError)
+    assert wrapped.retry_after is None
+
+
+# ---------------------------------------------------------------------------
 # RL-5 — end-to-end adapter streaming surfaces ProviderRateLimitError
 # ---------------------------------------------------------------------------
 
@@ -254,12 +350,31 @@ def test_normal_error_still_trips_circuit() -> None:
 
 
 def test_retry_delay_honors_retry_after(monkeypatch) -> None:
+    from config import settings
     from services.pipeline import stage_manager as sm
 
-    # Honored as-is when below the absolute clamp.
-    assert sm._rate_limit_retry_delay(0, 8.0) == 8.0
+    monkeypatch.setattr(settings, "provider_rate_limit_backoff_base_seconds", 2.0)
+
+    # The hint is always waited out in full; a bounded additive jitter is layered
+    # on top so parallel chunks handed the same hint do not wake in lockstep.
+    for _ in range(50):
+        delay = sm._rate_limit_retry_delay(0, 8.0)
+        assert 8.0 <= delay <= 10.0
     # Clamped to the absolute cap for a pathological value.
     assert sm._rate_limit_retry_delay(0, 10_000.0) == sm._RATE_LIMIT_RETRY_AFTER_CAP
+
+
+def test_retry_delay_hint_jitter_desynchronizes_parallel_chunks(monkeypatch) -> None:
+    """Regression: four tasks chunks are throttled within milliseconds of each
+    other and are handed near-identical hints. Returning the hint verbatim wakes
+    them simultaneously and re-collides on the same quota."""
+    from config import settings
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(settings, "provider_rate_limit_backoff_base_seconds", 2.0)
+
+    delays = {sm._rate_limit_retry_delay(0, 40.0) for _ in range(40)}
+    assert len(delays) > 1
 
 
 def test_retry_delay_backoff_within_ceiling(monkeypatch) -> None:
@@ -268,9 +383,24 @@ def test_retry_delay_backoff_within_ceiling(monkeypatch) -> None:
 
     monkeypatch.setattr(settings, "provider_rate_limit_backoff_base_seconds", 2.0)
     monkeypatch.setattr(settings, "provider_rate_limit_backoff_max_seconds", 30.0)
-    # No hint -> exponential backoff with full jitter; always within [0, ceiling].
+    # No hint -> exponential backoff with equal jitter: within [ceiling/2, ceiling].
     for attempt in range(5):
         ceiling = min(2.0 * (2**attempt), 30.0)
         for _ in range(20):
             delay = sm._rate_limit_retry_delay(attempt, None)
-            assert 0.0 <= delay <= ceiling
+            assert ceiling / 2.0 <= delay <= ceiling
+
+
+def test_retry_delay_never_retries_immediately(monkeypatch) -> None:
+    """Regression: full jitter over [0, ceiling] returned delays as small as
+    0.05s, re-firing inside the provider's still-closed quota window and burning
+    the whole retry budget in a few seconds."""
+    from config import settings
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(settings, "provider_rate_limit_backoff_base_seconds", 2.0)
+    monkeypatch.setattr(settings, "provider_rate_limit_backoff_max_seconds", 30.0)
+
+    for attempt in range(4):
+        for _ in range(200):
+            assert sm._rate_limit_retry_delay(attempt, None) >= 1.0

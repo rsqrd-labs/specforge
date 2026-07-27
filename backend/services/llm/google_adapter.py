@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncGenerator
 
 import httpx
@@ -25,6 +26,52 @@ from services.llm.prompt_cache import PromptCachePolicy
 _DEFAULT_TIMEOUT_MS = 300_000  # 5 minutes
 
 
+# Gemini never sets a ``Retry-After`` HTTP header on a 429. It returns the wait
+# as a google.rpc.RetryInfo entry inside the JSON error body, and restates it in
+# the human-readable message. Both forms are read below, because discarding the
+# hint makes every retry fire inside the still-closed quota window and burns the
+# whole retry budget in seconds (the generation then fails with the sibling
+# chunks' paid-for output thrown away).
+_RETRY_INFO_TYPE_SUFFIX = "google.rpc.RetryInfo"
+_RETRY_DELAY_RE = re.compile(r"retry in\s+([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE)
+_DURATION_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*s\s*$", re.IGNORECASE)
+
+
+def _google_retry_after(exc: genai_errors.APIError) -> float | None:
+    """Seconds Google asked us to wait before retrying, or ``None``.
+
+    Tries, in order: the standard ``Retry-After`` header (never seen from Gemini
+    today, but free), the structured ``RetryInfo.retryDelay`` in the error body,
+    and finally the delay restated in the error message. Purely advisory — any
+    malformed or missing hint returns ``None`` and the caller falls back to
+    exponential backoff. Never raises.
+    """
+    header_hint = extract_retry_after(exc)
+    if header_hint is not None:
+        return header_hint
+
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict):
+        error_block = details.get("error")
+        entries = error_block.get("details") if isinstance(error_block, dict) else None
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                if not str(entry.get("@type", "")).endswith(_RETRY_INFO_TYPE_SUFFIX):
+                    continue
+                match = _DURATION_RE.match(str(entry.get("retryDelay", "")))
+                if match:
+                    return float(match.group(1))
+
+    message = getattr(exc, "message", None)
+    if isinstance(message, str):
+        match = _RETRY_DELAY_RE.search(message)
+        if match:
+            return float(match.group(1))
+    return None
+
+
 def _wrap_google_error(exc: genai_errors.APIError) -> ProviderError:
     """Map a Google genai SDK error to the right ProviderError subclass (F2).
 
@@ -35,7 +82,7 @@ def _wrap_google_error(exc: genai_errors.APIError) -> ProviderError:
     """
     if classify_provider_status(exc) in RATE_LIMIT_STATUS_CODES:
         return ProviderRateLimitError(
-            "google", exc, retry_after=extract_retry_after(exc)
+            "google", exc, retry_after=_google_retry_after(exc)
         )
     return ProviderError("google", exc)
 
