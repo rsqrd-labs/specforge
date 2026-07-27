@@ -6,7 +6,7 @@ gunicorn==23.*
 
 # Database
 sqlalchemy[asyncio]==2.0.*
-alembic==1.14.*
+alembic>=1.14,<1.19
 asyncpg==0.30.*
 supabase==2.*
 
