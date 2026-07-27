@@ -7,7 +7,7 @@ gunicorn==23.*
 # Database
 sqlalchemy[asyncio]==2.0.*
 alembic==1.14.*
-asyncpg==0.30.*
+asyncpg>=0.30,<0.32
 supabase==2.*
 
 # Validation and Config

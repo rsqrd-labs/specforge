@@ -10,7 +10,7 @@ dependencies = [
     "gunicorn==23.*",
     "sqlalchemy[asyncio]==2.0.*",
     "alembic==1.14.*",
-    "asyncpg==0.30.*",
+    "asyncpg>=0.30,<0.32",
     "supabase==2.*",
     "pydantic==2.*",
     "pydantic-settings==2.*",
