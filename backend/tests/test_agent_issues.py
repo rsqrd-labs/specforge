@@ -152,6 +152,32 @@ def test_build_agents_md_fresh_file_wraps_in_markers() -> None:
     assert "T-001: First" in out and "T-002: Second" in out
 
 
+def test_build_agents_md_includes_efficient_context_use_section() -> None:
+    out = agents_md_builder.build_agents_md(_STAGES, existing=None)
+    assert "## Efficient context use" in out
+    assert 'grep -n "^### T-" TASKS.md' in out
+    assert "anchors are a starting point, not a ceiling" in out
+    assert "Don't invent a function, method, config key, or file path" in out
+
+
+def test_build_agents_md_includes_code_quality_section() -> None:
+    out = agents_md_builder.build_agents_md(_STAGES, existing=None)
+    assert "## Code quality" in out
+    assert "Comment why, never what" in out
+    assert "No `TODO`/`pass`/stub bodies" in out
+    assert "confirm its actual signature in the installed version" in out
+
+
+def test_build_agents_md_validation_commands_has_executable_disclaimer() -> None:
+    out = agents_md_builder.build_agents_md(_STAGES, existing=None)
+    disclaimer = "Only the commands rendered above are executable."
+    assert disclaimer in out
+    vc_idx = out.index("## Validation commands")
+    disclaimer_idx = out.index(disclaimer)
+    task_workflow_idx = out.index("## Task workflow")
+    assert vc_idx < disclaimer_idx < task_workflow_idx
+
+
 def test_agents_md_never_clobbers_existing_content() -> None:
     """Named acceptance test: a file with user content around a managed block —
     regenerate; the user content must be intact and the block refreshed."""

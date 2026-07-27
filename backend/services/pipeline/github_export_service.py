@@ -102,7 +102,11 @@ from services.observability import (
     github_audit,
 )
 from services.pipeline import agent_manual_service, demo_day_verdict
-from services.pipeline.export_service import ExportNotReadyError, parse_harness_files
+from services.pipeline.export_service import (
+    ExportNotReadyError,
+    _redact_stage_content,
+    parse_harness_files,
+)
 from services.security import key_vault
 
 logger = logging.getLogger(__name__)
@@ -734,7 +738,11 @@ async def _write_pr_with_tests(
 
     # 1. Docs → default branch (establishes `main` on a fresh, empty repo).
     docs = {
-        filename: stages[stage_type].content or ""
+        filename: _redact_stage_content(
+            stages[stage_type].content or "",
+            workspace_id=workspace.id,
+            file_path=filename,
+        )
         for stage_type, filename in _STAGE_FILES.items()
     }
     docs_message = f"docs: Thought2Build spec — {workspace.name}"
@@ -759,7 +767,9 @@ async def _write_pr_with_tests(
     await db.commit()
 
     # 4. Harness contracts + CI workflow + per-task red stubs → the branch.
-    harness_files = parse_harness_files(stages["harness"].content or "")
+    harness_files = parse_harness_files(
+        stages["harness"].content or "", workspace_id=workspace.id
+    )
     stacks = pr_export_builder.detect_stacks(
         stages["plan"].content or "", harness_files
     )
@@ -1367,7 +1377,15 @@ def _build_file_map(
     """
     files: dict[str, str] = {}
     for stage_type, filename in _STAGE_FILES.items():
-        files[filename] = stages[stage_type].content or ""
-    harness_files = parse_harness_files(stages["harness"].content or "")
+        content = stages[stage_type].content or ""
+        if workspace is not None:
+            content = _redact_stage_content(
+                content, workspace_id=workspace.id, file_path=filename
+            )
+        files[filename] = content
+    harness_files = parse_harness_files(
+        stages["harness"].content or "",
+        workspace_id=workspace.id if workspace is not None else None,
+    )
     files.update(harness_files)
     return files
