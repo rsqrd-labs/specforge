@@ -86,6 +86,10 @@ _DEMO_DAY_STAGE_KEEP_SECTIONS: dict[str, list[str]] = {
         "## Requirement Traceability Matrix",
         "## Interface Contracts",
         "## Data Model and Persistence",
+        # The harness cannot write correct boundary mocks or fixtures for an
+        # integration it never sees, so the REAL/MOCKED stance has to survive
+        # compression into the downstream harness/tasks prompts.
+        "## External Integrations and Secrets",
         "## Security Architecture",
     ],
     "harness": [

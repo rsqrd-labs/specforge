@@ -1,15 +1,20 @@
-"""Demo Day construction-verdict orchestration over the persisted stages.
+"""Construction-verdict orchestration over the persisted stages (both modes).
 
-A thin DB-aware layer over the pure, zero-LLM linter
-(:mod:`services.pipeline.demo_day_plan_linter`): it reads the four stage
-contents/versions off the workspace, runs ``verify_construction``, and persists
-the verdict to ``workspaces.construction_verdict`` (plan §7.2).
+A thin DB-aware layer over the pure, zero-LLM linters — Demo Day's
+(:mod:`services.pipeline.demo_day_plan_linter`) and standard mode's
+(:mod:`services.pipeline.standard_plan_linter`). It reads the four stage
+contents/versions off the workspace, dispatches on ``workspace.mode``, and
+persists the verdict to ``workspaces.construction_verdict``.
 
-Kept separate from the linter (which stays pure / ORM-free so it is trivially
-unit-testable) and from ``stage_manager`` (so ``export_service`` can reuse the
-export-time staleness re-run without importing the whole generation pipeline —
-avoiding an import cycle). Verification is advisory-only and never invokes the
-generation machinery.
+Kept separate from the linters (which stay pure / ORM-free / settings-free so
+they are trivially unit-testable and safe on the CPU-offload pool) and from
+``stage_manager`` (so ``export_service`` can reuse the export-time staleness
+re-run without importing the whole generation pipeline — avoiding an import
+cycle). This module is the ONLY place ``settings`` is read on the verdict path;
+the enforcement flags are passed down as parameters.
+
+Verification is advisory-only end to end: it never blocks a generation, never
+invokes the generation machinery, and never fails an export.
 """
 
 from __future__ import annotations
@@ -18,13 +23,15 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import settings
 from models import Stage, Workspace
-from services.pipeline.demo_day_plan_linter import (
+from services.pipeline import standard_plan_linter
+from services.pipeline.construction_checks import (
     STAGE_TYPES,
     ConstructionVerdict,
     is_verdict_stale,
-    verify_construction,
 )
+from services.pipeline.demo_day_plan_linter import verify_construction
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +63,29 @@ def compute_verdict(
     workspace: Workspace,
     stages: dict[str, Stage],
 ) -> ConstructionVerdict:
-    """Run the zero-LLM linter over the workspace's four stage contents."""
-    return verify_construction(
-        spec=stages["spec"].content or "",
-        plan=stages["plan"].content or "",
-        harness=stages["harness"].content or "",
-        tasks=stages["tasks"].content or "",
-        time_budget_minutes=workspace.time_budget_minutes,
-        stage_versions=current_versions(stages),
+    """Run the mode-appropriate zero-LLM linter over the four stage contents.
+
+    Both linters return the same ``ConstructionVerdict`` shape, so one persisted
+    column, one report writer, and one frontend renderer serve both modes. The
+    enforcement flags are read here (the linters stay settings-free) and decide
+    only whether a check may flip ``verified`` — every check runs and reports its
+    gaps either way.
+    """
+    contents = {
+        stage_type: (stages[stage_type].content or "") for stage_type in STAGE_TYPES
+    }
+    versions = current_versions(stages)
+    if getattr(workspace, "mode", "standard") == "demo_day":
+        return verify_construction(
+            **contents,
+            time_budget_minutes=workspace.time_budget_minutes,
+            stage_versions=versions,
+            enforce_plan_coverage=settings.demo_day_plan_coverage_enforced,
+        )
+    return standard_plan_linter.verify_construction(
+        **contents,
+        stage_versions=versions,
+        enforced=settings.standard_construction_verifier_enforced,
     )
 
 
@@ -75,9 +97,13 @@ async def compute_verdict_async(
 
     ``verify_construction`` cross-joins regex/line passes over ALL FOUR full
     stage documents — the largest combined CPU payload on the pipeline — so on
-    the demo-day verifier and the export staleness re-run it is dispatched to
+    the post-tasks verifier and the export staleness re-run it is dispatched to
     the dedicated CPU pool (sized by the combined artifact length; small
     packages run inline). Result object is identical to ``compute_verdict``.
+
+    The offload matters MORE for standard mode than for Demo Day: a standard
+    package carries a 24-section plan and a full harness, several times the
+    combined bytes of a lean ≤5-hour one.
     """
     from services.cpu_offload import run_cpu_bound
 
@@ -105,9 +131,13 @@ async def ensure_fresh_verdict(
     download. Any error (or an incomplete package) falls back to the persisted
     verdict (possibly ``None``). A stale re-run only refreshes the structural
     verdict and never triggers an LLM call.
+
+    Runs for BOTH modes. Note that this deliberately recomputes only when the
+    stamped stage versions no longer match the live ones — a verdict persisted
+    before a new check existed keeps its old value until the package actually
+    changes. There is no backfill: silently turning already-verified packages red
+    with no user action would be worse than a stale-but-honest verdict.
     """
-    if getattr(workspace, "mode", "standard") != "demo_day":
-        return None
     existing = getattr(workspace, "construction_verdict", None)
     if not all_stages_present(stages):
         return existing
@@ -120,7 +150,7 @@ async def ensure_fresh_verdict(
         return workspace.construction_verdict
     except Exception:
         logger.warning(
-            "demo_day_verdict.refresh_failed workspace_id=%s",
+            "construction_verdict_service.refresh_failed workspace_id=%s",
             getattr(workspace, "id", None),
             exc_info=True,
         )
@@ -128,5 +158,5 @@ async def ensure_fresh_verdict(
         try:
             await db.rollback()
         except Exception:  # pragma: no cover - best-effort rollback
-            logger.exception("demo_day_verdict.refresh_rollback_failed")
+            logger.exception("construction_verdict_service.refresh_rollback_failed")
         return existing

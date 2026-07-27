@@ -1174,10 +1174,11 @@ export default function Workspace() {
           }))
         }
         await refreshWorkspace()
-        // Demo Day: a completed tasks generation (generate / regenerate /
-        // regenerate-gaps all reschedule the backend verifier) means the
-        // detached verdict run just started — poll until it lands.
-        if (result.stage.type === "tasks" && isDemoDayWorkspace) {
+        // A completed tasks generation (generate / regenerate / regenerate-gaps
+        // all reschedule the backend verifier) means the detached verdict run
+        // just started — poll until it lands. Both modes: the verifier runs for
+        // standard workspaces too, only the check set differs.
+        if (result.stage.type === "tasks") {
           pollForConstructionVerdict()
         }
       } finally {
@@ -2994,8 +2995,9 @@ export default function Workspace() {
                         checking={activeStage.status === "in_progress"}
                       />
                       {/* Workspace-level construction verdict — surfaced on the tasks
-                          pane (where the verifier runs) for a Demo Day workspace. */}
-                      {isDemoDayWorkspace && activeStage.type === "tasks" && (
+                          pane (where the verifier runs). Both modes: the badge is
+                          mode-agnostic and renders nothing until a verdict exists. */}
+                      {activeStage.type === "tasks" && (
                         <ConstructionVerifiedBadge
                           verdict={constructionVerdict}
                           stages={stages}

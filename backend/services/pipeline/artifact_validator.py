@@ -123,6 +123,7 @@ DEMO_DAY_SECTION_CONTRACTS: dict[str, list[str]] = {
         "## Requirement Traceability Matrix",
         "## Interface Contracts",
         "## Data Model and Persistence",
+        "## External Integrations and Secrets",
         "## Build Sequence",
         "## Environment and Bootstrap",
         "## Architecture Decision Records",

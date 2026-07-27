@@ -17,8 +17,8 @@ from __future__ import annotations
 import inspect
 
 import services.pipeline.agent_manual_service as manual_mod
+import services.pipeline.construction_verdict_service as verdict_mod
 import services.pipeline.demo_day_plan_linter as linter_mod
-import services.pipeline.demo_day_verdict as verdict_mod
 import services.pipeline.stage_manager as sm
 from services.credit_service import CREDIT_COSTS
 

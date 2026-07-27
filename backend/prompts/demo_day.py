@@ -192,12 +192,24 @@ Required PLAN.md structure (every section mandatory, in this order):
 - ## Data Model and Persistence — every entity/table with every field (name, type,
   nullable, default, constraints), the keys/indexes that matter, and the
   retention/deletion stance; minimal for the demo but complete for the in-scope path.
+  Also give the SEED DATASET: the exact rows loaded before the demo (real values, not
+  categories) and the single command that loads them, so the third run of the demo is
+  identical to the first.
+- ## External Integrations and Secrets — every third-party service the demo path actually
+  calls: the exact provider + model/endpoint/SDK version, where the credential loads from
+  (the env var NAME, never a literal value), and per service an explicit REAL or MOCKED
+  stance with a one-line reason. For every REAL call name the on-stage failure plan: the
+  timeout, the fallback (cached or canned response), and what the audience sees instead of
+  a stack trace. If the build calls nothing external, write one line "None — <reason>".
 - ## Build Sequence — the ordered task DAG in prose: the walking skeleton first, then each
   vertical slice, naming what each step adds and which interface/files it touches, every
   step leaving the app runnable and the smoke test green.
 - ## Environment and Bootstrap — the EXACT, copy-pasteable scaffold/install/run/test
   commands (real commands, not descriptions). If any external service is genuinely
-  required, document the single setup step here with the exact command/value.
+  required, document the single setup step here with the exact command/value. State the
+  DEMO SURFACE on one line: either `local` (the exact command that serves the demo and the
+  URL/port it opens on) or ONE one-click deploy target (the exact deploy command and the
+  resulting URL). One place the demo runs — no multi-environment promotion, no IaC.
 - ## Architecture Decision Records — RUBRIC narrative: 3–5 ADRs, each naming the decision,
   the cheap-now choice, the credible alternative rejected and why, and how it
   scales/secures (the demo-day answer). Concrete, not platitudes.
@@ -205,8 +217,13 @@ Required PLAN.md structure (every section mandatory, in this order):
   the specific bottleneck, the rough limit it holds to, and the concrete next move.
 - ## Security Architecture — the minimum credible posture and the exact enforcement
   points (which layer authenticates, where input is validated, how secrets are loaded).
+  State the AUTH STANCE as exactly one of: real (name the mechanism), mocked (name the
+  hardcoded identity and why real auth is not demo-critical), or none (why). Mocked is a
+  legitimate Demo Day choice — pick it deliberately, never by default.
 - ## Risks and Mitigations — the build-time risks (what could make the e2e go red) and
-  their concrete mitigations."""
+  their concrete mitigations. Include at least one row per DEMO-VISIBLE failure mode: the
+  trigger, and the concrete fallback the audience sees instead of a stack trace or a blank
+  screen."""
 
 
 _HARNESS_ROLE = """Role: You are Thought2Build's Demo Day test architect. Produce an executable HARNESS that
@@ -369,8 +386,16 @@ Before returning, verify (internal — do not include in output):
   (or the single setup step is documented in ## Environment and Bootstrap with the exact
   command).
 - ## Interface Contracts give exact signatures/paths/JSON shapes/types, concrete enough to
-  implement and test against unchanged; ## Data Model names every field with its type.
-- ## Environment and Bootstrap commands are real and copy-pasteable, not described.
+  implement and test against unchanged; ## Data Model names every field with its type, the
+  exact seed rows, and the command that loads them.
+- ## Environment and Bootstrap commands are real and copy-pasteable, not described, and
+  name exactly one Demo surface (local command+URL, or one one-click deploy target).
+- ## External Integrations and Secrets names every external service the demo path calls
+  with a REAL/MOCKED stance, an env-var NAME as the credential source (never a literal
+  value), and — for each REAL call — a timeout and the on-stage fallback; or the single
+  "None — <reason>" line if nothing external is called.
+- ## Security Architecture names exactly one auth stance (real / mocked / none) with its
+  reason; ## Risks and Mitigations covers each demo-visible failure with its fallback.
 
 Return only PLAN.md. No preamble, commentary, or summary."""
 

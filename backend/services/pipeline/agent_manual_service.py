@@ -195,14 +195,33 @@ def build_construction_report(verdict: dict) -> str:
     estimated = verdict.get("estimated_minutes")
     budget = verdict.get("time_budget_minutes")
 
-    if verified:
+    gap_count = sum(
+        1 for c in checks.values() if isinstance(c, dict) and not c.get("passed", True)
+    )
+    # A check that failed AND counts toward the verdict. `advisory` is absent on
+    # verdicts persisted before checks self-described; those pre-date the
+    # un-enforced rollout, so treating a missing flag as non-advisory is right.
+    blocking_failures = sum(
+        1
+        for c in checks.values()
+        if isinstance(c, dict)
+        and not c.get("passed", True)
+        and not c.get("advisory", False)
+    )
+
+    if verified and blocking_failures:
+        # Un-enforced rollout: the checks ran and found real gaps, but the flag
+        # that lets them withhold the verdict is still off. Claiming "verified"
+        # here would be the exact overclaim this report exists to prevent.
+        badge = (
+            f"⚠️ {blocking_failures} structural "
+            f"gap{'s' if blocking_failures != 1 else ''} named below. These checks "
+            "are not yet enforced, so the package is not marked unverified — but "
+            "the construction guarantee does not hold until they are addressed."
+        )
+    elif verified:
         badge = "✅ Construction-verified — the package is internally consistent."
     else:
-        gap_count = sum(
-            1
-            for c in checks.values()
-            if isinstance(c, dict) and not c.get("passed", True)
-        )
         badge = (
             f"⚠️ Not construction-verified — {gap_count} structural "
             f"gap{'s' if gap_count != 1 else ''} named below."

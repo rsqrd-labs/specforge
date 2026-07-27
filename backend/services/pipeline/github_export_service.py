@@ -101,7 +101,7 @@ from services.observability import (
     GITHUB_PR_TOTAL,
     github_audit,
 )
-from services.pipeline import agent_manual_service, demo_day_verdict
+from services.pipeline import agent_manual_service, construction_verdict_service
 from services.pipeline.export_service import (
     ExportNotReadyError,
     _redact_stage_content,
@@ -871,7 +871,9 @@ async def _push_demo_day_report(
     missing/uncomputable verdict simply ships no report rather than failing the
     push (the verdict refresh is itself fail-open).
     """
-    verdict = await demo_day_verdict.ensure_fresh_verdict(db, workspace, stages)
+    verdict = await construction_verdict_service.ensure_fresh_verdict(
+        db, workspace, stages
+    )
     if not verdict:
         return
     content = agent_manual_service.build_construction_report(verdict)

@@ -6,7 +6,7 @@ import {
 } from "../../utils/constructionVerdict"
 
 interface ConstructionVerifiedBadgeProps {
-  /** The persisted Demo Day construction verdict (null until it first runs). */
+  /** The persisted construction verdict (null until it first runs). */
   verdict: ConstructionVerdict | null | undefined
   /** Live stages — their `current_version`s decide staleness. */
   stages: Pick<Stage, "type" | "current_version">[]
@@ -18,16 +18,17 @@ const STATUS_LABEL: Record<"verified" | "stale", string> = {
 }
 
 /**
- * Compact, inline status badge for a Demo Day package's construction verdict
- * (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md §7.2). Mirrors `QualityBadge`'s
- * shape (`role="status"`, label + strong value) so it reads as a sibling signal.
+ * Compact, inline status badge for a package's construction verdict
+ * (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md §7.2). Mode-agnostic: both modes
+ * produce the same verdict shape, so the copy stays generic ("Build-ready" /
+ * "N gaps") rather than naming a mode. Mirrors `QualityBadge`'s shape
+ * (`role="status"`, label + strong value) so it reads as a sibling signal.
  *
  * The guarantee is **earned per package**: only a `verified` verdict that still
  * matches the live stage versions gets the green ✓. A `stale` verdict (a stage
  * was refined after the verdict was stamped) never renders green — it prompts a
  * re-run, which happens on export (plan §9.2). A package with gaps shows the gap
- * count. Renders nothing for a standard workspace (no verdict) before the
- * verifier has ever run — the handoff panel carries the "pending" copy instead.
+ * count. Renders nothing before the verifier has ever run.
  */
 export function ConstructionVerifiedBadge({
   verdict,

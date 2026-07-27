@@ -67,6 +67,64 @@ def test_demo_day_user_prompts_cover_all_stages() -> None:
 
 
 # ---------------------------------------------------------------------------
+# plan-v3 — the demo-readiness stages. One new mandatory section plus four
+# amendments folded into existing sections (so they add no new terminal
+# MissingSectionError surface); the amendments are prompt text only, so these
+# token assertions are the only thing standing between them and a silent
+# revert.
+# ---------------------------------------------------------------------------
+
+
+def test_demo_day_plan_prompt_mandates_external_integrations_contract() -> None:
+    prompt = dd._demo_day_system_prompt(dd._STAGE_ROLES["plan"])
+    assert "## External Integrations and Secrets" in prompt
+    for token in ("REAL", "MOCKED", "env var NAME", "on-stage failure plan"):
+        assert token in prompt, f"plan prompt missing integrations token {token!r}"
+
+
+def test_demo_day_plan_prompt_mandates_the_four_folded_stages() -> None:
+    prompt = dd._demo_day_system_prompt(dd._STAGE_ROLES["plan"])
+    # Deployment surface (Environment and Bootstrap), seed data (Data Model),
+    # auth stance (Security Architecture), demo-crash fallbacks (Risks).
+    for token in ("DEMO SURFACE", "SEED DATASET", "AUTH STANCE", "DEMO-VISIBLE"):
+        assert token in prompt, f"plan prompt missing folded-stage token {token!r}"
+
+
+def test_demo_day_plan_user_prompt_verifies_the_new_contract() -> None:
+    out = dd.build_user_prompt("plan", {"spec": "s"})
+    assert "## External Integrations and Secrets" in out
+    for token in ("REAL/MOCKED", "Demo surface", "seed rows", "auth stance"):
+        assert token in out, f"plan user prompt missing verify token {token!r}"
+
+
+def test_demo_day_plan_prompt_version_is_bumped() -> None:
+    from prompts.base import stage_prompt_version
+
+    assert stage_prompt_version("plan", "demo_day").endswith(":plan-v3")
+    # §4 regression pin — the standard plan version is untouched.
+    assert stage_prompt_version("plan") == stage_prompt_version("plan", "standard")
+    assert ":plan-v3" not in stage_prompt_version("plan")
+
+
+def test_demo_day_keep_list_carries_integrations_downstream() -> None:
+    """The harness cannot mock a boundary the compression dropped."""
+    from services.pipeline.prompt_builder import (
+        _DEMO_DAY_STAGE_KEEP_SECTIONS,
+        _STAGE_KEEP_SECTIONS,
+        _keep_sections,
+    )
+
+    assert "## External Integrations and Secrets" in _keep_sections("plan", "demo_day")
+    # Every kept heading must be a real section of the live contract.
+    assert set(_DEMO_DAY_STAGE_KEEP_SECTIONS["plan"]) <= set(
+        DEMO_DAY_SECTION_CONTRACTS["plan"]
+    )
+    # §4 regression pin — the standard keep-list is unchanged.
+    assert _keep_sections("plan", "standard") == _STAGE_KEEP_SECTIONS["plan"]
+    assert "## External Integrations and Secrets" not in _STAGE_KEEP_SECTIONS["plan"]
+
+
+# ---------------------------------------------------------------------------
 # §4 regression pin — the standard contract selection is byte-identical.
 # ---------------------------------------------------------------------------
 

@@ -1690,14 +1690,14 @@ afterward, the stamped `stage_versions` no longer match the live
 `stages.current_version` and the verdict is **stale** (`is_verdict_stale`). A
 stale verdict must never read as a green "verified" — the UI shows "out of date".
 There is **no separate re-run endpoint**: the export path recomputes a stale
-verdict synchronously (`demo_day_verdict.ensure_fresh_verdict`, fail-open) before
+verdict synchronously (`construction_verdict_service.ensure_fresh_verdict`, fail-open) before
 rendering `CONSTRUCTION_REPORT.md`, and the frontend re-fetches the workspace
 after a handoff-bundle download to pick up the refreshed verdict. To force a
 recompute operationally, trigger an export (ZIP) for the workspace.
 
 ### §13.3 Advisory-only construction verification
 
-A failing verdict is persisted with each C1-C4 gap named. It never starts an LLM
+A failing verdict is persisted with each gap named. It never starts an LLM
 request or mutates a stage after that stage's durable run has succeeded. Owners
 may use the normal Regenerate action, which creates a fresh generation run with
 the same deadline, checkpointing, cancellation, and credit guarantees as every
@@ -1723,6 +1723,44 @@ problem-statement corpus is `docs/evals/golden_prompts/demo_day_route_golden.jso
 
 To roll back, set both flags off and redeploy — existing Demo Day workspaces keep
 their data (the columns persist) but new workspaces fall back to standard.
+
+### §13.5 The verifier now covers BOTH modes — and its enforcement flags
+
+The construction verifier is no longer Demo-Day-only. `mode` decides *which*
+linter runs, not *whether* one runs:
+
+| Mode | Linter | Checks |
+|---|---|---|
+| `demo_day` | `demo_day_plan_linter` | C1 dag_acyclic · C2 task_to_test · C3 ac_to_test · C4 e2e_reachable · **C5 time_budget (advisory)** · **C6 plan_coverage** · **C7 task_inventory (advisory)** |
+| `standard` | `standard_plan_linter` | C1 requirement_coverage · C2 test_coverage · C3 dag_acyclic · C4 plan_coverage · C5 e2e_reachable · **C6 task_inventory (advisory)** |
+
+Both produce the same `ConstructionVerdict` payload, so one JSONB column, one
+`CONSTRUCTION_REPORT.md` writer, and one badge serve both. Each check now carries
+its own **`advisory`** flag in the payload; the frontend filters on that rather
+than a hardcoded id list (old verdicts without the field fall back to the legacy
+`C1`–`C4` set, which is what makes the frontend and backend deploys
+order-independent).
+
+**Two enforcement flags** (`backend/config.py`, both default `false`):
+
+- `demo_day_plan_coverage_enforced` — lets Demo Day C6 flip `verified`.
+- `standard_construction_verifier_enforced` — lets the standard verdict flip
+  `verified`. While `false`, every check still runs and reports its gaps but
+  `verified` is forced true.
+
+They ship off on purpose. The checks join on `Plan refs` / `Harness refs`
+citations that the tasks prompts **do not yet mandate** — those prompt edits ride
+the golden-corpus gate above. Flipping before that release lands would mark every
+package red. Flip after it clears: env-only, reversible, no redeploy.
+
+**Operational safety.** Neither flag can block, slow, or fail a generation. The
+verifier is scheduled *after* the tasks artifact is delivered and charged
+(`_schedule_construction_verifier`), runs detached in the bounded background
+registry under the shared advisory semaphore, opens its own short-lived session,
+and is exception-wrapped. On the export path `ensure_fresh_verdict` is fail-open
+and falls back to the persisted verdict. **There is no backfill:** a verdict is
+recomputed only when a stage version actually moves, so adding a check never
+silently turns an existing verified package red.
 
 ---
 
