@@ -21,7 +21,7 @@ pyjwt[crypto]==2.*
 passlib==1.*
 
 # LLM Providers
-anthropic>=0.40,<0.118
+anthropic>=0.40,<0.121
 openai==1.57.*
 google-genai>=1,<3
 
