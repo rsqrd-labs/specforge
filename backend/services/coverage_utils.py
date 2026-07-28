@@ -88,6 +88,19 @@ async def derive_coverage_summaries(
             continue  # already have the most-recent eval for this workspace
         seen.add(workspace_id)
         pct_int = max(0, min(100, int(pct)))
+        # `percent` is authoritative and is now DETERMINISTIC: since the coverage
+        # rework it is `harness_coverage_ratio` (matrix requirements whose mapped
+        # test file was actually emitted), not the eval judge's estimate — the
+        # judge only ever saw ~20K chars of a 60–120KB harness, so its number was
+        # the least reliable figure we displayed.
+        #
+        # `tests`/`covered`/`total` are NOT counts. This is a batch query over
+        # EvalResult by design (one round-trip for N workspaces — HF-1/T-198), and
+        # only the percentage is persisted, so the real numerator/denominator are
+        # not available here without reading every harness body. They are filled
+        # to express the percentage out of 100 and must not be rendered as test or
+        # requirement counts; the coverage chip previously did exactly that and
+        # displayed "0 tests cover all 100 spec requirements".
         result[workspace_id] = CoverageSummary(
             tests=0,
             covered=pct_int,

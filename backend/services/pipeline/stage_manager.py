@@ -573,6 +573,7 @@ async def _dispatch_stage_eval(
     workspace_id: UUID | None,
     generation_provider: str | None = None,
     generation_model: str | None = None,
+    mode: str = "standard",
 ) -> EvalResult | None:
     """Score the stage, deferring to a provider batch when enabled.
 
@@ -608,6 +609,7 @@ async def _dispatch_stage_eval(
                 workspace_id=workspace_id,
                 generation_provider=generation_provider,
                 generation_model=generation_model,
+                mode=mode,
             )
             return None
         except Exception:
@@ -623,6 +625,7 @@ async def _dispatch_stage_eval(
         harness_content=harness_content,
         generation_provider=generation_provider,
         generation_model=generation_model,
+        mode=mode,
     )
 
 
@@ -638,6 +641,7 @@ def _schedule_stage_eval(
     harness_content: str | None = None,
     generation_provider: str | None = None,
     generation_model: str | None = None,
+    mode: str = "standard",
 ) -> asyncio.Task[EvalResult | None]:
     # The LLM score is strictly fire-and-forget (issue #27 Phase 1 removed the
     # inline await). The registry retains a strong reference until completion —
@@ -656,6 +660,7 @@ def _schedule_stage_eval(
             workspace_id=workspace_id,
             generation_provider=generation_provider,
             generation_model=generation_model,
+            mode=mode,
         )
     )
 
@@ -730,6 +735,16 @@ _DEMO_DAY_ARTIFACT_TIER_POLICY: dict[str, tuple[str, str | None]] = {
 
 def _is_demo_day(workspace: Workspace) -> bool:
     return (getattr(workspace, "mode", "standard") or "standard") == "demo_day"
+
+
+def _workspace_mode(workspace: Workspace) -> str:
+    """The workspace's generation/grading mode, normalised.
+
+    One spelling of the ``getattr(...) or "standard"`` defaulting, so the eval
+    judge, the critic, the section contracts and the prompt version can never
+    disagree about which contract an artifact was written to.
+    """
+    return (getattr(workspace, "mode", "standard") or "standard") or "standard"
 
 
 def _core_artifact_tier_policy_for(
@@ -1707,19 +1722,38 @@ def _ensure_chunk_heading(chunk: ArtifactChunkSpec, text: str) -> str:
     return text
 
 
+def _is_harness_files_chunk(stage_type: str, chunk: ArtifactChunkSpec) -> bool:
+    """True for the harness chunk that must emit every runnable file.
+
+    Keyed on the chunk's STRUCTURAL identity (``required_heading == "## Files"``)
+    rather than a literal key string. The two mode-specific specs name this chunk
+    differently — ``"harness-files"`` (standard) vs ``"demo-harness-files"``
+    (Demo Day) — so the old ``chunk.key == "harness-files"`` test silently
+    excluded Demo Day and handed the chunk that carries EVERY test file half the
+    output budget (24,576 instead of 49,152 tokens) plus the *contract* chunk's
+    "6,000-45,000 characters" length target. That is a generation-side cause of
+    dropped harness files in Demo Day — the guarantee-bearing mode — not a gate
+    problem: the model was instructed to fit every runnable file into a budget
+    sized for a table of contents. ``required_heading`` is the same discriminator
+    ``_chunk_user_prompt`` already uses to inject the File-Tree checklist, so all
+    three per-chunk decisions now agree on what "the Files chunk" means.
+    """
+    return stage_type == "harness" and chunk.required_heading == "## Files"
+
+
 def _chunk_output_budget(
     stage_type: str, chunk: ArtifactChunkSpec, route: LLMRoute
 ) -> int:
     """Return the fixed first-attempt ceiling for a generation chunk."""
     if stage_type == "harness":
-        requested = 49_152 if chunk.key == "harness-files" else 24_576
+        requested = 49_152 if _is_harness_files_chunk(stage_type, chunk) else 24_576
     else:
         requested = 32_768
     return min(requested, model_max_output_tokens(route.provider, route.model))
 
 
 def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
-    if stage_type == "harness" and chunk.key == "harness-files":
+    if _is_harness_files_chunk(stage_type, chunk):
         return (
             "Length target: include every promised runnable file, while keeping "
             "the complete chunk below 180,000 characters."
@@ -2175,11 +2209,7 @@ def _chunk_user_prompt(
     # (the paths are the model's own prior output), and it attacks the chunk↔files
     # divergence before deterministic validation blocks the partial artifact.
     checklist_text = ""
-    if (
-        stage_type == "harness"
-        and chunk.required_heading == "## Files"
-        and prior_chunks
-    ):
+    if _is_harness_files_chunk(stage_type, chunk) and prior_chunks:
         tree_paths = harness_file_tree_paths("\n\n".join(prior_chunks))
         # Defense-in-depth: these are the model's own prior File-Tree tokens, but
         # they are still model-generated text spliced into the INSTRUCTION region
@@ -3163,6 +3193,7 @@ class StageManager:
                     harness_content=harness_content_for_eval,
                     generation_provider=route.provider,
                     generation_model=route.model,
+                    mode=gen_mode,
                 )
             except Exception:
                 logger.warning(
@@ -4370,6 +4401,7 @@ class StageManager:
                     # the persisted artifact, never to the judge model.
                     generation_provider=route.provider,
                     generation_model=route.model,
+                    mode=mode,
                 )
             except Exception:
                 logger.warning(
@@ -5086,6 +5118,7 @@ class StageManager:
                 provider=platform_provider_priority()[0],
                 workspace_id=stage.workspace_id,
                 harness_content=harness_content_for_eval,
+                mode=await self._workspace_mode_by_id(stage.workspace_id, db),
             )
         return stage
 
@@ -5196,6 +5229,7 @@ class StageManager:
                 provider=platform_provider_priority()[0],
                 workspace_id=workspace.id,
                 harness_content=harness_content_for_eval,
+                mode=_workspace_mode(workspace),
             )
         return stage
 
@@ -5410,6 +5444,21 @@ class StageManager:
         ).all()
         content_by_type = {row_type: (content or "") for row_type, content in rows}
         return {dep_type: content_by_type.get(dep_type, "") for dep_type in dep_types}
+
+    async def _workspace_mode_by_id(self, workspace_id: UUID, db: AsyncSession) -> str:
+        """The workspace's mode, by id, for paths that hold no workspace object.
+
+        ``rollback`` re-scores a restored version but only ever loads the stage,
+        so it has no workspace in scope. A single indexed PK scalar read is
+        cheaper than loading the whole workspace with its stages, and getting the
+        mode right is what stops a restored Demo Day artifact from being graded
+        against the standard rubric. Falls back to ``"standard"`` if the row is
+        gone — eval is best-effort and must never raise on this path.
+        """
+        mode = (
+            await db.execute(select(Workspace.mode).where(Workspace.id == workspace_id))
+        ).scalar_one_or_none()
+        return mode or "standard"
 
     def _clear_quality_gate(self, stage: Stage) -> None:
         stage.quality_gate_status = "clear"
@@ -5960,6 +6009,7 @@ class StageManager:
         baseline_content = stage.content or ""
         baseline_version = stage.current_version
         workspace_id = workspace.id
+        patch_mode = _workspace_mode(workspace)
         system_prompt = await get_patch_system_prompt()
         user_prompt = build_patch_user_prompt(baseline_content, uncovered_reqs)
 
@@ -6128,6 +6178,7 @@ class StageManager:
                 provider=route.provider,
                 workspace_id=workspace_id,
                 content_generation_id=None,
+                mode=patch_mode,
             )
             try:
                 yield f'{{"done": true, "stage_id": "{stage_id}"}}'

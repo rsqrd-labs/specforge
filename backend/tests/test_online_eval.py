@@ -615,11 +615,15 @@ async def test_run_eval_dataset_write_is_fire_and_forget() -> None:
 
 @pytest.mark.asyncio
 async def test_run_eval_harness_does_not_flag_on_judge_coverage() -> None:
-    # Harness `flagged` is no longer derived from the judge's coverage_percent
-    # (Fable #6): the eval compacts the harness to ~20K chars, so on a normal-size
+    # Harness `flagged` is not derived from the judge's coverage_percent (Fable
+    # #6): the eval compacts the harness to ~20K chars, so on a normal-size
     # harness the judge under-counts coverage and would set a "Needs attention"
-    # badge the deterministic CoveragePanel (deferred_reqs) contradicts. The judge
-    # coverage is still STORED for telemetry, just not authoritative for flagging.
+    # badge the deterministic CoveragePanel (deferred_reqs) contradicts.
+    #
+    # The judge's coverage_percent is now not STORED either: it is replaced
+    # wholesale by the deterministic matrix->file ratio computed from the harness
+    # itself. This fixture's "harness content" has no Requirement-to-Test Matrix,
+    # so there is no coverage data and the field is None — "unknown", never 0%.
     db = _FakeDB()
     judge_response = (
         '{"overall_score": 60, "completeness": 60, "clarity": 70, '
@@ -632,7 +636,7 @@ async def test_run_eval_harness_does_not_flag_on_judge_coverage() -> None:
         result = await run_eval(uuid4(), "harness", "harness content", "spec", db)
 
     assert result is not None
-    assert result.coverage_percent == 65
+    assert result.coverage_percent is None
     assert result.flagged is False
     assert "auth" in result.uncovered_reqs
 
@@ -671,7 +675,12 @@ async def test_run_eval_extracts_json_from_fenced_judge_response() -> None:
         result = await run_eval(uuid4(), "harness", "harness content", "spec", db)
 
     assert result is not None
-    assert result.coverage_percent == 78
+    # The judge claimed 78% coverage; it is discarded in favour of the
+    # deterministic matrix->file ratio, which this matrix-free fixture cannot
+    # compute — so coverage reads as unknown rather than as the judge's guess.
+    assert result.coverage_percent is None
+    # overall_score renormalises over the remaining weights once the 0.20
+    # coverage_percent term drops out: (80*.30 + 75*.20 + 70*.20 + 85*.10) / .80.
     assert result.overall_score == 77
     # Harness no longer flags on judge coverage_percent < 80 (Fable #6).
     assert result.flagged is False
@@ -794,4 +803,5 @@ async def test_run_eval_background_opens_its_own_session() -> None:
         harness_content=None,
         generation_provider=None,
         generation_model=None,
+        mode="standard",
     )

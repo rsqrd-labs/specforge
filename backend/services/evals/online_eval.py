@@ -30,6 +30,7 @@ from services.pipeline.artifact_validator import (
     HarnessTestIndex,
     _canonical_test_path,
     _normalise_harness_ref,
+    harness_coverage_ratio,
     harness_test_index,
     ref_matches_harness,
 )
@@ -230,7 +231,24 @@ Rules:
 """.strip()
 
 
-def _stage_score_dimensions(stage_type: str) -> list[str]:
+def score_weights_for(stage_type: str, mode: str = "standard") -> dict[str, float]:
+    """The weight table for a (stage, mode) pair.
+
+    Demo Day artifacts answer a different, leaner section contract than standard
+    ones, so grading them with the standard weights penalises them for omitting
+    sections their contract forbids. Only the SPEC weights actually differ (see
+    ``_DEMO_DAY_SCORE_WEIGHTS``); plan/harness/tasks dimensions apply to both
+    modes unchanged, and falling through to the standard table keeps them
+    byte-identical.
+    """
+    if mode == "demo_day":
+        demo = _DEMO_DAY_SCORE_WEIGHTS.get(stage_type)
+        if demo is not None:
+            return demo
+    return _SCORE_WEIGHTS.get(stage_type, _SCORE_WEIGHTS["spec"])
+
+
+def _stage_score_dimensions(stage_type: str, mode: str = "standard") -> list[str]:
     """The score dimensions this stage's scoring pipeline actually consumes.
 
     Audit L14: the rubric used to request all 8 dimensions from every stage
@@ -238,17 +256,26 @@ def _stage_score_dimensions(stage_type: str) -> list[str]:
     and tokens. Consumed = the stage's weighted dimensions ∪ the completeness
     roll-up inputs ∪ clarity, derived from the same structures that do the
     consuming so the request list cannot drift from the scoring code.
+
+    The completeness roll-up inputs are intersected with the mode's weighted
+    dimensions plus the standard set: a Demo Day spec must not be *asked* for
+    ``user_flow_coverage`` when its contract has no User Journeys section, or
+    the judge invents a low score for an absence that is by design.
     """
-    weights = _SCORE_WEIGHTS.get(stage_type, _SCORE_WEIGHTS["spec"])
-    used = set(weights) | _COMPLETENESS_DIMENSIONS | {"clarity"}
+    weights = score_weights_for(stage_type, mode)
+    completeness_inputs = _COMPLETENESS_DIMENSIONS
+    if mode == "demo_day" and stage_type in _DEMO_DAY_SCORE_WEIGHTS:
+        # Only roll up completeness dimensions this mode actually grades.
+        completeness_inputs = _COMPLETENESS_DIMENSIONS & set(weights)
+    used = set(weights) | completeness_inputs | {"clarity"}
     # coverage_percent is a separate top-level response field, never a scores key.
     used.discard("coverage_percent")
     return [dim for dim in _ALL_SCORE_DIMENSIONS if dim in used]
 
 
-def _rubric_for_stage(stage_type: str) -> str:
+def _rubric_for_stage(stage_type: str, mode: str = "standard") -> str:
     score_lines = ",\n".join(
-        f'    "{dim}": 0-100' for dim in _stage_score_dimensions(stage_type)
+        f'    "{dim}": 0-100' for dim in _stage_score_dimensions(stage_type, mode)
     )
     return (
         f"{_RUBRIC_HEADER}\n\n"
@@ -342,6 +369,103 @@ _SCORE_WEIGHTS: dict[str, dict[str, float]] = {
         "clarity": 0.15,
     },
 }
+
+# Demo Day overrides, applied per stage by ``score_weights_for``. Only the SPEC
+# differs: ``DEMO_DAY_SECTION_CONTRACTS["spec"]`` has no User Journeys / User
+# Flow Diagrams section — Demo Day deliberately specifies exactly ONE happy path
+# (``## Success Demo``) — so scoring ``user_flow_coverage`` at 0.15 docked every
+# Demo Day spec for obeying its own contract. Its weight is redistributed across
+# the three dimensions Demo Day actually asks for.
+#
+# ``non_functional_coverage`` is deliberately KEPT (and kept at 0.15): a Demo Day
+# spec carries no NFR-NNN ids, but it does carry the ``## AI Usage`` /
+# ``## Security Posture`` / ``## Scalability Story`` rubric sections, which are
+# non-functional concerns. The Demo Day stage prompt below re-points the judge at
+# those sections so the dimension grades something real instead of a missing
+# heading. plan/harness/tasks are absent here on purpose — their dimensions apply
+# to both modes, so they fall through to the standard table unchanged.
+_DEMO_DAY_SCORE_WEIGHTS: dict[str, dict[str, float]] = {
+    "spec": {
+        "goal_alignment": 0.20,
+        "requirements_coverage": 0.30,
+        "specificity_testability": 0.25,
+        "non_functional_coverage": 0.15,
+        "clarity": 0.10,
+    },
+}
+
+# Demo Day stage prompts. Same {rubric}/{spec_content}/{content} placeholders and
+# the same single-pass substitution, so they are drop-in replacements. Each one
+# names the Demo Day section contract explicitly: a judge that does not know the
+# artifact was written to a leaner contract reports every standard-only section
+# as a gap, which is precisely the false-alarm class the critic already fixed for
+# itself (critic._demo_day_per_stage_focus) and the eval had not.
+_DEMO_DAY_STAGE_PROMPTS: dict[str, str] = {
+    "spec": (
+        "Evaluate this DEMO DAY specification. It is deliberately scoped to a "
+        "buildable-in-one-sitting demo, NOT a full product spec, and answers a "
+        "leaner contract: Overview, Target User and Core Problem, Demo Day Scope, "
+        "Out of Scope, Functional Requirements (FR-NNN), Acceptance Criteria "
+        "(AC-NNN), Success Demo, AI Usage, Security Posture, Scalability Story, "
+        "Risks and Assumptions. It carries NO NFR-NNN or SEC-NNN identifiers and "
+        "NO User Journeys or User Flow Diagrams section — do not treat their "
+        "absence as a gap. Score non_functional_coverage against the AI Usage, "
+        "Security Posture, and Scalability Story sections: reward named, specific "
+        "controls and choices, and penalise adjectives and generic filler. A "
+        "single, concrete, end-to-end happy path in Success Demo is the correct "
+        "answer, not a coverage shortfall.\n\n"
+        "{rubric}\n\n"
+        "Content:\n{content}"
+    ),
+    "plan": (
+        "Evaluate this DEMO DAY implementation plan against its specification. A "
+        "strong Demo Day plan is buildable in one sitting and leaves nothing to "
+        "interpretation: exact interface contracts, data shapes, field names and "
+        "types; a real, copy-pasteable bootstrap; an explicit REAL-or-MOCKED "
+        "stance plus an env-var name for every external integration. It tracks "
+        "FR-NNN/AC-NNN only (no NFR/SEC ids) and its Architecture Decision "
+        "Records use the short Demo Day shape — decision, cheap-now choice, "
+        "alternative rejected and why, and how it scales/secures — not the "
+        "standard five-line ADR. Judge cheap-and-concrete as correct; penalise "
+        "vagueness and over-engineering equally.\n\n"
+        "{rubric}\n\n"
+        "Spec:\n{spec_content}\n\nPlan:\n{content}"
+    ),
+    "harness": (
+        "Evaluate this DEMO DAY test harness against its specification. A strong "
+        "Demo Day harness maps every FR-NNN/AC-NNN to a named test in the "
+        "Requirement-to-Test Matrix and defines one unmockable end-to-end smoke "
+        "test that drives the Success Demo journey. Demo Day does NOT mandate the "
+        "standard integration/security/contract/migration_safety test categories "
+        "— do not report their absence as a gap. Set coverage_percent to your "
+        "best evidence-based estimate of requirement coverage, and list specific "
+        "uncovered requirements.\n\n"
+        "{rubric}\n\n"
+        "Spec:\n{spec_content}\n\nHarness:\n{content}"
+    ),
+    "tasks": (
+        "Evaluate this DEMO DAY task list against the test harness and "
+        "specification. A strong Demo Day task list stands up a walking skeleton "
+        "first, keeps the end-to-end smoke test green from the first task "
+        "onwards, and orders tasks so each Precondition names only earlier tasks. "
+        "In tasks_without_ref, include objects shaped as "
+        '{"task_number": int or null, "task_title": string, "reason": string, '
+        '"referenced_test": string or null} for any task that lacks a clear test '
+        "or harness reference. A deliberately small task count is correct for a "
+        "one-sitting build, not a completeness gap.\n\n"
+        "{rubric}\n\n"
+        "Reference context:\n{spec_content}\n\nTasks:\n{content}"
+    ),
+}
+
+
+def _stage_prompt_template(stage_type: str, mode: str = "standard") -> str:
+    """The eval prompt template for a (stage, mode) pair."""
+    if mode == "demo_day":
+        demo = _DEMO_DAY_STAGE_PROMPTS.get(stage_type)
+        if demo is not None:
+            return demo
+    return _STAGE_PROMPTS[stage_type]
 
 
 def _parse_task_blocks(tasks_content: str) -> list[dict[str, Any]]:
@@ -1056,13 +1180,24 @@ def _normalise_task_issues(raw: Any) -> list[dict[str, Any]] | None:
     return issues
 
 
-def _normalise_eval_payload(stage_type: str, data: dict[str, Any]) -> dict[str, Any]:
+def _normalise_eval_payload(
+    stage_type: str,
+    data: dict[str, Any],
+    mode: str = "standard",
+    *,
+    coverage_override: int | None = None,
+    use_coverage_override: bool = False,
+) -> dict[str, Any]:
     scores = data.get("scores")
     if not isinstance(scores, dict):
         overall_score = _clamp_score(data.get("overall_score"))
         completeness = _clamp_score(data.get("completeness"))
         clarity = _clamp_score(data.get("clarity"))
-        coverage_percent = _clamp_score(data.get("coverage_percent"))
+        coverage_percent = (
+            coverage_override
+            if use_coverage_override
+            else _clamp_score(data.get("coverage_percent"))
+        )
         return {
             "overall_score": overall_score,
             "completeness": completeness,
@@ -1077,9 +1212,20 @@ def _normalise_eval_payload(stage_type: str, data: dict[str, Any]) -> dict[str, 
         for key, value in scores.items()
         if isinstance(key, str)
     }
-    coverage_percent = _clamp_score(data.get("coverage_percent"))
+    # The harness weights include coverage_percent at 0.20. Feed the DETERMINISTIC
+    # value (when the caller supplies one) into the weighted score as well as the
+    # stored field, so the judge's truncation-poisoned estimate never reaches the
+    # headline score either. A None override means "no coverage data" — the key is
+    # left out and _weighted_score renormalises over the remaining weights.
+    coverage_percent = (
+        coverage_override
+        if use_coverage_override
+        else _clamp_score(data.get("coverage_percent"))
+    )
     if coverage_percent is not None:
         score_values["coverage_percent"] = coverage_percent
+    else:
+        score_values.pop("coverage_percent", None)
 
     completeness = _average_score(
         score_values.get("requirements_coverage"),
@@ -1090,7 +1236,7 @@ def _normalise_eval_payload(stage_type: str, data: dict[str, Any]) -> dict[str, 
     clarity = score_values.get("clarity")
     overall_score = _weighted_score(
         score_values,
-        _SCORE_WEIGHTS.get(stage_type, _SCORE_WEIGHTS["spec"]),
+        score_weights_for(stage_type, mode),
     )
 
     uncovered_reqs = data.get("uncovered_reqs")
@@ -1174,6 +1320,7 @@ def _build_eval_prompt(
     spec_content: str,
     *,
     compact: bool = False,
+    mode: str = "standard",
 ) -> str:
     context_limit, content_limit = (
         _COMPACT_RETRY_LIMITS if compact else _PROMPT_LIMITS
@@ -1191,10 +1338,10 @@ def _build_eval_prompt(
     substitutions = {
         "{spec_content}": wrap_untrusted_content("eval_context", context),
         "{content}": wrap_untrusted_content("artifact_under_evaluation", artifact),
-        "{rubric}": _rubric_for_stage(stage_type),
+        "{rubric}": _rubric_for_stage(stage_type, mode),
     }
     return _EVAL_PLACEHOLDER_RE.sub(
-        lambda m: substitutions[m.group()], _STAGE_PROMPTS[stage_type]
+        lambda m: substitutions[m.group()], _stage_prompt_template(stage_type, mode)
     )
 
 
@@ -1234,6 +1381,7 @@ async def _score_with_retry(
     spec_content: str,
     provider: str,
     model: str,
+    mode: str = "standard",
 ) -> str | None:
     for compact in (False, True):
         user_prompt = _build_eval_prompt(
@@ -1241,6 +1389,7 @@ async def _score_with_retry(
             content,
             spec_content,
             compact=compact,
+            mode=mode,
         )
         try:
             return await _call_eval_judge(
@@ -1302,6 +1451,7 @@ async def run_eval(
     harness_content: str | None = None,
     generation_provider: str | None = None,
     generation_model: str | None = None,
+    mode: str = "standard",
 ) -> EvalResult | None:
     resolved_judge_model = judge_model or JUDGE_MODELS[provider]
     raw = await _score_with_retry(
@@ -1311,6 +1461,7 @@ async def run_eval(
         spec_content=spec_content,
         provider=provider,
         model=resolved_judge_model,
+        mode=mode,
     )
     if raw is None:
         # Both compact=False and compact=True calls failed — increment the
@@ -1332,6 +1483,7 @@ async def run_eval(
             spec_content=spec_content,
             provider=provider,
             model=resolved_judge_model,
+            mode=mode,
         )
         if retry_raw is None:
             EVAL_POLL_FAILURES.labels(stage_type=stage_type).inc()
@@ -1356,6 +1508,7 @@ async def run_eval(
         content_generation_id=content_generation_id,
         generation_provider=generation_provider,
         generation_model=generation_model,
+        mode=mode,
     )
 
 
@@ -1364,6 +1517,7 @@ def build_eval_request(
     content: str,
     spec_content: str,
     provider: str | None = None,
+    mode: str = "standard",
 ) -> tuple[str, str, int]:
     """Build the (system, user, max_tokens) for one eval-judge call.
 
@@ -1373,7 +1527,9 @@ def build_eval_request(
     is threaded so a per-(operation, provider) budget override (Phase 4) applies
     to batched evals identically to synchronous ones.
     """
-    user_prompt = _build_eval_prompt(stage_type, content, spec_content, compact=False)
+    user_prompt = _build_eval_prompt(
+        stage_type, content, spec_content, compact=False, mode=mode
+    )
     return (
         _JUDGE_SYSTEM,
         user_prompt,
@@ -1392,6 +1548,7 @@ async def persist_eval_from_raw(
     content_generation_id: str | None = None,
     generation_provider: str | None = None,
     generation_model: str | None = None,
+    mode: str = "standard",
 ) -> EvalResult | None:
     """Parse a judge response and persist the EvalResult, or return None.
 
@@ -1418,7 +1575,29 @@ async def persist_eval_from_raw(
         content_generation_id=content_generation_id,
         generation_provider=generation_provider,
         generation_model=generation_model,
+        mode=mode,
     )
+
+
+def _deterministic_coverage_percent(harness_content: str) -> int | None:
+    """Requirement coverage for a harness, computed from the artifact itself.
+
+    Replaces the judge's ``coverage_percent`` on the harness stage. The judge
+    scores a harness compacted to ~20K chars (``_PROMPT_LIMITS["harness"]``, and
+    10K on the compact retry) while a real harness runs 60–120KB, so its coverage
+    estimate is derived from a fraction of the artifact — the identical
+    truncation defect that already disqualified its ``uncovered_reqs`` from both
+    the CoveragePanel and the paid patch (D-1). Keeping the judge's number as a
+    headline percentage (and weighting it 0.20 in the harness score) meant the
+    one figure users read was the least trustworthy signal we produced.
+
+    ``None`` when the matrix names no test files — an unparseable matrix must
+    read as "no coverage data" and render nothing, never as 0%.
+    """
+    covered, total = harness_coverage_ratio(harness_content)
+    if total <= 0:
+        return None
+    return round(100 * covered / total)
 
 
 async def _persist_eval_data(
@@ -1432,8 +1611,18 @@ async def _persist_eval_data(
     content_generation_id: str | None,
     generation_provider: str | None = None,
     generation_model: str | None = None,
+    mode: str = "standard",
 ) -> EvalResult:
-    normalised = _normalise_eval_payload(stage_type, data)
+    is_harness = stage_type == "harness"
+    normalised = _normalise_eval_payload(
+        stage_type,
+        data,
+        mode,
+        coverage_override=(
+            _deterministic_coverage_percent(content) if is_harness else None
+        ),
+        use_coverage_override=is_harness,
+    )
     coverage_percent: int | None = normalised["coverage_percent"]
     uncovered_reqs: list[str] | None = normalised["uncovered_reqs"]
     tasks_without_ref: list[dict[str, Any]] | None = normalised["tasks_without_ref"]
@@ -1524,6 +1713,7 @@ async def run_eval_background(
     harness_content: str | None = None,
     generation_provider: str | None = None,
     generation_model: str | None = None,
+    mode: str = "standard",
 ) -> EvalResult | None:
     async with AsyncSessionLocal() as db:
         return await run_eval(
@@ -1538,4 +1728,5 @@ async def run_eval_background(
             harness_content=harness_content,
             generation_provider=generation_provider,
             generation_model=generation_model,
+            mode=mode,
         )
