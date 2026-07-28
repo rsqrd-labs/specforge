@@ -9,7 +9,27 @@ core-generation routing ladder. Every cost/route decision derives from it, so a
 model swap is made in exactly one place. This document is the written policy for
 keeping that catalog current and for the per-provider tier floor.
 
-## 1. The core-generation tier ladder (the normalized floor)
+## 0. Scope: the ladder no longer covers full-artifact generation
+
+**The four core stages, `regenerate.full` and the harness gap-patch do NOT read
+the ladder below.** They route through `_CORE_ARTIFACT_TIER_POLICY` /
+`_DEMO_DAY_ARTIFACT_TIER_POLICY` in `stage_manager.py` — an explicit per-provider
+table pinning Anthropic to the frontier tier (Claude Opus 5), with the mid tier
+(Sonnet 5) as a **de-escalation** retry after a hard failure.
+
+Two reasons this is a separate table rather than an edit to the ladder:
+
+1. The ladder is **shared**: `tier_policy.generation_tier_policy` is read by
+   storyboard and increment generation too, which are meant to stay cheap.
+   Moving the Anthropic floor would silently drag them onto the frontier tier.
+2. The ladder **cannot** express "primary = strong" — §2's invariants require at
+   least two strictly-increasing tiers, and `strong` is the top.
+
+The ladder below therefore governs the **cheap** paths only: focused/section
+refinement, storyboard, and increment generation. `core_cheap_primary` reverts
+exactly those, and no longer affects full-artifact routing.
+
+## 1. The cheap-generation tier ladder (the normalized floor)
 
 `CORE_GENERATION_TIER_LADDER` declares, per provider, an ordered
 **cheapest-viable-first → escalation** capability ladder. The live cheap-primary
@@ -20,7 +40,7 @@ parallel dict to drift.
 
 | Provider  | Ladder                         | Primary (runs by default) | Escalation |
 | --------- | ------------------------------ | ------------------------- | ---------- |
-| anthropic | `(small, mid, strong)`         | Haiku 4.5 (`small`)       | Sonnet 4.6 (`mid`) → Opus 4.8 (`strong`) |
+| anthropic | `(small, mid, strong)`         | Haiku 4.5 (`small`)       | Sonnet 5 (`mid`) → Opus 5 (`strong`) |
 | openai    | `(mini, mid, strong)`          | GPT-5.4 Mini (`mini`)     | GPT-5.4 (`mid`) → GPT-5.5 (`strong`) |
 | google    | `(mid, strong)`                | Gemini 3.6 Flash (`mid`)  | (`strong` slot — no active model; surfaces directly) |
 
@@ -84,6 +104,19 @@ Run this review **quarterly** and **on any provider model release**:
    `uv run pytest tests/test_model_catalog.py tests/test_llm_cost_registry.py -q`.
 5. **Record.** Note the review date/outcome in the promotion review attached to the
    change (per `ROUTE_PROMOTION.md`).
+
+### Review log
+
+- **2026-07-28 — Claude Opus 5 / Sonnet 5 cutover.** Anthropic became the platform
+  primary (`LLM_PROVIDER_PRIORITY=anthropic,openai,google`) and full-artifact
+  generation moved to the frontier tier (see §0). Added `claude-opus-5` and
+  `claude-sonnet-5`; deprecated `claude-opus-4-8` and `claude-sonnet-4-6`
+  (retained for cost-ledger history). Opus 5 pinned to `effort=medium` for the
+  180s/300s interactive deadline contract. **Pending:** the `ROUTE_PROMOTION.md`
+  golden-corpus gate and a live per-chunk wall-clock measurement.
+- **Dated follow-up — 2026-09-01:** Sonnet 5's catalog costs are Anthropic's
+  *introductory* rates ($2/$10 per MTok), which expire **2026-08-31**. Update the
+  entry to $3/$15 (cached 0.3, cache-write 3.75/6.0) or the ledger under-reports.
 
 ## 4. Deferred (not built): cheapest-provider-first for platform keys
 

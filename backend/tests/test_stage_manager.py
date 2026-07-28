@@ -1096,36 +1096,15 @@ _REGULATED_PROBLEM = (
 _SIMPLE_PROBLEM = "Build a personal recipe book for one user to save recipes."
 
 
-def test_complexity_classifier_off_by_default_keeps_cheap_primary(monkeypatch) -> None:
-    # Phase 5.2: with the cheap-primary policy on, even a regulated prompt starts
-    # on the cheap primary while the classifier flag is off (its default).
+def test_anthropic_core_artifact_route_is_opus_5_regardless_of_complexity(
+    monkeypatch,
+) -> None:
+    # Full-artifact generation on Anthropic is pinned to the frontier tier, so
+    # the Phase 5.2 complexity classifier has nothing left to raise: a regulated
+    # prompt and a trivial one resolve identically. `raise_tier_to_floor` caps at
+    # `strong`, so the floor degrades to a no-op rather than erroring.
     from services.pipeline import stage_manager as sm
 
-    monkeypatch.setattr(sm.settings, "core_cheap_primary", True)
-    monkeypatch.setattr(sm.settings, "llm_provider_priority", "anthropic,openai,google")
-    monkeypatch.setattr(
-        "services.llm.provider_status.is_provider_configured", lambda _provider: True
-    )
-    monkeypatch.setattr(
-        "services.llm.provider_status.can_route", lambda _provider: True
-    )
-
-    workspace = _make_workspace()
-    workspace.provider = "anthropic"
-    workspace.problem_statement = _REGULATED_PROBLEM
-    stage = _make_stage(workspace_id=workspace.id, stage_type="spec")
-
-    signals = sm._build_complexity_signals(stage, workspace)
-    route = sm._route_for_stage_generation("spec", workspace, signals=signals)
-
-    assert route.model_tier == "small"
-    assert route.model == "claude-haiku-4-5-20251001"
-
-
-def test_complexity_classifier_raises_regulated_prompt_to_mid(monkeypatch) -> None:
-    from services.pipeline import stage_manager as sm
-
-    # The complexity floor only applies while the cheap-primary policy is on.
     monkeypatch.setattr(sm.settings, "core_cheap_primary", True)
     monkeypatch.setattr(sm.settings, "core_complexity_routing", True)
     monkeypatch.setattr(sm.settings, "llm_provider_priority", "anthropic,openai,google")
@@ -1138,23 +1117,73 @@ def test_complexity_classifier_raises_regulated_prompt_to_mid(monkeypatch) -> No
 
     workspace = _make_workspace()
     workspace.provider = "anthropic"
-    workspace.problem_statement = _REGULATED_PROBLEM
-    stage = _make_stage(workspace_id=workspace.id, stage_type="spec")
 
-    signals = sm._build_complexity_signals(stage, workspace)
-    route = sm._route_for_stage_generation("spec", workspace, signals=signals)
-    assert route.model_tier == "mid"
-    assert route.model == "claude-sonnet-4-6"
+    for problem in (_REGULATED_PROBLEM, _SIMPLE_PROBLEM):
+        workspace.problem_statement = problem
+        stage = _make_stage(workspace_id=workspace.id, stage_type="spec")
+        signals = sm._build_complexity_signals(stage, workspace)
+        route = sm._route_for_stage_generation("spec", workspace, signals=signals)
+        assert route.model_tier == "strong"
+        assert route.model == "claude-opus-5"
 
-    # A simple prompt still starts cheap even with the classifier on.
-    workspace.problem_statement = _SIMPLE_PROBLEM
-    simple_stage = _make_stage(workspace_id=workspace.id, stage_type="spec")
-    simple_signals = sm._build_complexity_signals(simple_stage, workspace)
-    simple_route = sm._route_for_stage_generation(
-        "spec", workspace, signals=simple_signals
+
+def test_core_artifact_policy_does_not_leak_into_focused_refine(monkeypatch) -> None:
+    # The regression this split exists to prevent. `_route_for_refine` funnels
+    # ALL THREE modes, so routing focused/section refine through the artifact
+    # policy would put a 768-token surgical edit on the frontier tier — and
+    # because the frontier entry does not recommend `refine.focused`, Anthropic
+    # would resolve NO model and `resolve_platform_route_by_provider` would
+    # silently continue to the next PROVIDER instead of raising.
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "core_cheap_primary", True)
+    monkeypatch.setattr(sm.settings, "llm_provider_priority", "anthropic,openai,google")
+    monkeypatch.setattr(
+        "services.llm.provider_status.is_provider_configured", lambda _provider: True
     )
-    assert simple_route.model_tier == "small"
-    assert simple_route.model == "claude-haiku-4-5-20251001"
+    monkeypatch.setattr(
+        "services.llm.provider_status.can_route", lambda _provider: True
+    )
+
+    workspace = _make_workspace()
+    workspace.provider = "anthropic"
+
+    for mode in ("focused", "section"):
+        route = sm._route_for_refine(workspace, mode)
+        assert route.provider == "anthropic", f"{mode} refine left the primary provider"
+        assert route.model == "claude-haiku-4-5-20251001"
+        assert route.model_tier == "small"
+
+    # Full regenerate DOES produce a whole artifact, so it follows the frontier
+    # policy alongside the four core stages.
+    full = sm._route_for_refine(workspace, "full", stage_type="spec")
+    assert full.model == "claude-opus-5"
+
+
+def test_demo_day_focused_refine_stays_on_the_primary_provider(monkeypatch) -> None:
+    # Demo Day floors every generation at the mid tier. No Anthropic mid model
+    # recommended `refine.focused`, so this silently resolved to Gemini — and
+    # with a placeholder Google key it would have resolved nothing at all and
+    # raised LLMRoutingError in production.
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "llm_provider_priority", "anthropic,openai,google")
+    monkeypatch.setattr(
+        "services.llm.provider_status.is_provider_configured",
+        lambda provider: provider == "anthropic",
+    )
+    monkeypatch.setattr(
+        "services.llm.provider_status.can_route", lambda _provider: True
+    )
+
+    workspace = _make_workspace()
+    workspace.provider = "anthropic"
+    workspace.mode = "demo_day"
+
+    route = sm._route_for_refine(workspace, "focused")
+    assert route.provider == "anthropic"
+    assert route.model == "claude-sonnet-5"
+    assert route.model_tier == "mid"
 
 
 def test_complexity_classifier_does_not_raise_for_google(monkeypatch) -> None:
@@ -1201,9 +1230,14 @@ def test_prior_quality_gate_block_escalates_starting_tier(monkeypatch) -> None:
     assert route.model == "gpt-5.4"
 
 
-def test_core_cheap_primary_revert_uses_mid_first(monkeypatch) -> None:
-    # Phase 5.3 one-toggle revert: cheap_primary off => mid-first everywhere,
-    # with strong runtime escalation, regardless of complexity.
+def test_core_cheap_primary_no_longer_governs_full_artifact_generation(
+    monkeypatch,
+) -> None:
+    # Scope change: `core_cheap_primary` used to be the one-toggle revert for
+    # full-artifact generation too. Full-artifact routing is now a firm decision
+    # (Opus 5 on Anthropic) and the flag governs only the CHEAP paths — focused
+    # /section refine, storyboard and increment. Flipping it must not quietly
+    # downgrade the artifact a user is charged frontier-tier credits for.
     from services.pipeline import stage_manager as sm
 
     monkeypatch.setattr(sm.settings, "core_cheap_primary", False)
@@ -1218,16 +1252,70 @@ def test_core_cheap_primary_revert_uses_mid_first(monkeypatch) -> None:
     workspace = _make_workspace()
     workspace.provider = "anthropic"
     stage = _make_stage(workspace_id=workspace.id, stage_type="spec")
-
     signals = sm._build_complexity_signals(stage, workspace)
-    route = sm._route_for_stage_generation("spec", workspace, signals=signals)
-    assert route.model_tier == "mid"
-    assert route.model == "claude-sonnet-4-6"
 
-    fallback = sm._runtime_fallback_route(route)
-    assert fallback is not None
-    assert fallback.provider == "anthropic"
-    assert fallback.model_tier == "strong"
+    route = sm._route_for_stage_generation("spec", workspace, signals=signals)
+    assert route.model_tier == "strong"
+    assert route.model == "claude-opus-5"
+
+    # The flag still does its job on the cheap path it now owns: mid-first.
+    refine = sm._route_for_refine(workspace, "focused")
+    assert refine.model_tier == "mid"
+    assert refine.model == "claude-sonnet-5"
+
+
+def test_opus_5_hard_failure_retries_down_on_sonnet_5(monkeypatch) -> None:
+    # Nothing exists above the frontier tier, so the second policy slot points
+    # DOWN. Without that, `_runtime_fallback_route`'s equal-tier guard returns
+    # None and every transient hard failure becomes terminal. Rate limits are
+    # handled separately and never reach this function.
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "llm_provider_priority", "anthropic,openai,google")
+    monkeypatch.setattr(
+        "services.llm.provider_status.is_provider_configured", lambda _provider: True
+    )
+    monkeypatch.setattr(
+        "services.llm.provider_status.can_route", lambda _provider: True
+    )
+
+    workspace = _make_workspace()
+    workspace.provider = "anthropic"
+
+    for mode in ("standard", "demo_day"):
+        workspace.mode = mode
+        route = sm._route_for_stage_generation("spec", workspace)
+        assert route.model == "claude-opus-5"
+
+        fallback = sm._runtime_fallback_route(route, mode=mode)
+        assert fallback is not None, f"{mode}: a hard failure must still retry"
+        assert fallback.provider == "anthropic"
+        assert fallback.model == "claude-sonnet-5"
+        assert fallback.model_tier == "mid"
+
+
+def test_demo_day_matches_standard_mode_on_anthropic(monkeypatch) -> None:
+    # Demo Day artifacts are guarantee-bearing (the zero-LLM construction
+    # verifier joins on them) and are handed to a coding agent as the entire
+    # build spec, so this mode must never run a weaker model than a standard
+    # workspace.
+    from services.pipeline import stage_manager as sm
+
+    monkeypatch.setattr(sm.settings, "llm_provider_priority", "anthropic,openai,google")
+    monkeypatch.setattr(
+        "services.llm.provider_status.is_provider_configured", lambda _provider: True
+    )
+    monkeypatch.setattr(
+        "services.llm.provider_status.can_route", lambda _provider: True
+    )
+
+    workspace = _make_workspace()
+    workspace.provider = "anthropic"
+    workspace.mode = "demo_day"
+
+    for stage_type in ("spec", "plan", "harness", "tasks"):
+        route = sm._route_for_stage_generation(stage_type, workspace)
+        assert route.model == "claude-opus-5", stage_type
 
 
 @pytest.mark.asyncio
@@ -3276,17 +3364,16 @@ async def test_handle_content_edit_schedules_eval_for_new_version() -> None:
     run_eval_background.assert_awaited_once()
     args = run_eval_background.await_args.args
     # The online eval runs on the server-owned PLATFORM judge route, not on the
-    # workspace's legacy `provider`/`model` columns. That distinction was
-    # invisible while the platform primary happened to match the fixture's
-    # workspace provider; with Google as the primary it is explicit, so assert
-    # the judge route directly rather than echoing workspace.provider.
+    # workspace's legacy `provider`/`model` columns, so assert the judge route
+    # directly rather than echoing workspace.provider. The judge stays on the
+    # CHEAP tier even though full-artifact generation moved to the frontier one.
     assert args[:6] == (
         version.id,
         "harness",
         "new harness",
         "spec content",
-        "google",
-        "gemini-3.5-flash-lite",
+        "anthropic",
+        "claude-haiku-4-5-20251001",
     )
 
 
@@ -3722,12 +3809,13 @@ async def test_focused_refine_uses_small_budget_and_context_window() -> None:
         await svc.refine(stage.id, request, user, db)
 
     system_prompt, user_prompt = mock_adapter.complete.await_args.args[:2]
-    # Google is the platform primary, so focused refine lands on Gemini 3.6 Flash
-    # and picks up the ("refine.focused", "google") thinking-headroom override —
-    # Gemini bills thought tokens against max_output_tokens, so the 768-token
-    # cross-provider default would be consumed by thinking alone. Other providers
-    # keep 768 (pinned in test_model_catalog).
-    assert mock_adapter.complete.await_args.kwargs["max_tokens"] == 4096
+    # Anthropic is the platform primary, so focused refine lands on the cheap
+    # tier (Haiku 4.5) and takes the 768-token cross-provider default. The
+    # ("refine.focused", "google") override to 4096 only applies when Google is
+    # actually routed — Gemini bills thought tokens against max_output_tokens, so
+    # 768 there would be consumed by thinking alone. It stays in the catalog for
+    # the Google fallback path (pinned in test_model_catalog/test_output_budget).
+    assert mock_adapter.complete.await_args.kwargs["max_tokens"] == 768
     # Match the distinctive phrase, not a leading verb whose casing shifts when
     # the sentence is reflowed (the f264269 prompt rewrite made "Keep" a sentence
     # start; asserting the case-sensitive full clause is what broke this).
@@ -5029,8 +5117,10 @@ async def test_generate_falls_back_only_failed_chunk_on_same_provider(
         tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
 
     assert len(requested_models) == 4
-    assert requested_models.count("claude-haiku-4-5-20251001") == 3
-    assert requested_models.count("claude-sonnet-4-6") == 1
+    # Only the failed chunk retries, and it retries DOWN on the mid tier —
+    # nothing exists above the frontier primary to escalate to.
+    assert requested_models.count("claude-opus-5") == 3
+    assert requested_models.count("claude-sonnet-5") == 1
     mock_refund.assert_not_awaited()
     assert spec_stage.content == _VALID_SPEC
     assert _streamed_artifact(tokens) == _VALID_SPEC

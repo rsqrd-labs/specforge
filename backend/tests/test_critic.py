@@ -1038,9 +1038,10 @@ async def test_async_advisory_done_before_judge_and_schedules_critic() -> None:
     assert kwargs["stage_type"] == "spec"
     assert kwargs["content"] == _LONG_ARTIFACT.strip()
     # The detached critic is pinned to the provider the artifact was generated
-    # on, which is the platform primary (Google) — so the judge resolves to
-    # Gemini 3.5 Flash-Lite via JUDGE_MODELS, not to another provider's judge.
-    assert kwargs["provider"] == "google"
+    # on, which is the platform primary (Anthropic) — so the judge resolves to
+    # that provider's CHEAP judge entry via JUDGE_MODELS (Haiku 4.5), never to
+    # the frontier model the artifact itself was generated with.
+    assert kwargs["provider"] == "anthropic"
     # The usable draft is delivered, persisted clean, cached; nothing refunded.
     assert any("done" in t for t in tokens)
     assert not any("quality_gate_failed" in t for t in tokens)

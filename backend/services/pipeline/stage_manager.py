@@ -186,12 +186,12 @@ _POLL_INTERVAL_SECONDS = 10
 _RECOVERY_LOCK_TTL = 30
 
 STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
-# Core generation routes to each provider's cheapest viable current-generation
-# model to keep per-generation cost and latency down; on a runtime timeout or
-# provider failure the stage is retried exactly once on the provider's mid tier
+# The CHEAP generation policy: each provider's cheapest viable current-generation
+# model, to keep per-generation cost and latency down; on a runtime timeout or
+# provider failure the call is retried exactly once on the provider's mid tier
 # (the previous fast/cheap default) before the failure is surfaced.  Google has
-# no cheaper viable core-gen model than Flash and no active strong model, so it
-# stays mid-first and surfaces failures directly.
+# no cheaper viable model than Flash and no active strong model, so it stays
+# mid-first and surfaces failures directly.
 #
 # (requested_tier, runtime_escalation_tier) per provider, in provider-neutral
 # tier terms (the concrete models for each tier live only in the catalog — see
@@ -200,12 +200,18 @@ STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
 #   anthropic: cheap small tier      -> escalate to the mid tier
 #   openai:    cheap mini tier       -> escalate to the mid tier
 #   google:    mid tier              -> no active strong tier; surfaces directly
-# Derived from the catalog's declarative core-generation tier ladder (issue #26
-# Phase 5b) — the single source of truth for the per-provider cheap-tier floor.
+# Derived from the catalog's declarative tier ladder (issue #26 Phase 5b) — the
+# single source of truth for the per-provider cheap-tier floor.
 # The live cheap-primary policy now lives in the product-wide ``tier_policy``
-# module so the core stages, the storyboard keynote, and increment generation all
-# read one definition (issue #17 follow-up); these aliases preserve the public
-# ``stage_manager`` symbols that callers and tests read for the core-gen view.
+# module so the storyboard keynote and increment generation read one definition
+# (issue #17 follow-up); these aliases preserve the public ``stage_manager``
+# symbols that callers and tests read for that view.
+#
+# SCOPE (narrowed): despite the name, this no longer describes full-artifact
+# generation. The four core stages, ``regenerate.full`` and the harness
+# gap-patch route through ``_CORE_ARTIFACT_TIER_POLICY`` (Opus 5 on Anthropic)
+# and are NOT governed by ``core_cheap_primary``. What still reads the policy
+# below is focused/section refinement, alongside storyboard and increment.
 CORE_GENERATION_TIER_POLICY = CHEAP_PRIMARY_TIER_POLICY
 _DEFAULT_CORE_TIER_POLICY = DEFAULT_TIER_POLICY
 # Seconds of pipeline silence between SSE progress heartbeats.  Heartbeats are
@@ -684,20 +690,87 @@ def _core_generation_tier_policy(provider: str) -> tuple[str, str]:
 # mid model rather than erroring.
 _DEMO_DAY_TIER_POLICY: tuple[str, str] = ("mid", "strong")
 
+# FULL-ARTIFACT generation policy: the four core stages, ``regenerate.full`` and
+# the harness gap-patch (which routes through ``_route_for_stage_generation``).
+# Deliberately a separate table from the shared cheap ladder rather than an edit
+# to it, for two reasons:
+#
+#   1. ``CORE_GENERATION_TIER_LADDER`` / ``tier_policy.generation_tier_policy``
+#      is read by storyboard AND increment generation too. Moving its Anthropic
+#      floor would drag those onto the frontier tier as well; they are meant to
+#      stay cheap.
+#   2. The ladder structurally cannot express "primary = strong":
+#      ``validate_core_generation_ladder`` requires at least two strictly
+#      increasing tiers, and ``strong`` is the top.
+#
+# Anthropic's second slot is ``mid`` (Sonnet 5), which is a resilience
+# DE-escalation, not an escalation — there is nothing above Opus 5 to escalate
+# to, and ``_runtime_fallback_route`` returns None when the failed tier equals
+# the second slot, which would leave a hard failure with no retry at all. The
+# slot is never validated as monotonically increasing, so pointing it down needs
+# no logic change. OpenAI/Google entries are their existing cheap-primary values
+# verbatim, so the fallback providers behave exactly as before.
+_CORE_ARTIFACT_TIER_POLICY: dict[str, tuple[str, str | None]] = {
+    "anthropic": ("strong", "mid"),
+    "openai": ("mini", "mid"),
+    "google": ("mid", "strong"),
+}
+
+# Demo Day matches standard mode on Anthropic (Opus 5): Demo Day artifacts are
+# guarantee-bearing — the zero-LLM construction verifier joins on them and they
+# are handed to a coding agent as the entire build spec — so this mode must never
+# run a weaker model than a standard workspace. OpenAI/Google keep their existing
+# mid-tier Demo Day floor, which is stronger than their cheap primary.
+_DEMO_DAY_ARTIFACT_TIER_POLICY: dict[str, tuple[str, str | None]] = {
+    "anthropic": ("strong", "mid"),
+    "openai": ("mid", "strong"),
+    "google": ("mid", "strong"),
+}
+
 
 def _is_demo_day(workspace: Workspace) -> bool:
     return (getattr(workspace, "mode", "standard") or "standard") == "demo_day"
 
 
+def _core_artifact_tier_policy_for(
+    workspace: Workspace, provider: str
+) -> tuple[str, str | None]:
+    """``(requested_tier, fallback_tier)`` for FULL-ARTIFACT generation.
+
+    Covers the four core stages, ``regenerate.full`` and the harness gap-patch —
+    the paths that produce a whole artifact and where output quality is the
+    product. Independent of ``core_cheap_primary``: that flag now governs only
+    the cheap paths (focused/section refine, storyboard, increment), which
+    continue to read ``_generation_tier_policy_for``.
+
+    An unlisted provider falls back to the product-wide mid-first default rather
+    than being silently downgraded.
+    """
+    table = (
+        _DEMO_DAY_ARTIFACT_TIER_POLICY
+        if _is_demo_day(workspace)
+        else _CORE_ARTIFACT_TIER_POLICY
+    )
+    return table.get(provider, _DEFAULT_CORE_TIER_POLICY)
+
+
 def _generation_tier_policy_for(
     workspace: Workspace, provider: str
 ) -> tuple[str, str | None]:
-    """``(requested_tier, escalation_tier)`` for a workspace's artifact generation.
+    """``(requested_tier, escalation_tier)`` for a workspace's CHEAP generation.
 
     Demo Day floors at the mid tier (``_DEMO_DAY_TIER_POLICY``); every other
     workspace keeps the flag-gated cheap-primary policy byte-for-byte (the §4
-    regression pin). This is the single funnel both fresh generation and full
-    regenerate read, so the floor cannot be bypassed by one of those paths.
+    regression pin).
+
+    Scope note: this used to funnel full-artifact generation too. It no longer
+    does — that moved to ``_core_artifact_tier_policy_for``. What still reads
+    this is focused/section refinement, whose budgets are tiny (``refine.focused``
+    is 768 output tokens) and which must stay on the cheap tier. Routing these
+    through the artifact policy would not merely be expensive: the frontier entry
+    does not recommend ``refine.focused`` at all, so Anthropic would resolve no
+    model and ``resolve_platform_route_by_provider`` would silently continue to
+    the NEXT provider, migrating refinement off Anthropic with no error raised.
     """
     if _is_demo_day(workspace):
         return _DEMO_DAY_TIER_POLICY
@@ -761,7 +834,9 @@ def _route_for_stage_generation(
 ) -> LLMRoute:
     provider_policies: dict[str, tuple[str, str | None]] = {}
     for provider in platform_provider_priority():
-        requested_tier, fallback_tier = _generation_tier_policy_for(workspace, provider)
+        requested_tier, fallback_tier = _core_artifact_tier_policy_for(
+            workspace, provider
+        )
         provider_policies[provider] = _apply_complexity_floor(
             requested_tier,
             fallback_tier,
@@ -956,18 +1031,30 @@ async def _stage_db_heartbeat(stage_id: UUID, run_id: UUID | None = None) -> Non
 def _runtime_fallback_route(
     failed_route: LLMRoute, *, mode: str = "standard"
 ) -> LLMRoute | None:
-    """Resolve the one-shot escalation retry route after a core-gen failure.
+    """Resolve the one-shot retry route after a full-artifact generation failure.
 
-    A failed chunk may escalate once on the selected provider.  Cross-provider
+    A failed chunk may retry once on the selected provider.  Cross-provider
     fallback is intentionally excluded: provider credentials, rate limits, and
     model tier semantics are independent, and changing provider mid-artifact
     produces inconsistent chunks. Rate-limit retries are handled separately and
     never reach this function.
+
+    Direction note: for a provider whose primary is already the TOP tier (today
+    Anthropic, on Opus 5) the second policy slot points DOWN — the retry lands on
+    the mid tier. That is a deliberate resilience de-escalation, not an
+    escalation: nothing exists above the frontier tier, and the equal-tier guard
+    below would otherwise return None and turn every transient hard failure into
+    a terminal one. The user gets a Sonnet-5 artifact instead of an error; the
+    effective model is recorded on the generation either way.
     """
-    if mode == "demo_day":
-        _, escalation_tier = _DEMO_DAY_TIER_POLICY
-    else:
-        _, escalation_tier = _core_generation_tier_policy(failed_route.provider)
+    table = (
+        _DEMO_DAY_ARTIFACT_TIER_POLICY
+        if mode == "demo_day"
+        else _CORE_ARTIFACT_TIER_POLICY
+    )
+    _, escalation_tier = table.get(failed_route.provider, _DEFAULT_CORE_TIER_POLICY)
+    if escalation_tier is None:
+        return None
     if failed_route.model_tier == escalation_tier:
         return None
     try:
@@ -1036,19 +1123,29 @@ def _route_for_refine(
         "section": "refine.section",
         "full": "regenerate.full",
     }[mode]
-    # Full regenerate follows the same core-generation policy as a fresh stage,
-    # including the complexity floor. Focused/section refinement keeps the same
-    # provider-specific cheap-primary policy without applying that floor.
+    # Full regenerate produces a whole artifact, so it follows the same
+    # full-artifact policy as a fresh stage (Opus 5 on Anthropic), including the
+    # complexity floor. Focused/section refinement is a surgical edit with a tiny
+    # output budget and stays on the cheap-primary policy — routing it through
+    # the artifact policy would push it onto a tier that does not recommend
+    # `refine.focused` at all, and the resolver would then silently fall through
+    # to the next PROVIDER rather than raise.
     provider_policies: dict[str, tuple[str, str | None]] = {}
     for provider in platform_provider_priority():
-        requested_tier, fallback_tier = _generation_tier_policy_for(workspace, provider)
         if mode == "full":
+            requested_tier, fallback_tier = _core_artifact_tier_policy_for(
+                workspace, provider
+            )
             requested_tier, fallback_tier = _apply_complexity_floor(
                 requested_tier,
                 fallback_tier,
                 stage_type=stage_type or "tasks",
                 provider=provider,
                 signals=signals,
+            )
+        else:
+            requested_tier, fallback_tier = _generation_tier_policy_for(
+                workspace, provider
             )
         provider_policies[provider] = (requested_tier, fallback_tier)
     return resolve_platform_route_by_provider(
