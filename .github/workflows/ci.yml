@@ -714,8 +714,18 @@ jobs:
       # --project=x` treats the flags as positional test-file filters and the
       # project selection is silently ignored (all 5 projects run, incl. the
       # firefox binary we no longer install → hard fail).
+      #
+      # `--workers=3` for the same reason as the authenticated journeys below,
+      # but with none of their constraints: this step runs only
+      # `public-routes.spec.ts` (the authenticated file self-skips on the empty
+      # `E2E_ACCESS_TOKEN`), which is frontend-only — its single API call is
+      # intercepted by `page.route`, so there is no backend, no session, no
+      # shared state, and no admission ceiling to respect. Left on Playwright's
+      # default the runner resolved it to ONE worker and spent 114s running 15
+      # tests serially (7.6s each). Measured locally: 22.5s @ 1 worker → 15.2s
+      # @ 3, green on repeat runs. Keep `--workers` ≥ the project count.
       - name: Browser, mobile, and accessibility gates
-        run: E2E_ACCESS_TOKEN= pnpm exec playwright test ${{ steps.e2e-projects.outputs.args }}
+        run: E2E_ACCESS_TOKEN= pnpm exec playwright test --workers=3 ${{ steps.e2e-projects.outputs.args }}
 
       # The single most expensive step in CI: 347s of a 801s job on a 2-project
       # PR run, ~520s on the 3-project push run, because it used to be pinned to
@@ -739,6 +749,17 @@ jobs:
       #      unpaginated, so no project can hide another's row on the dashboard.
       # Keep `--workers` >= the project count in `e2e-projects`, or projects
       # queue and the saving disappears.
+      #
+      # That serial mode is LOAD-BEARING — do not delete it to chase more
+      # parallelism. Measured against the real stack (clean DB, 3 projects):
+      # serial ON @ 3 workers = 52.4s, 12 passed; serial OFF = 2 flaky @ 4
+      # workers (1.2m), 3 flaky @ 6 (2.2m), failing @ 12. It is both slower and
+      # unreliable, because `retries: 2` re-runs whatever it destabilises. The
+      # per-project critical path (~174s on CI) is the floor for this step: the
+      # 4 tests must run in order, and ~21s of that is the deterministic
+      # provider's two 10.5s sleeps, which are deliberate — they are what push
+      # the pipeline past its ~10s silent interval so the suite proves the real
+      # SSE heartbeat contract. Shortening them deletes that coverage.
       - name: Docker-backed authenticated browser journeys
         run: pnpm exec playwright test e2e/authenticated-backend.spec.ts --workers=3 ${{ steps.e2e-projects.outputs.args }}
 
