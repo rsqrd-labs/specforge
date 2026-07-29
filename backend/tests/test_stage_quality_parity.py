@@ -459,3 +459,47 @@ def test_length_target_keys_on_structure_not_the_demo_full_key_string():
         whole_document=True,
     )
     assert "55,000" in sm._chunk_length_target("spec", renamed)
+
+
+def test_demo_day_single_call_chunks_skip_the_anthropic_cache_write():
+    """A Demo Day whole-document chunk is exactly ONE provider call, so an
+    Anthropic cache WRITE (billed at 1.25x base input) can never be read back
+    and is a pure surcharge. Measured on a real spec: 4,913 tokens written at
+    $6.25/M = $0.0307 where plain input would have cost $0.0246.
+    """
+    for stage in ("spec", "plan", "tasks"):
+        chunk = sm._chunk_specs_for_stage(stage, "demo_day")[0]
+        assert chunk.whole_document is True
+        assert sm._should_cache_system_prompt("demo_day", chunk, "anthropic") is False
+
+
+def test_cache_write_suppression_is_scoped_to_demo_day_anthropic_whole_document():
+    """The suppression must not leak. Each of the three conditions alone keeps
+    caching ON, because each implies a reader exists (or no write premium)."""
+    demo_chunk = sm._chunk_specs_for_stage("spec", "demo_day")[0]
+
+    # Other providers: cache_system is a no-op there (automatic prefix caching,
+    # no write premium), so the answer must stay True rather than silently
+    # changing behaviour on a failover route.
+    for provider in ("openai", "google"):
+        assert sm._should_cache_system_prompt("demo_day", demo_chunk, provider) is True
+
+    # Standard mode is deliberately untouched.
+    assert sm._should_cache_system_prompt("standard", demo_chunk, "anthropic") is True
+
+    # Multi-chunk stages have readers: chunk 2+ reads what chunk 1 wrote. Demo
+    # Day's harness is TWO chunks, so it must keep caching.
+    harness_chunks = sm._chunk_specs_for_stage("harness", "demo_day")
+    assert len(harness_chunks) > 1
+    for chunk in harness_chunks:
+        assert chunk.whole_document is False
+        assert sm._should_cache_system_prompt("demo_day", chunk, "anthropic") is True
+
+
+def test_standard_mode_chunks_always_keep_the_cache_write():
+    """Standard multi-chunk stages are the case prefix caching exists for."""
+    for stage in ("spec", "plan", "tasks"):
+        for chunk in sm._chunk_specs_for_stage(stage, "standard"):
+            assert (
+                sm._should_cache_system_prompt("standard", chunk, "anthropic") is True
+            )

@@ -202,7 +202,15 @@ def test_frontier_adapter_policy_is_explicit() -> None:
         "adapter_api": "responses",
         "supports_reasoning": True,
         "supports_thinking": False,
-        "reasoning_effort": "high",
+        # Medium, not the API default of high — GPT-5.5 is now OpenAI's
+        # full-artifact PRIMARY (the fallback reached when Anthropic is
+        # unconfigured or its circuit is open), so it runs under the same
+        # locked 180s/300s interactive deadline that forced Opus 5 to medium.
+        # A high-effort timeout here would fail exactly when Anthropic is
+        # already down. See the claude-opus-5 assertion below for the full
+        # rationale; raising either back to "high" needs re-measured
+        # per-chunk wall-clock first.
+        "reasoning_effort": "medium",
         "thinking_level": None,
         "automatic_prompt_caching": True,
         "prompt_cache_key": True,
@@ -232,13 +240,16 @@ def test_core_generation_low_reasoning_is_flagged_and_operation_scoped(
 
     monkeypatch.setattr(settings, "core_generation_low_reasoning", True)
 
+    # Haiku 4.5 rejects the `effort` parameter, so the override has nothing to
+    # lower — it must stay None rather than becoming "low". The GPT-5.4 Mini
+    # case below is what covers the effort-lowering path itself.
     assert (
         model_request_policy(
             "anthropic",
             "claude-haiku-4-5-20251001",
             "spec.generate",
         )["reasoning_effort"]
-        == "low"
+        is None
     )
     assert (
         model_request_policy("openai", "gpt-5.4-mini", "tasks.generate")[
@@ -261,7 +272,7 @@ def test_core_generation_low_reasoning_is_flagged_and_operation_scoped(
             "claude-haiku-4-5-20251001",
             "refine.focused",
         )["reasoning_effort"]
-        == "medium"
+        is None
     )
     assert (
         model_request_policy("openai", "gpt-5.4-mini", "eval.score")["reasoning_effort"]
@@ -288,7 +299,7 @@ def test_core_generation_low_reasoning_flag_off_preserves_catalog_policy(
             "claude-haiku-4-5-20251001",
             "plan.generate",
         )["reasoning_effort"]
-        == "medium"
+        is None
     )
     assert (
         model_request_policy("openai", "gpt-5.4-mini", "tasks.generate")[

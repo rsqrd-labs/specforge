@@ -357,10 +357,13 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
             "storyboard.generate",
         ),
         supports_reasoning=True,
-        # Medium (not low) effort: as the core-gen primary, Haiku must reason
-        # hard enough to clear the completeness/critic gates.  Per-model field,
-        # so this also lifts its judge/eval/focused-refine uses to medium.
-        reasoning_effort="medium",
+        # Haiku 4.5 reasons, but it does NOT accept the `effort` request
+        # parameter: sending any value 400s with "This model does not support
+        # the effort parameter", which hard-failed every judge/eval/refine call
+        # on this model. `supports_reasoning` stays True (it does think); the
+        # None here is specifically "no effort knob to send". Do not restore a
+        # value without re-probing the live API.
+        reasoning_effort=None,
         rollout_notes=(
             "Primary Anthropic core ASDD generation default — cheapest viable "
             "current-generation model — plus lightweight judge and focused refine."
@@ -886,7 +889,11 @@ def model_request_policy(
         and (provider, model_id) in _LOW_REASONING_CORE_MODELS
         and _core_generation_low_reasoning_enabled()
     ):
-        if entry.supports_reasoning:
+        # Gate on the effort value, not on `supports_reasoning`: this override
+        # *lowers* an effort the model already accepts, and must never introduce
+        # one on a model that rejects the parameter (Haiku 4.5 reasons but has
+        # no effort knob — see its catalog entry).
+        if entry.reasoning_effort is not None:
             reasoning_effort = "low"
         if entry.supports_thinking:
             thinking_level = "low"
