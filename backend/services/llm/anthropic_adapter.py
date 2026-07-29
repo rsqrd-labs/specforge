@@ -155,10 +155,9 @@ class AnthropicAdapter(BaseLLMAdapter):
         """Create a Message Batch (50% discount) and return its id.
 
         Each request reuses ``_messages_request`` for body parity with the live
-        path, minus ``extra_body`` (a client-level kwarg the per-request batch
-        params do not carry — the judge's reasoning effort is non-critical and
-        omitting it never changes correctness). A batch-of-one still earns the
-        full batch discount, so the caller need not aggregate.
+        path, minus ``output_config`` (the judge's reasoning effort is
+        non-critical and omitting it never changes correctness). A batch-of-one
+        still earns the full batch discount, so the caller need not aggregate.
         """
         try:
             batch_requests = [
@@ -208,7 +207,7 @@ class AnthropicAdapter(BaseLLMAdapter):
             max_tokens=max_tokens,
             cache_system=False,
         )
-        params.pop("extra_body", None)
+        params.pop("output_config", None)
         return params
 
     def _messages_request(
@@ -248,9 +247,17 @@ class AnthropicAdapter(BaseLLMAdapter):
             ],
             "max_tokens": max_tokens,
         }
+        # `effort` is a nested field of the `output_config` body param, NOT a
+        # top-level one: sending it at the top level (via `extra_body`) 400s with
+        # "effort: Extra inputs are not permitted" on every call — stream and
+        # complete alike, since both build their body here. It is also
+        # model-gated (Haiku 4.5 rejects it outright with "This model does not
+        # support the effort parameter"), which is why the catalog leaves
+        # `reasoning_effort` None for models that cannot take it rather than
+        # letting the adapter guess.
         effort = self._request_policy["reasoning_effort"]
         if effort:
-            request["extra_body"] = {"effort": effort}
+            request["output_config"] = {"effort": effort}
         return request
 
 

@@ -1822,6 +1822,42 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
     return "Length target: 8,000-80,000 characters for this document chunk."
 
 
+def _should_cache_system_prompt(
+    mode: str, chunk: ArtifactChunkSpec, provider: str
+) -> bool:
+    """Whether to mark the system prompt with Anthropic's ``cache_control``.
+
+    A cache WRITE costs 1.25x base input and only pays for itself once something
+    READS it. Reads come from later calls sharing the prefix — chunks 2+ of a
+    multi-chunk stage, or a truncation repair. A ``whole_document`` chunk in
+    Demo Day is the one shape where neither exists: the stage is exactly ONE
+    provider call (``_demo_day_chunk_specs_for_stage`` keeps every stage
+    single-pass to avoid cross-chunk identifier drift), so the entry is written,
+    billed at the premium, and never read. Measured on a real Demo Day spec:
+    4,913 tokens written at $6.25/M = $0.0307 where plain input would have been
+    $0.0246 — a pure ~25% surcharge on the cached span, every generation.
+
+    Scoped deliberately narrowly:
+      * **anthropic only** — ``cache_system`` is a no-op on OpenAI/Google, whose
+        prefix caching is automatic and carries no write premium.
+      * **demo_day only** — standard mode's single-chunk ``full`` spec (see
+        ``_chunk_specs_for_stage``) has the identical never-read property, but
+        it is the fallback shape rather than the normal path, and standard-mode
+        request bytes are pinned by tests; leaving it untouched keeps this
+        change provably inert outside Demo Day.
+      * **``chunk.whole_document`` only** — structural, never the ``"demo-full"``
+        key string, for the reason spelled out in ``_chunk_length_target``. Demo
+        Day's harness is *two* chunks, so its contract chunk still writes an
+        entry that the Files chunk reads; excluding it here would be a real loss.
+
+    The break-even is a repair rate of ~28%: caching wins at
+    ``1.25 + 0.1p < 1 + p``. Observed repairs are far below that, so skipping the
+    write is the cheaper expectation — and a repair that does happen simply pays
+    plain input twice rather than failing.
+    """
+    return not (provider == "anthropic" and mode == "demo_day" and chunk.whole_document)
+
+
 def _chunk_specs_for_stage(
     stage_type: str, mode: str = "standard"
 ) -> list[ArtifactChunkSpec]:
@@ -2530,6 +2566,9 @@ class StageManager:
                         repair_count=0,
                         emit=emit if stream_live else None,
                         cache_policy=cache_policy,
+                        cache_system=_should_cache_system_prompt(
+                            mode, chunk, attempt_route.provider
+                        ),
                         control=control,
                     )
                     return (
@@ -2718,6 +2757,7 @@ class StageManager:
         repair_count: int = 0,
         emit: Callable[[str], None] | None = None,
         cache_policy: PromptCachePolicy | None = None,
+        cache_system: bool = True,
         control: GenerationControl | None = None,
     ) -> str:
         accumulated = ""
@@ -2765,14 +2805,20 @@ class StageManager:
         # Issue #39 (Lever A): the base user prompt is the stable prefix of
         # every chunk prompt. Keep that Anthropic transport hint scoped to this
         # async call without growing the provider-neutral adapter signature.
+        #
+        # The prefix hint follows `cache_system`: both are cache WRITES billed at
+        # 1.25x, and a call that cannot be read from must not make either. This
+        # is the larger of the two on plan/harness/tasks, where the base prompt
+        # embeds upstream artifacts (up to 200K chars) — suppressing only the
+        # system block there would leave most of the surcharge in place.
         try:
-            with user_prefix_cache_hint(user_prompt):
+            with user_prefix_cache_hint(user_prompt if cache_system else None):
                 async for token in _watchdog_stream(
                     adapter.stream(
                         system_prompt,
                         chunk_prompt,
                         max_tokens=max_tokens,
-                        cache_system=True,
+                        cache_system=cache_system,
                         cache_policy=cache_policy,
                     ),
                     stage_type=stage_type,

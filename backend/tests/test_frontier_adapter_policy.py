@@ -35,14 +35,18 @@ def test_anthropic_opus48_request_includes_effort() -> None:
     assert request["system"] == "sys"
     assert request["messages"] == [{"role": "user", "content": "user"}]
     assert request["max_tokens"] == 8192
-    assert request["extra_body"] == {"effort": "high"}
+    assert request["output_config"] == {"effort": "high"}
 
 
 def test_opus_5_core_stage_request_sends_effort_not_a_thinking_block() -> None:
     """Opus 5 does NOT support extended thinking (`thinking.type: "enabled"`) —
     it uses adaptive thinking plus the `effort` parameter. The Anthropic adapter
-    must therefore keep emitting `extra_body={"effort": ...}` for it; sending a
-    thinking block instead would 400 every core-stage generation.
+    must therefore keep emitting the effort for it; sending a thinking block
+    instead would 400 every core-stage generation.
+
+    `effort` is nested under the `output_config` body param. It was previously
+    sent top-level via `extra_body`, which 400s with "effort: Extra inputs are
+    not permitted" — that hard-failed every Anthropic call, core stages included.
 
     The effort is `medium`, not the Claude-API default of `high`: core stages are
     bound by a locked interactive deadline (a single provider stream is capped at
@@ -61,8 +65,30 @@ def test_opus_5_core_stage_request_sends_effort_not_a_thinking_block() -> None:
     request = adapter._messages_request(system="sys", user="user", max_tokens=49152)
 
     assert request["model"] == "claude-opus-5"
-    assert request["extra_body"] == {"effort": "medium"}
+    assert request["output_config"] == {"effort": "medium"}
+    assert "extra_body" not in request
     assert "thinking" not in request
+
+
+def test_haiku_45_request_omits_the_unsupported_effort_parameter() -> None:
+    """Haiku 4.5 rejects `effort` outright ("This model does not support the
+    effort parameter"), so its request must carry no effort at all — not a
+    lowered one. This model serves every cheap path (judge/eval/summary,
+    focused+section refine, storyboard, increment), so emitting it 400s them all.
+    """
+    from services.llm.anthropic_adapter import AnthropicAdapter
+    from services.llm.model_catalog import model_request_policy
+
+    adapter = AnthropicAdapter.__new__(AnthropicAdapter)
+    adapter.model = "claude-haiku-4-5-20251001"
+    adapter._request_policy = model_request_policy(
+        "anthropic", adapter.model, "eval.score"
+    )
+
+    request = adapter._messages_request(system="sys", user="user", max_tokens=8192)
+
+    assert "output_config" not in request
+    assert "extra_body" not in request
 
 
 def test_core_stage_low_reasoning_reaches_provider_payloads(monkeypatch) -> None:
@@ -84,7 +110,9 @@ def test_core_stage_low_reasoning_reaches_provider_payloads(monkeypatch) -> None
     anthropic_request = anthropic_adapter._messages_request(
         system="sys", user="user", max_tokens=49152
     )
-    assert anthropic_request["extra_body"] == {"effort": "low"}
+    # The low-reasoning override LOWERS an effort the model accepts; it must not
+    # introduce one on Haiku 4.5, which rejects the parameter entirely.
+    assert "output_config" not in anthropic_request
 
     openai_adapter = OpenAIAdapter.__new__(OpenAIAdapter)
     openai_adapter.model = "gpt-5.4-mini"
