@@ -713,23 +713,40 @@ _DEMO_DAY_TIER_POLICY: tuple[str, str] = ("mid", "strong")
 # to, and ``_runtime_fallback_route`` returns None when the failed tier equals
 # the second slot, which would leave a hard failure with no retry at all. The
 # slot is never validated as monotonically increasing, so pointing it down needs
-# no logic change. OpenAI/Google entries are their existing cheap-primary values
-# verbatim, so the fallback providers behave exactly as before.
+# no logic change.
+#
+# EVERY provider is ``(strong, mid)`` here, not just Anthropic. The fallback
+# providers are reached only when the primary is unconfigured or its circuit is
+# open — i.e. exactly when a user who was charged for a frontier artifact is
+# about to receive one from somewhere else. Leaving OpenAI on its cheap-primary
+# ``mini`` slot meant that silently shipped a far weaker artifact at the same
+# price. Full-artifact generation is a firm frontier-tier decision in EVERY mode
+# and on EVERY provider; the cheap ladder still governs storyboard, increment
+# and refinement.
+#
+# Which concrete model each tier resolves to is the CATALOG's decision, not this
+# module's (see services/llm/model_catalog.py — this file must stay
+# provider-neutral). Note Google's ``strong`` tier currently has no ACTIVE model
+# (its Pro entry is ``status="preview"`` and ``_model_for_operation`` filters
+# non-active), so Google falls through to its ``mid`` slot — the same model it
+# ran before. That row is a self-documenting no-op today which auto-upgrades if
+# an active Pro model ever ships.
 _CORE_ARTIFACT_TIER_POLICY: dict[str, tuple[str, str | None]] = {
     "anthropic": ("strong", "mid"),
-    "openai": ("mini", "mid"),
-    "google": ("mid", "strong"),
+    "openai": ("strong", "mid"),
+    "google": ("strong", "mid"),
 }
 
-# Demo Day matches standard mode on Anthropic (Opus 5): Demo Day artifacts are
+# Demo Day matches standard mode on EVERY provider. Demo Day artifacts are
 # guarantee-bearing — the zero-LLM construction verifier joins on them and they
 # are handed to a coding agent as the entire build spec — so this mode must never
-# run a weaker model than a standard workspace. OpenAI/Google keep their existing
-# mid-tier Demo Day floor, which is stronger than their cheap primary.
+# run a weaker model than a standard workspace. That invariant is what forces
+# these rows to move in lockstep with the standard table above: promoting
+# standard OpenAI to ``strong`` while leaving Demo Day on ``mid`` would invert it.
 _DEMO_DAY_ARTIFACT_TIER_POLICY: dict[str, tuple[str, str | None]] = {
     "anthropic": ("strong", "mid"),
-    "openai": ("mid", "strong"),
-    "google": ("mid", "strong"),
+    "openai": ("strong", "mid"),
+    "google": ("strong", "mid"),
 }
 
 

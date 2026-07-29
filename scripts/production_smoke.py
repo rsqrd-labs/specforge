@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import quote, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 TIMEOUT_SECONDS = 20
@@ -63,6 +63,13 @@ class SmokeConfig:
     api_url: str
     access_token: str | None
     metrics_token: str | None
+    # provider/model scope the LLM provider-health probe only. Workspaces no
+    # longer carry a provider/model (routing is server-owned policy), so these
+    # are not sent to POST /workspaces.
+    #   THOUGHT2BUILD_SMOKE_PROVIDER — which provider must be healthy
+    #                                  (default: first in the server's priority)
+    #   THOUGHT2BUILD_SMOKE_MODEL    — catalog model id to probe instead of the
+    #                                  provider's judge model
     provider: str | None
     model: str | None
     run_llm_smoke: bool
@@ -220,24 +227,42 @@ def check(name: str) -> None:
     print(f"[smoke] {name}")
 
 
-def choose_provider(config: SmokeConfig, catalog: dict[str, Any]) -> tuple[str, str]:
-    providers = catalog.get("providers")
+def assert_provider_health(config: SmokeConfig, payload: dict[str, Any]) -> None:
+    """Assert the provider that will actually win a route is usable.
+
+    ``GET /providers/health`` live-probes each provider and returns the
+    server-owned ``priority`` order alongside the snapshots. The provider that
+    matters is the first configured one in that order — that is the one every
+    generation resolves to. A ``placeholder-`` prefixed key reads as
+    ``configured: false``, which is exactly the misconfiguration this catches.
+    """
+    providers = payload.get("providers")
+    priority = payload.get("priority")
     if not isinstance(providers, list) or not providers:
-        raise SmokeFailure("/providers returned no providers")
+        raise SmokeFailure("/providers/health returned no providers")
+    if not isinstance(priority, list) or not priority:
+        raise SmokeFailure("/providers/health returned no priority order")
 
-    provider = config.provider or providers[0]["id"]
-    selected = next((p for p in providers if p.get("id") == provider), None)
-    if selected is None:
-        raise SmokeFailure(f"Provider {provider!r} is not in /providers response")
+    by_id = {p.get("id"): p for p in providers if isinstance(p, dict)}
+    target = config.provider or priority[0]
+    snapshot = by_id.get(target)
+    if snapshot is None:
+        raise SmokeFailure(f"Provider {target!r} is not in /providers/health response")
 
-    models = selected.get("models")
-    if not isinstance(models, list) or not models:
-        raise SmokeFailure(f"Provider {provider!r} has no models")
-
-    model = config.model or models[0]["id"]
-    if not any(m.get("id") == model for m in models):
-        raise SmokeFailure(f"Model {model!r} is not available for {provider!r}")
-    return provider, model
+    if not snapshot.get("configured"):
+        raise SmokeFailure(
+            f"Provider {target!r} is not configured — its API key is blank or "
+            "'placeholder-' prefixed, so every generation will fail to route"
+        )
+    if snapshot.get("health") == "unhealthy":
+        raise SmokeFailure(
+            f"Provider {target!r} probed unhealthy "
+            f"(model={snapshot.get('probed_model')!r}): {snapshot.get('message')}"
+        )
+    print(
+        f"[smoke]   {target} configured, health="
+        f"{snapshot.get('health')}, probed={snapshot.get('probed_model')}"
+    )
 
 
 def run() -> None:
@@ -248,10 +273,6 @@ def run() -> None:
     _, health, _ = client.request("GET", "/health", use_auth=False)
     if health.get("status") != "ok":
         raise SmokeFailure(f"Unexpected health response: {health}")
-
-    check("provider catalog")
-    _, catalog, _ = client.request("GET", "/providers", use_auth=False)
-    provider, model = choose_provider(config, catalog)
 
     if config.metrics_token:
         check("metrics")
@@ -279,6 +300,24 @@ def run() -> None:
     if not user.get("id") or not user.get("email"):
         raise SmokeFailure("/auth/me did not return an authenticated user")
 
+    # LLM provider health. Admin-gated (each call makes a real outbound request
+    # per configured provider), so a non-admin smoke token gets a 403 — that is
+    # a skip, not a failure. Set THOUGHT2BUILD_SMOKE_MODEL=claude-opus-5 to also
+    # prove the key is *permitted* that model, not merely valid.
+    check("llm provider health")
+    path = "/providers/health"
+    if config.model:
+        path = f"{path}?model={quote(config.model)}"
+    status_code, provider_health, _ = client.request(
+        "GET",
+        path,
+        expected={200, 403},
+    )
+    if status_code == 403:
+        print("[smoke]   skipped: smoke user is not in ADMIN_USER_EMAILS")
+    else:
+        assert_provider_health(config, provider_health)
+
     check("credit balance")
     _, credits, _ = client.request("GET", "/credits/balance")
     if not isinstance(credits.get("balance"), int):
@@ -292,8 +331,6 @@ def run() -> None:
         body={
             "name": workspace_name,
             "problem_statement": PROBLEM_STATEMENT,
-            "provider": provider,
-            "model": model,
         },
         use_csrf=True,
         expected={201},
