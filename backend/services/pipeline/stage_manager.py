@@ -186,12 +186,12 @@ _POLL_INTERVAL_SECONDS = 10
 _RECOVERY_LOCK_TTL = 30
 
 STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
-# Core generation routes to each provider's cheapest viable current-generation
-# model to keep per-generation cost and latency down; on a runtime timeout or
-# provider failure the stage is retried exactly once on the provider's mid tier
+# The CHEAP generation policy: each provider's cheapest viable current-generation
+# model, to keep per-generation cost and latency down; on a runtime timeout or
+# provider failure the call is retried exactly once on the provider's mid tier
 # (the previous fast/cheap default) before the failure is surfaced.  Google has
-# no cheaper viable core-gen model than Flash and no active strong model, so it
-# stays mid-first and surfaces failures directly.
+# no cheaper viable model than Flash and no active strong model, so it stays
+# mid-first and surfaces failures directly.
 #
 # (requested_tier, runtime_escalation_tier) per provider, in provider-neutral
 # tier terms (the concrete models for each tier live only in the catalog — see
@@ -200,12 +200,18 @@ STAGE_ORDER = ["spec", "plan", "harness", "tasks"]
 #   anthropic: cheap small tier      -> escalate to the mid tier
 #   openai:    cheap mini tier       -> escalate to the mid tier
 #   google:    mid tier              -> no active strong tier; surfaces directly
-# Derived from the catalog's declarative core-generation tier ladder (issue #26
-# Phase 5b) — the single source of truth for the per-provider cheap-tier floor.
+# Derived from the catalog's declarative tier ladder (issue #26 Phase 5b) — the
+# single source of truth for the per-provider cheap-tier floor.
 # The live cheap-primary policy now lives in the product-wide ``tier_policy``
-# module so the core stages, the storyboard keynote, and increment generation all
-# read one definition (issue #17 follow-up); these aliases preserve the public
-# ``stage_manager`` symbols that callers and tests read for the core-gen view.
+# module so the storyboard keynote and increment generation read one definition
+# (issue #17 follow-up); these aliases preserve the public ``stage_manager``
+# symbols that callers and tests read for that view.
+#
+# SCOPE (narrowed): despite the name, this no longer describes full-artifact
+# generation. The four core stages, ``regenerate.full`` and the harness
+# gap-patch route through ``_CORE_ARTIFACT_TIER_POLICY`` (Opus 5 on Anthropic)
+# and are NOT governed by ``core_cheap_primary``. What still reads the policy
+# below is focused/section refinement, alongside storyboard and increment.
 CORE_GENERATION_TIER_POLICY = CHEAP_PRIMARY_TIER_POLICY
 _DEFAULT_CORE_TIER_POLICY = DEFAULT_TIER_POLICY
 # Seconds of pipeline silence between SSE progress heartbeats.  Heartbeats are
@@ -567,6 +573,7 @@ async def _dispatch_stage_eval(
     workspace_id: UUID | None,
     generation_provider: str | None = None,
     generation_model: str | None = None,
+    mode: str = "standard",
 ) -> EvalResult | None:
     """Score the stage, deferring to a provider batch when enabled.
 
@@ -602,6 +609,7 @@ async def _dispatch_stage_eval(
                 workspace_id=workspace_id,
                 generation_provider=generation_provider,
                 generation_model=generation_model,
+                mode=mode,
             )
             return None
         except Exception:
@@ -617,6 +625,7 @@ async def _dispatch_stage_eval(
         harness_content=harness_content,
         generation_provider=generation_provider,
         generation_model=generation_model,
+        mode=mode,
     )
 
 
@@ -632,6 +641,7 @@ def _schedule_stage_eval(
     harness_content: str | None = None,
     generation_provider: str | None = None,
     generation_model: str | None = None,
+    mode: str = "standard",
 ) -> asyncio.Task[EvalResult | None]:
     # The LLM score is strictly fire-and-forget (issue #27 Phase 1 removed the
     # inline await). The registry retains a strong reference until completion —
@@ -650,6 +660,7 @@ def _schedule_stage_eval(
             workspace_id=workspace_id,
             generation_provider=generation_provider,
             generation_model=generation_model,
+            mode=mode,
         )
     )
 
@@ -684,20 +695,97 @@ def _core_generation_tier_policy(provider: str) -> tuple[str, str]:
 # mid model rather than erroring.
 _DEMO_DAY_TIER_POLICY: tuple[str, str] = ("mid", "strong")
 
+# FULL-ARTIFACT generation policy: the four core stages, ``regenerate.full`` and
+# the harness gap-patch (which routes through ``_route_for_stage_generation``).
+# Deliberately a separate table from the shared cheap ladder rather than an edit
+# to it, for two reasons:
+#
+#   1. ``CORE_GENERATION_TIER_LADDER`` / ``tier_policy.generation_tier_policy``
+#      is read by storyboard AND increment generation too. Moving its Anthropic
+#      floor would drag those onto the frontier tier as well; they are meant to
+#      stay cheap.
+#   2. The ladder structurally cannot express "primary = strong":
+#      ``validate_core_generation_ladder`` requires at least two strictly
+#      increasing tiers, and ``strong`` is the top.
+#
+# Anthropic's second slot is ``mid`` (Sonnet 5), which is a resilience
+# DE-escalation, not an escalation — there is nothing above Opus 5 to escalate
+# to, and ``_runtime_fallback_route`` returns None when the failed tier equals
+# the second slot, which would leave a hard failure with no retry at all. The
+# slot is never validated as monotonically increasing, so pointing it down needs
+# no logic change. OpenAI/Google entries are their existing cheap-primary values
+# verbatim, so the fallback providers behave exactly as before.
+_CORE_ARTIFACT_TIER_POLICY: dict[str, tuple[str, str | None]] = {
+    "anthropic": ("strong", "mid"),
+    "openai": ("mini", "mid"),
+    "google": ("mid", "strong"),
+}
+
+# Demo Day matches standard mode on Anthropic (Opus 5): Demo Day artifacts are
+# guarantee-bearing — the zero-LLM construction verifier joins on them and they
+# are handed to a coding agent as the entire build spec — so this mode must never
+# run a weaker model than a standard workspace. OpenAI/Google keep their existing
+# mid-tier Demo Day floor, which is stronger than their cheap primary.
+_DEMO_DAY_ARTIFACT_TIER_POLICY: dict[str, tuple[str, str | None]] = {
+    "anthropic": ("strong", "mid"),
+    "openai": ("mid", "strong"),
+    "google": ("mid", "strong"),
+}
+
 
 def _is_demo_day(workspace: Workspace) -> bool:
     return (getattr(workspace, "mode", "standard") or "standard") == "demo_day"
 
 
+def _workspace_mode(workspace: Workspace) -> str:
+    """The workspace's generation/grading mode, normalised.
+
+    One spelling of the ``getattr(...) or "standard"`` defaulting, so the eval
+    judge, the critic, the section contracts and the prompt version can never
+    disagree about which contract an artifact was written to.
+    """
+    return (getattr(workspace, "mode", "standard") or "standard") or "standard"
+
+
+def _core_artifact_tier_policy_for(
+    workspace: Workspace, provider: str
+) -> tuple[str, str | None]:
+    """``(requested_tier, fallback_tier)`` for FULL-ARTIFACT generation.
+
+    Covers the four core stages, ``regenerate.full`` and the harness gap-patch —
+    the paths that produce a whole artifact and where output quality is the
+    product. Independent of ``core_cheap_primary``: that flag now governs only
+    the cheap paths (focused/section refine, storyboard, increment), which
+    continue to read ``_generation_tier_policy_for``.
+
+    An unlisted provider falls back to the product-wide mid-first default rather
+    than being silently downgraded.
+    """
+    table = (
+        _DEMO_DAY_ARTIFACT_TIER_POLICY
+        if _is_demo_day(workspace)
+        else _CORE_ARTIFACT_TIER_POLICY
+    )
+    return table.get(provider, _DEFAULT_CORE_TIER_POLICY)
+
+
 def _generation_tier_policy_for(
     workspace: Workspace, provider: str
 ) -> tuple[str, str | None]:
-    """``(requested_tier, escalation_tier)`` for a workspace's artifact generation.
+    """``(requested_tier, escalation_tier)`` for a workspace's CHEAP generation.
 
     Demo Day floors at the mid tier (``_DEMO_DAY_TIER_POLICY``); every other
     workspace keeps the flag-gated cheap-primary policy byte-for-byte (the §4
-    regression pin). This is the single funnel both fresh generation and full
-    regenerate read, so the floor cannot be bypassed by one of those paths.
+    regression pin).
+
+    Scope note: this used to funnel full-artifact generation too. It no longer
+    does — that moved to ``_core_artifact_tier_policy_for``. What still reads
+    this is focused/section refinement, whose budgets are tiny (``refine.focused``
+    is 768 output tokens) and which must stay on the cheap tier. Routing these
+    through the artifact policy would not merely be expensive: the frontier entry
+    does not recommend ``refine.focused`` at all, so Anthropic would resolve no
+    model and ``resolve_platform_route_by_provider`` would silently continue to
+    the NEXT provider, migrating refinement off Anthropic with no error raised.
     """
     if _is_demo_day(workspace):
         return _DEMO_DAY_TIER_POLICY
@@ -761,7 +849,9 @@ def _route_for_stage_generation(
 ) -> LLMRoute:
     provider_policies: dict[str, tuple[str, str | None]] = {}
     for provider in platform_provider_priority():
-        requested_tier, fallback_tier = _generation_tier_policy_for(workspace, provider)
+        requested_tier, fallback_tier = _core_artifact_tier_policy_for(
+            workspace, provider
+        )
         provider_policies[provider] = _apply_complexity_floor(
             requested_tier,
             fallback_tier,
@@ -956,18 +1046,30 @@ async def _stage_db_heartbeat(stage_id: UUID, run_id: UUID | None = None) -> Non
 def _runtime_fallback_route(
     failed_route: LLMRoute, *, mode: str = "standard"
 ) -> LLMRoute | None:
-    """Resolve the one-shot escalation retry route after a core-gen failure.
+    """Resolve the one-shot retry route after a full-artifact generation failure.
 
-    A failed chunk may escalate once on the selected provider.  Cross-provider
+    A failed chunk may retry once on the selected provider.  Cross-provider
     fallback is intentionally excluded: provider credentials, rate limits, and
     model tier semantics are independent, and changing provider mid-artifact
     produces inconsistent chunks. Rate-limit retries are handled separately and
     never reach this function.
+
+    Direction note: for a provider whose primary is already the TOP tier (today
+    Anthropic, on Opus 5) the second policy slot points DOWN — the retry lands on
+    the mid tier. That is a deliberate resilience de-escalation, not an
+    escalation: nothing exists above the frontier tier, and the equal-tier guard
+    below would otherwise return None and turn every transient hard failure into
+    a terminal one. The user gets a Sonnet-5 artifact instead of an error; the
+    effective model is recorded on the generation either way.
     """
-    if mode == "demo_day":
-        _, escalation_tier = _DEMO_DAY_TIER_POLICY
-    else:
-        _, escalation_tier = _core_generation_tier_policy(failed_route.provider)
+    table = (
+        _DEMO_DAY_ARTIFACT_TIER_POLICY
+        if mode == "demo_day"
+        else _CORE_ARTIFACT_TIER_POLICY
+    )
+    _, escalation_tier = table.get(failed_route.provider, _DEFAULT_CORE_TIER_POLICY)
+    if escalation_tier is None:
+        return None
     if failed_route.model_tier == escalation_tier:
         return None
     try:
@@ -1036,19 +1138,29 @@ def _route_for_refine(
         "section": "refine.section",
         "full": "regenerate.full",
     }[mode]
-    # Full regenerate follows the same core-generation policy as a fresh stage,
-    # including the complexity floor. Focused/section refinement keeps the same
-    # provider-specific cheap-primary policy without applying that floor.
+    # Full regenerate produces a whole artifact, so it follows the same
+    # full-artifact policy as a fresh stage (Opus 5 on Anthropic), including the
+    # complexity floor. Focused/section refinement is a surgical edit with a tiny
+    # output budget and stays on the cheap-primary policy — routing it through
+    # the artifact policy would push it onto a tier that does not recommend
+    # `refine.focused` at all, and the resolver would then silently fall through
+    # to the next PROVIDER rather than raise.
     provider_policies: dict[str, tuple[str, str | None]] = {}
     for provider in platform_provider_priority():
-        requested_tier, fallback_tier = _generation_tier_policy_for(workspace, provider)
         if mode == "full":
+            requested_tier, fallback_tier = _core_artifact_tier_policy_for(
+                workspace, provider
+            )
             requested_tier, fallback_tier = _apply_complexity_floor(
                 requested_tier,
                 fallback_tier,
                 stage_type=stage_type or "tasks",
                 provider=provider,
                 signals=signals,
+            )
+        else:
+            requested_tier, fallback_tier = _generation_tier_policy_for(
+                workspace, provider
             )
         provider_policies[provider] = (requested_tier, fallback_tier)
     return resolve_platform_route_by_provider(
@@ -1610,25 +1722,86 @@ def _ensure_chunk_heading(chunk: ArtifactChunkSpec, text: str) -> str:
     return text
 
 
+def _is_harness_files_chunk(stage_type: str, chunk: ArtifactChunkSpec) -> bool:
+    """True for the harness chunk that must emit every runnable file.
+
+    Keyed on the chunk's STRUCTURAL identity (``required_heading == "## Files"``)
+    rather than a literal key string. The two mode-specific specs name this chunk
+    differently — ``"harness-files"`` (standard) vs ``"demo-harness-files"``
+    (Demo Day) — so the old ``chunk.key == "harness-files"`` test silently
+    excluded Demo Day and handed the chunk that carries EVERY test file half the
+    output budget (24,576 instead of 49,152 tokens) plus the *contract* chunk's
+    "6,000-45,000 characters" length target. That is a generation-side cause of
+    dropped harness files in Demo Day — the guarantee-bearing mode — not a gate
+    problem: the model was instructed to fit every runnable file into a budget
+    sized for a table of contents. ``required_heading`` is the same discriminator
+    ``_chunk_user_prompt`` already uses to inject the File-Tree checklist, so all
+    three per-chunk decisions now agree on what "the Files chunk" means.
+    """
+    return stage_type == "harness" and chunk.required_heading == "## Files"
+
+
 def _chunk_output_budget(
     stage_type: str, chunk: ArtifactChunkSpec, route: LLMRoute
 ) -> int:
     """Return the fixed first-attempt ceiling for a generation chunk."""
     if stage_type == "harness":
-        requested = 49_152 if chunk.key == "harness-files" else 24_576
+        requested = 49_152 if _is_harness_files_chunk(stage_type, chunk) else 24_576
     else:
         requested = 32_768
     return min(requested, model_max_output_tokens(route.provider, route.model))
 
 
 def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
-    if stage_type == "harness" and chunk.key == "harness-files":
+    """Return the character-length guidance appended to a chunk's user prompt.
+
+    Every target is sized against what ONE provider stream can actually finish,
+    because a chunk is exactly one call: ``_watchdog_stream`` kills it at the
+    absolute ``stage_provider_call_timeout_seconds`` hard cap (validator-capped
+    at 180s), and the whole run is pinned to a 300s deadline minus the 30s
+    finalise reserve. Overshooting the bound is not a soft failure — the stream
+    is killed, its partial text is discarded, and the ``(ProviderError,
+    TimeoutError)`` handler retries the chunk on the mid tier with *less* time
+    left than the first attempt had, so a too-ambitious target tends to burn the
+    whole deadline and deliver nothing.
+
+    The 80,000-character document target is written for a *slice* of a document:
+    in standard mode spec/plan/tasks are 3-4 chunks, so no single call is ever
+    asked to fill it. ``whole_document`` chunks are the one case where a single
+    call must carry the ENTIRE artifact — in practice Demo Day's ``demo-full``
+    (spec, plan and tasks are all single-chunk there; see
+    ``_demo_day_chunk_specs_for_stage``, which keeps them single-pass on purpose
+    to avoid cross-chunk FR/AC/T-NNN drift). Handing that call the slice-sized
+    80,000-character target invites it to aim at ~20K output tokens, above the
+    ~15-18K-token dense-chunk band that fits inside the 180s bound at Opus 5's
+    ``effort=medium`` — i.e. the advertised ceiling sits at or past the measured
+    edge with no margin, in the *guarantee-bearing* mode.
+
+    55,000 characters (~14-15K tokens even at a dense 3.5 chars/token) sits
+    inside that measured band, and is not a depth ceiling: a complete Demo Day
+    package is 11 spec / 12 plan / 4 tasks sections over a ≤5-hour build, which
+    measures well under it. This trims only the unreachable head of the range —
+    it does not lower the 8,000-character floor, and the depth floors
+    (``_min_body_chars``, the task/requirement-id minimums) are unchanged.
+
+    Keyed on ``chunk.whole_document`` — a structural property — rather than the
+    ``"demo-full"`` key string, for the same reason ``_is_harness_files_chunk``
+    is: the two modes name their chunks differently, and key-string matching is
+    exactly what silently excluded Demo Day from the harness Files budget.
+    """
+    if _is_harness_files_chunk(stage_type, chunk):
         return (
             "Length target: include every promised runnable file, while keeping "
             "the complete chunk below 180,000 characters."
         )
     if stage_type == "harness":
         return "Length target: 6,000-45,000 characters for this contract chunk."
+    if chunk.whole_document:
+        return (
+            "Length target: 8,000-55,000 characters for this complete document. "
+            "Every required section must be substantive — spend the budget on "
+            "concrete detail, not preamble, restatement, or filler."
+        )
     return "Length target: 8,000-80,000 characters for this document chunk."
 
 
@@ -2078,11 +2251,7 @@ def _chunk_user_prompt(
     # (the paths are the model's own prior output), and it attacks the chunk↔files
     # divergence before deterministic validation blocks the partial artifact.
     checklist_text = ""
-    if (
-        stage_type == "harness"
-        and chunk.required_heading == "## Files"
-        and prior_chunks
-    ):
+    if _is_harness_files_chunk(stage_type, chunk) and prior_chunks:
         tree_paths = harness_file_tree_paths("\n\n".join(prior_chunks))
         # Defense-in-depth: these are the model's own prior File-Tree tokens, but
         # they are still model-generated text spliced into the INSTRUCTION region
@@ -3066,6 +3235,7 @@ class StageManager:
                     harness_content=harness_content_for_eval,
                     generation_provider=route.provider,
                     generation_model=route.model,
+                    mode=gen_mode,
                 )
             except Exception:
                 logger.warning(
@@ -4273,6 +4443,7 @@ class StageManager:
                     # the persisted artifact, never to the judge model.
                     generation_provider=route.provider,
                     generation_model=route.model,
+                    mode=mode,
                 )
             except Exception:
                 logger.warning(
@@ -4989,6 +5160,7 @@ class StageManager:
                 provider=platform_provider_priority()[0],
                 workspace_id=stage.workspace_id,
                 harness_content=harness_content_for_eval,
+                mode=await self._workspace_mode_by_id(stage.workspace_id, db),
             )
         return stage
 
@@ -5099,6 +5271,7 @@ class StageManager:
                 provider=platform_provider_priority()[0],
                 workspace_id=workspace.id,
                 harness_content=harness_content_for_eval,
+                mode=_workspace_mode(workspace),
             )
         return stage
 
@@ -5313,6 +5486,21 @@ class StageManager:
         ).all()
         content_by_type = {row_type: (content or "") for row_type, content in rows}
         return {dep_type: content_by_type.get(dep_type, "") for dep_type in dep_types}
+
+    async def _workspace_mode_by_id(self, workspace_id: UUID, db: AsyncSession) -> str:
+        """The workspace's mode, by id, for paths that hold no workspace object.
+
+        ``rollback`` re-scores a restored version but only ever loads the stage,
+        so it has no workspace in scope. A single indexed PK scalar read is
+        cheaper than loading the whole workspace with its stages, and getting the
+        mode right is what stops a restored Demo Day artifact from being graded
+        against the standard rubric. Falls back to ``"standard"`` if the row is
+        gone — eval is best-effort and must never raise on this path.
+        """
+        mode = (
+            await db.execute(select(Workspace.mode).where(Workspace.id == workspace_id))
+        ).scalar_one_or_none()
+        return mode or "standard"
 
     def _clear_quality_gate(self, stage: Stage) -> None:
         stage.quality_gate_status = "clear"
@@ -5863,6 +6051,7 @@ class StageManager:
         baseline_content = stage.content or ""
         baseline_version = stage.current_version
         workspace_id = workspace.id
+        patch_mode = _workspace_mode(workspace)
         system_prompt = await get_patch_system_prompt()
         user_prompt = build_patch_user_prompt(baseline_content, uncovered_reqs)
 
@@ -6031,6 +6220,7 @@ class StageManager:
                 provider=route.provider,
                 workspace_id=workspace_id,
                 content_generation_id=None,
+                mode=patch_mode,
             )
             try:
                 yield f'{{"done": true, "stage_id": "{stage_id}"}}'

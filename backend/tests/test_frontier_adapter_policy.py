@@ -38,6 +38,33 @@ def test_anthropic_opus48_request_includes_effort() -> None:
     assert request["extra_body"] == {"effort": "high"}
 
 
+def test_opus_5_core_stage_request_sends_effort_not_a_thinking_block() -> None:
+    """Opus 5 does NOT support extended thinking (`thinking.type: "enabled"`) —
+    it uses adaptive thinking plus the `effort` parameter. The Anthropic adapter
+    must therefore keep emitting `extra_body={"effort": ...}` for it; sending a
+    thinking block instead would 400 every core-stage generation.
+
+    The effort is `medium`, not the Claude-API default of `high`: core stages are
+    bound by a locked interactive deadline (a single provider stream is capped at
+    `stage_provider_call_timeout_seconds`, the stage at a validator-pinned 300s)
+    and high-effort reasoning tokens are spent before any visible output.
+    """
+    from services.llm.anthropic_adapter import AnthropicAdapter
+    from services.llm.model_catalog import model_request_policy
+
+    adapter = AnthropicAdapter.__new__(AnthropicAdapter)
+    adapter.model = "claude-opus-5"
+    adapter._request_policy = model_request_policy(
+        "anthropic", adapter.model, "spec.generate"
+    )
+
+    request = adapter._messages_request(system="sys", user="user", max_tokens=49152)
+
+    assert request["model"] == "claude-opus-5"
+    assert request["extra_body"] == {"effort": "medium"}
+    assert "thinking" not in request
+
+
 def test_core_stage_low_reasoning_reaches_provider_payloads(monkeypatch) -> None:
     from config import settings
     from services.llm.anthropic_adapter import AnthropicAdapter

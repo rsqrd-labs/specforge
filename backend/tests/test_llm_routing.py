@@ -151,7 +151,7 @@ def test_core_generation_routes_use_cheap_primary_defaults(
 @pytest.mark.parametrize(
     ("provider", "expected"),
     [
-        ("anthropic", "claude-sonnet-4-6"),
+        ("anthropic", "claude-sonnet-5"),
         ("openai", "gpt-5.4"),
     ],
 )
@@ -176,7 +176,7 @@ def test_mid_tier_escalation_stays_eligible_for_core_generation(
 @pytest.mark.parametrize(
     ("provider", "expected"),
     [
-        ("anthropic", "claude-opus-4-8"),
+        ("anthropic", "claude-opus-5"),
         ("openai", "gpt-5.5"),
     ],
 )

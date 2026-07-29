@@ -94,6 +94,7 @@ async def enqueue_eval_batch(
     workspace_id: UUID | None,
     generation_provider: str | None = None,
     generation_model: str | None = None,
+    mode: str = "standard",
 ) -> UUID:
     """Checkpoint a pending eval batch row and enqueue its submit job.
 
@@ -103,7 +104,7 @@ async def enqueue_eval_batch(
     re-enqueues pending rows, so we never double-score by also falling back.
     """
     system, user_prompt, max_tokens = build_eval_request(
-        stage_type, content, spec_content, provider
+        stage_type, content, spec_content, provider, mode
     )
     context = {
         "stage_version_id": str(stage_version_id),
@@ -118,6 +119,11 @@ async def enqueue_eval_batch(
         # metadata for the Langfuse score/dataset, distinct from the judge model.
         "generation_provider": generation_provider,
         "generation_model": generation_model,
+        # The workspace mode the artifact was written to. Carried through the
+        # batch checkpoint because the completion side re-derives the SCORE
+        # WEIGHTS from it (the prompt is already baked in above) — without it a
+        # batched Demo Day eval would be graded on the standard weight table.
+        "mode": mode,
     }
     async with AsyncSessionLocal() as db:
         row = LLMBatchJob(
@@ -266,6 +272,7 @@ async def _finish_from_item(db: Any, row: LLMBatchJob, item: Any) -> str:
             content_generation_id=row.context.get("content_generation_id"),
             generation_provider=row.context.get("generation_provider"),
             generation_model=row.context.get("generation_model"),
+            mode=row.context.get("mode") or "standard",
         )
         if result is not None:
             return "succeeded"
@@ -289,6 +296,7 @@ async def _fallback_score(db: Any, row: LLMBatchJob) -> None:
             harness_content=row.context.get("harness_content"),
             generation_provider=row.context.get("generation_provider"),
             generation_model=row.context.get("generation_model"),
+            mode=row.context.get("mode") or "standard",
         )
     except Exception:  # pragma: no cover — eval is best-effort, never fatal
         logger.exception("llm_batch.fallback_score_failed", batch_job_id=str(row.id))

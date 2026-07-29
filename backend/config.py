@@ -27,15 +27,17 @@ class Settings(BaseSettings):
     # Server-owned LLM provider precedence. This is deliberately never exposed
     # through a user API: product traffic is routed by backend policy.
     #
-    # Google leads: Gemini is the platform's funded provider (Gemini 3.6 Flash
-    # for core generation, Gemini 3.5 Flash-Lite for judge/eval). Anthropic and
-    # OpenAI stay in the list as fallbacks and are only reachable when Google's
-    # key is unset/placeholder or its circuit is open — routing skips any
-    # provider that is not configured (see provider_status.is_provider_configured),
-    # so an unconfigured fallback simply never wins. Reverting the cutover is an
-    # env change only: set this to "openai,anthropic,google" and restore
-    # OPENAI_API_KEY.
-    llm_provider_priority: str = "google,anthropic,openai"
+    # Anthropic leads: Claude is the platform's funded provider (Claude Opus 5
+    # for full-artifact generation — the four core stages, full regenerate and
+    # the harness gap-patch — and Claude Haiku 4.5 for the cheap paths: judge,
+    # eval, summary, focused/section refine, storyboard and increment). OpenAI
+    # and Google stay in the list as fallbacks and are only reachable when
+    # Anthropic's key is unset/placeholder or its circuit is open — routing
+    # skips any provider that is not configured (see
+    # provider_status.is_provider_configured), so an unconfigured fallback
+    # simply never wins. Falling back to a cheaper platform is an env change
+    # only: set this to "google,anthropic,openai" and restore GOOGLE_API_KEY.
+    llm_provider_priority: str = "anthropic,openai,google"
 
     @field_validator("llm_provider_priority")
     @classmethod

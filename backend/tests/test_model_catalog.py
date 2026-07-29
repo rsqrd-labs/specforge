@@ -213,9 +213,15 @@ def test_frontier_adapter_policy_is_explicit() -> None:
     assert (
         model_request_policy("google", "gemini-3.6-flash")["thinking_level"] == "high"
     )
+    # Opus 5 runs the four core stages at MEDIUM effort, not the Claude-API
+    # default of high: core generation is bound by a locked interactive deadline
+    # (a single provider stream is capped at stage_provider_call_timeout_seconds
+    # and the stage at a validator-pinned 300s), and high-effort reasoning tokens
+    # are spent before any visible output. Raising this back to "high" without
+    # first re-measuring per-chunk wall-clock will start timing out core stages.
     assert (
-        model_request_policy("anthropic", "claude-opus-4-8")["reasoning_effort"]
-        == "high"
+        model_request_policy("anthropic", "claude-opus-5")["reasoning_effort"]
+        == "medium"
     )
 
 

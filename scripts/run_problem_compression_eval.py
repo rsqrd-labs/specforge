@@ -151,7 +151,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     parser.add_argument("--provider", default="anthropic")
-    parser.add_argument("--model", default="claude-sonnet-4-6")
+    parser.add_argument("--model", default="claude-sonnet-5")
     parser.add_argument(
         "--live",
         action="store_true",

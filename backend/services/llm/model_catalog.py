@@ -180,8 +180,8 @@ class ModelCatalogEntry:
 MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
     ModelCatalogEntry(
         provider="anthropic",
-        model_id="claude-opus-4-8",
-        display_name="Claude Opus 4.8",
+        model_id="claude-opus-5",
+        display_name="Claude Opus 5",
         tier="strong",
         status="active",
         adapter_api="messages",
@@ -191,30 +191,115 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         cache_write_1h_cost_per_million=10.0,
         output_cost_per_million=25.0,
         max_context_tokens=1_000_000,
+        # Opus 5's real output ceiling is 128K. 64000 is the established
+        # cross-provider core-gen convention (see the GPT-5.5 entry): it sits
+        # below every current-gen model's real cap, so a >cap max_tokens can
+        # never 400, and it still gives the doubling limit-stop repair genuine
+        # headroom above the 49152 first-attempt budget.
         default_max_output_tokens=64000,
-        # Core generation ops are RECOMMENDED (not default) so the frontier
-        # tier is never the primary route but stays eligible as the runtime
-        # escalation when a mid-tier generation times out or errors.
-        # storyboard.generate stays eligible so that when the cheap-primary flag
-        # is reverted (storyboard policy becomes mid→strong), the strong tier is
-        # still reachable as the storyboard escalation target.
+        # The four core stages + regenerate.full are RECOMMENDED but NOT
+        # defaults. Route resolution (routing._model_for_operation) prefers a
+        # tier's flagged default and otherwise falls back to any active model
+        # recommending the operation, so Opus 5 wins the strong tier via
+        # ``selection_reason="active_same_tier"`` — which is how the previous
+        # frontier entry already behaved. Leaving default_operations empty keeps
+        # validate_model_catalog's "exactly one active core-gen default per
+        # provider" invariant satisfied by Haiku 4.5, which is still the primary
+        # for the SHARED cheap ladder that storyboard/increment read.
         recommended_operations=(*CORE_GENERATION_OPERATIONS, "storyboard.generate"),
         default_operations=(),
         supports_reasoning=True,
-        reasoning_effort="high",
+        # Medium, NOT the Claude-API default of high. Core stages are bound by a
+        # locked interactive deadline contract — stage_provider_call_timeout_seconds
+        # caps a single provider stream at 180s and stage_generation_deadline_seconds
+        # is validator-pinned to 300s — and high-effort reasoning tokens are spent
+        # before any visible output. Medium buys the latency headroom that keeps a
+        # dense ~15-18K-token chunk inside the 180s bound.
+        reasoning_effort="medium",
         rollout_notes=(
-            "Anthropic frontier escalation tier for core ASDD generation "
-            "(one-shot runtime retry after a mid-tier failure) and the storyboard "
-            "escalation target when reverted to mid-first."
+            "Anthropic full-artifact generation primary: the four core ASDD "
+            "stages, full regenerate and the harness gap-patch, in both standard "
+            "and Demo Day mode. Resolves via active_same_tier (no default_operations "
+            "claim) — route logs show that selection_reason, not active_default. "
+            "A hard runtime failure retries down once on Sonnet 5 (mid)."
         ),
         routing_priority=1,
+    ),
+    ModelCatalogEntry(
+        provider="anthropic",
+        model_id="claude-sonnet-5",
+        display_name="Claude Sonnet 5",
+        tier="mid",
+        status="active",
+        adapter_api="messages",
+        # INTRODUCTORY PRICING — $2/$10 per MTok applies only through
+        # 2026-08-31, after which Anthropic's standard Sonnet 5 rate of
+        # $3/$15 (cached 0.3, cache-write 3.75/6.0) takes effect. Update this
+        # entry on 2026-09-01 or the cost ledger silently under-reports.
+        input_cost_per_million=2.0,
+        cached_input_cost_per_million=0.2,
+        cache_write_5m_cost_per_million=2.5,
+        cache_write_1h_cost_per_million=4.0,
+        output_cost_per_million=10.0,
+        max_context_tokens=1_000_000,
+        default_max_output_tokens=64000,
+        # The core ops are recommended so Sonnet 5 can serve as the Opus 5
+        # retry-down target after a hard core-generation failure; storyboard
+        # keeps it as the cheap-primary quality-failure escalation target.
+        #
+        # ``refine.focused`` is recommended here to close a latent routing hole:
+        # Demo Day floors ALL generation at the mid tier, but no Anthropic mid
+        # model recommended focused refine, so the resolver found nothing for
+        # Anthropic and silently continued to the next PROVIDER (it fell through
+        # to Gemini). That was invisible while Google was primary; with Anthropic
+        # primary and a placeholder Google key it would resolve no route at all
+        # and raise. Standard mode is unaffected — its cheap policy resolves the
+        # small tier first and never consults mid for this operation.
+        recommended_operations=(
+            *CORE_GENERATION_OPERATIONS,
+            "refine.focused",
+            "refine.section",
+            "storyboard.generate",
+        ),
+        default_operations=("refine.section", "storyboard.generate"),
+        supports_reasoning=True,
+        reasoning_effort="medium",
+        rollout_notes=(
+            "Anthropic mid tier: the Opus 5 retry-down target for full-artifact "
+            "generation, the section-refinement default, and the storyboard "
+            "quality-failure escalation target (issue #17 follow-up). "
+            "Introductory pricing expires 2026-08-31 — see the cost comment."
+        ),
+        routing_priority=20,
+    ),
+    ModelCatalogEntry(
+        provider="anthropic",
+        model_id="claude-opus-4-8",
+        display_name="Claude Opus 4.8",
+        tier="strong",
+        status="deprecated",
+        adapter_api="messages",
+        input_cost_per_million=5.0,
+        cached_input_cost_per_million=0.5,
+        cache_write_5m_cost_per_million=6.25,
+        cache_write_1h_cost_per_million=10.0,
+        output_cost_per_million=25.0,
+        max_context_tokens=1_000_000,
+        default_max_output_tokens=64000,
+        recommended_operations=("summary.create",),
+        default_operations=(),
+        rollout_notes=(
+            "Superseded by Claude Opus 5. Retained (deprecate-don't-delete) so "
+            "historical llm_cost_events rows keep resolving their pricing."
+        ),
+        routing_priority=500,
     ),
     ModelCatalogEntry(
         provider="anthropic",
         model_id="claude-sonnet-4-6",
         display_name="Claude Sonnet 4.6",
         tier="mid",
-        status="active",
+        status="deprecated",
         adapter_api="messages",
         input_cost_per_million=3.0,
         cached_input_cost_per_million=0.3,
@@ -223,22 +308,13 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         output_cost_per_million=15.0,
         max_context_tokens=1_000_000,
         default_max_output_tokens=64000,
-        # storyboard.generate kept here so Sonnet is the mid-tier escalation
-        # target when the cheap storyboard primary (Haiku) fails a quality gate.
-        recommended_operations=(
-            *CORE_GENERATION_OPERATIONS,
-            "refine.section",
-            "storyboard.generate",
-        ),
-        default_operations=("refine.section", "storyboard.generate"),
-        supports_reasoning=True,
-        reasoning_effort="medium",
+        recommended_operations=("summary.create",),
+        default_operations=(),
         rollout_notes=(
-            "Anthropic mid-tier core ASDD generation escalation (one-shot retry "
-            "after a Haiku 4.5 failure), section refinement default, and "
-            "storyboard quality-failure escalation target (issue #17 follow-up)."
+            "Superseded by Claude Sonnet 5. Retained (deprecate-don't-delete) so "
+            "historical llm_cost_events rows keep resolving their pricing."
         ),
-        routing_priority=20,
+        routing_priority=500,
     ),
     ModelCatalogEntry(
         provider="anthropic",
@@ -366,8 +442,12 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         default_max_output_tokens=64000,
         # storyboard.generate kept here so GPT-5.4 is the mid-tier escalation
         # target when the cheap storyboard primary (GPT-5.4 Mini) fails a gate.
+        # refine.focused mirrors the Anthropic mid entry — without it the Demo
+        # Day mid floor resolves no OpenAI model for focused refine and falls
+        # through to another provider (see the Sonnet 5 entry).
         recommended_operations=(
             *CORE_GENERATION_OPERATIONS,
+            "refine.focused",
             "refine.section",
             "storyboard.generate",
         ),

@@ -523,6 +523,29 @@ def _is_not_applicable_body(body: str) -> bool:
     return bool(_NOT_APPLICABLE_RE.match(body))
 
 
+# Sections whose contract is a MANIFEST — a list of file paths — not prose.
+# Grading them with the prose depth floor is category-wrong and fires a
+# guaranteed false `shallow_required_section` on small-but-complete packages: a
+# correct 3-file Demo Day tree normalises to ~71 characters against a 90-char
+# floor, so EVERY lean harness was told its File Tree "does not contain
+# substantive content" while listing exactly the files it was asked to list.
+# Substance here is the number of paths named, which is also the only property
+# any downstream consumer (`missing_harness_files`, the Files-chunk checklist)
+# actually reads from the section.
+_MANIFEST_SECTIONS: frozenset[str] = frozenset({"## File Tree"})
+
+
+def _manifest_section_issue(heading: str, body: str) -> CompletenessIssue | None:
+    """Grade a manifest section by the paths it names, never by prose length."""
+    if _file_tree_paths(body):
+        return None
+    return CompletenessIssue(
+        code="shallow_required_section",
+        detail=f"{heading} does not name any file paths.",
+        reference=heading,
+    )
+
+
 def _section_body_issues(
     stage_type: str,
     artifact_md: str,
@@ -533,6 +556,11 @@ def _section_body_issues(
     conditional = _conditional_headings_for_stage(stage_type)
     for heading in _required_headings(stage_type, deps, mode):
         body = _section_body(artifact_md, heading)
+        if heading in _MANIFEST_SECTIONS:
+            manifest_issue = _manifest_section_issue(heading, body)
+            if manifest_issue is not None:
+                issues.append(manifest_issue)
+            continue
         # A conditional section answered with the blessed "Not applicable …"
         # one-liner is valid even though it is well under the depth floor — the
         # prompt explicitly authorises it for an out-of-scope surface. Honour
@@ -1624,6 +1652,59 @@ def uncovered_requirements(harness_content: str) -> list[str]:
     ]
 
 
+def harness_coverage_ratio(harness_content: str) -> tuple[int, int]:
+    """Deterministic ``(covered, total)`` requirement coverage for a harness.
+
+    ``total`` is the number of distinct requirement IDs the Requirement-to-Test
+    Matrix maps to at least one parseable test file; ``covered`` is how many of
+    those have at least one of their mapped files actually emitted as a
+    ``### File:`` block. Exactly the complement of :func:`uncovered_requirements`,
+    so the coverage number, the CoveragePanel gap list, and the paid patch can
+    never disagree — they are three views of one computation.
+
+    This exists to replace the judge's ``coverage_percent``, which is derived
+    from a harness compacted to ~20K chars (10K on the compact retry) while a
+    real harness runs 60–120KB. That is the same truncation poisoning that got
+    the judge's ``uncovered_reqs`` pulled from the UI and excluded from the paid
+    patch — but ``coverage_percent`` kept being displayed as a headline figure
+    and weighted at 0.20 in the harness score, so the judge was scoring coverage
+    it structurally could not see.
+
+    Returns ``(0, 0)`` when the matrix names no test files at all (unparseable
+    or absent). Callers must treat a zero total as "unknown" and show nothing —
+    never as 0% coverage, which would be a false alarm on an artifact whose
+    matrix simply did not parse.
+    """
+    matrix = _section_body(harness_content, "## Requirement-to-Test Matrix")
+    if not matrix:
+        return 0, 0
+    emitted = _emitted_file_index(harness_content)
+    req_files: dict[str, set[str]] = {}
+    for line in matrix.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = stripped.strip("|").split("|")
+        if not cells:
+            continue
+        req = cells[0].strip().strip("`").strip().upper()
+        if not _MATRIX_REQ_ID_RE.match(req):
+            continue
+        files = _matrix_cell_test_files(cells[1:])
+        if not files:
+            continue
+        req_files.setdefault(req, set())
+        req_files[req] |= files
+    if not req_files:
+        return 0, 0
+    covered = sum(
+        1
+        for files in req_files.values()
+        if any(_file_is_emitted(f, emitted) for f in files)
+    )
+    return covered, len(req_files)
+
+
 def _matrix_cell_test_files(cells: list[str]) -> set[str]:
     """Canonical test-file paths named across a matrix row's non-ID cells.
 
@@ -2255,9 +2336,10 @@ def _e2e_names_a_test(body: str) -> bool:
 
 
 def _demo_day_harness_issues(artifact_md: str) -> list[CompletenessIssue]:
+    issues: list[CompletenessIssue] = []
     e2e_body = _section_body(artifact_md, "## End-to-End Smoke Test")
     if not _e2e_names_a_test(e2e_body):
-        return [
+        issues.append(
             CompletenessIssue(
                 code="missing_e2e_smoke_test",
                 detail=(
@@ -2267,8 +2349,53 @@ def _demo_day_harness_issues(artifact_md: str) -> list[CompletenessIssue]:
                 ),
                 reference="## End-to-End Smoke Test",
             )
-        ]
-    return []
+        )
+    issues.extend(_promised_file_issues(artifact_md))
+    return issues
+
+
+def _promised_file_issues(artifact_md: str) -> list[CompletenessIssue]:
+    """Files the Demo Day harness promised but never emitted (ONE consolidated gap).
+
+    Demo Day previously ran NO file-emission check at all: ``_harness_issues`` —
+    which carries the standard mode's ``harness_file_tree_missing_block`` /
+    ``harness_matrix_missing_file`` / ``missing_harness_file_blocks`` triad — is
+    on the ``else`` branch of :func:`validate_artifact_completeness`. A Demo Day
+    harness whose File Tree promised N test files and whose ``## Files`` section
+    emitted zero produced only a generic "shallow section" advisory, even though
+    Demo Day is the *guarantee-bearing* mode whose whole contract is that the
+    package builds. The construction verifier does not cover it either: its
+    ``_harness_file_paths`` unions ``### File:`` headings WITH ``## File Tree``
+    leaves, so C2 ``task_to_test`` accepts a task citing a file that only ever
+    existed in the tree.
+
+    Reuses :func:`missing_harness_files` — until now referenced only by tests —
+    so "promised vs emitted" has exactly one definition. Matching there is
+    canonical (case / ``./`` / ``harness/`` / ``::``-insensitive, with a basename
+    fallback), which is what keeps this from manufacturing phantom gaps out of
+    path-spelling differences.
+
+    Deliberately ONE finding listing every missing file rather than the standard
+    mode's three overlapping codes: the lean mode should surface one actionable
+    gap, not three restatements of it. The code is ``harness_file_tree_missing_block``
+    — already non-refundable and already mapped to ``CoverageGap`` in
+    stage_manager's ``_COMPLETENESS_ADVISORY_KIND`` — so this is delivered,
+    finalisable, never refunded, and never triggers a regenerate cascade.
+    """
+    missing, total = missing_harness_files(artifact_md)
+    if not missing or not total:
+        return []
+    return [
+        CompletenessIssue(
+            code="harness_file_tree_missing_block",
+            detail=(
+                f"Demo Day HARNESS promises {total} file(s) in its File Tree / "
+                f"Requirement-to-Test Matrix but the ## Files section never "
+                f"emitted {len(missing)} of them: {', '.join(missing[:10])}."
+            ),
+            reference=", ".join(missing[:10]),
+        )
+    ]
 
 
 def _demo_day_task_issues(artifact_md: str) -> list[CompletenessIssue]:
