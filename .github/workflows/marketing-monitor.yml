@@ -5,8 +5,8 @@ name: Marketing Regression Monitor
 # the entire period since go-live because nothing checked the public surface
 # on its own. This is that check: unauthenticated, credential-free, and
 # scheduled so a regression (sitemap 404, a redirect loop, the SPA shell
-# creeping back onto the apex) surfaces as a failed run within the hour
-# instead of being found by accident weeks later.
+# creeping back onto the apex) surfaces as a failed run within a couple of
+# days instead of being found by accident weeks later.
 #
 # Deliberately NOT folded into production-smoke.yml: that workflow is
 # workflow_dispatch-only (manual, authenticated, credit-consuming backend
@@ -15,14 +15,15 @@ name: Marketing Regression Monitor
 
 on:
   schedule:
-    # Hourly, which is exactly the detection SLO stated above ("within the
-    # hour"). This is a PRIVATE repo, so every run is billed and GitHub rounds
-    # each job UP to a full minute — the job itself is ~8s of curl, so the
-    # cadence, not the work, sets the cost. The previous */30 spent ~1,440
-    # billable minutes a month (48 runs/day) to beat a one-hour SLO by half an
-    # hour. Do not tighten this without a reason that justifies ~720 minutes
-    # per month per halving.
-    - cron: "0 * * * *"
+    # Every 2 days. This is a PRIVATE repo, so every run is billed and GitHub
+    # rounds each job UP to a full minute — the job itself is ~8s of curl, so
+    # the cadence, not the work, sets the cost. Hourly (the original SLO) ran
+    # ~720 billable minutes/month for a detection window CI minutes can't
+    # currently afford; this trades that down to ~15 min/month. The marketing
+    # zone changes rarely and workflow_dispatch is always available for an
+    # on-demand check right after a deploy — use that instead of tightening
+    # this cron back up.
+    - cron: "0 6 */2 * *"
   workflow_dispatch: {}
 
 jobs:
