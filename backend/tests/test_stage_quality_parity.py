@@ -381,3 +381,81 @@ def test_non_harness_stages_keep_the_judge_coverage_field():
     data = {"scores": {"clarity": 80}, "coverage_percent": 42}
     normalised = oe._normalise_eval_payload("spec", data, "standard")
     assert normalised["coverage_percent"] == 42
+
+
+# ---------------------------------------------------------------------------
+# 5. The single-call length target (Demo Day's whole-document chunks)
+#
+# A chunk is exactly one provider stream, killed at the
+# stage_provider_call_timeout_seconds hard cap (validator-capped at 180s) with
+# its partial text discarded. The 80,000-character "document chunk" target is
+# written for a SLICE — standard spec/plan/tasks are 3-4 chunks, so no single
+# call is asked to fill it. Demo Day runs spec/plan/tasks as ONE whole-document
+# chunk, so that same target asked one 180s call to produce ~20K output tokens,
+# past the ~15-18K dense-chunk band that fits at effort=medium. Timing out is
+# strictly worse than finishing short: the retry lands on the mid tier with less
+# time left than the first attempt had.
+# ---------------------------------------------------------------------------
+
+
+_STANDARD_DOCUMENT_TARGET = (
+    "Length target: 8,000-80,000 characters for this document chunk."
+)
+
+
+def test_whole_document_chunks_get_a_single_call_length_target():
+    """Every Demo Day whole-document chunk is sized for one 180s call."""
+    for stage in ("spec", "plan", "tasks"):
+        chunks = sm._chunk_specs_for_stage(stage, "demo_day")
+        assert len(chunks) == 1, f"{stage} is expected to stay single-pass"
+        chunk = chunks[0]
+        assert chunk.whole_document is True
+        target = sm._chunk_length_target(stage, chunk)
+        assert "55,000" in target
+        assert target != _STANDARD_DOCUMENT_TARGET
+        # The floor is untouched: this trims the unreachable head of the range,
+        # it is not a depth reduction.
+        assert "8,000" in target
+
+
+def test_standard_document_chunks_are_unchanged():
+    """Byte-identical for every standard multi-chunk stage — the slice target
+    is correct there precisely because no single call carries the whole doc."""
+    for stage in ("spec", "plan", "tasks"):
+        chunks = sm._chunk_specs_for_stage(stage, "standard")
+        assert len(chunks) > 1, f"{stage} must stay multi-chunk in standard mode"
+        for chunk in chunks:
+            assert chunk.whole_document is False
+            assert sm._chunk_length_target(stage, chunk) == _STANDARD_DOCUMENT_TARGET
+
+
+def test_harness_length_targets_are_not_affected_by_the_whole_document_rule():
+    """The harness keys off _is_harness_files_chunk and is checked FIRST, so the
+    every-runnable-file target can never be narrowed by the new branch."""
+    for mode in ("standard", "demo_day"):
+        files = next(
+            c
+            for c in sm._chunk_specs_for_stage("harness", mode)
+            if c.required_heading == "## Files"
+        )
+        contract = next(
+            c
+            for c in sm._chunk_specs_for_stage("harness", mode)
+            if c.required_heading != "## Files"
+        )
+        assert "every promised runnable file" in sm._chunk_length_target(
+            "harness", files
+        )
+        assert "contract chunk" in sm._chunk_length_target("harness", contract)
+
+
+def test_length_target_keys_on_structure_not_the_demo_full_key_string():
+    """The discriminator is chunk.whole_document, so a renamed/added
+    whole-document chunk in either mode inherits the single-call target — the
+    same lesson as _is_harness_files_chunk."""
+    renamed = sm.ArtifactChunkSpec(
+        "some-other-single-pass-key",
+        "Generate the complete artifact.",
+        whole_document=True,
+    )
+    assert "55,000" in sm._chunk_length_target("spec", renamed)
