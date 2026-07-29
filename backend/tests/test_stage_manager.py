@@ -1053,13 +1053,21 @@ async def test_generate_unavailable_platform_route_skips_credit_and_provider_cal
     mock_get_llm.assert_not_called()
 
 
-def test_harness_generation_uses_cheap_primary_with_mid_escalation(
+def test_openai_artifact_generation_uses_strong_primary_with_mid_deescalation(
     monkeypatch,
 ) -> None:
+    """OpenAI full-artifact generation is frontier-tier, not cheap-primary.
+
+    OpenAI is reached only when Anthropic is unconfigured or its circuit is
+    open — exactly when a user charged for a frontier artifact is about to
+    receive one from somewhere else. It therefore runs the same
+    ``(strong, mid)`` shape Anthropic does, where the second slot is a
+    resilience DE-escalation, not an escalation.
+    """
     from services.pipeline import stage_manager as stage_manager_module
 
-    # Pin the cheap-primary policy on so this test exercises that path
-    # explicitly, independent of the product default.
+    # Pin the cheap-primary flag ON to prove it does not reach this path: the
+    # flag governs the SHARED cheap ladder (storyboard/increment/refine) only.
     monkeypatch.setattr(stage_manager_module.settings, "core_cheap_primary", True)
     monkeypatch.setattr(
         stage_manager_module.settings,
@@ -1072,12 +1080,14 @@ def test_harness_generation_uses_cheap_primary_with_mid_escalation(
     route = stage_manager_module._route_for_stage_generation("harness", workspace)
 
     assert route.provider == "openai"
-    assert route.model == "gpt-5.4-mini"
-    assert route.model_tier == "mini"
+    assert route.model == "gpt-5.5"
+    assert route.model_tier == "strong"
     assert route.reason == "requested_tier"
-    assert route.selection_reason == "active_default"
-    # OpenAI core gen runs the cheap primary first and escalates one-shot to the
-    # mid tier (the previous fast/cheap default) on a runtime failure.
+    # Wins the strong tier by recommending the operation, not by a
+    # default_operations claim — the same shape as Opus 5 on Anthropic.
+    assert route.selection_reason == "active_same_tier"
+    # The SHARED cheap ladder is deliberately untouched by the artifact
+    # promotion: storyboard and increment generation still start on mini.
     assert stage_manager_module.CORE_GENERATION_TIER_POLICY["openai"] == (
         "mini",
         "mid",
@@ -1210,8 +1220,17 @@ def test_complexity_classifier_does_not_raise_for_google(monkeypatch) -> None:
     assert route.model == "gemini-3.6-flash"
 
 
-def test_prior_quality_gate_block_escalates_starting_tier(monkeypatch) -> None:
-    # A retry of a stage the cheap model already failed starts on the mid tier.
+def test_prior_quality_gate_block_floor_is_a_noop_for_artifact_generation(
+    monkeypatch,
+) -> None:
+    """The complexity floor is a floor, never a ceiling — and now a no-op here.
+
+    A prior quality-gate block raises the starting tier to ``mid``. Full-artifact
+    generation already starts at ``strong`` on every provider, so the floor can
+    only ever be satisfied, never applied. ``raise_tier_to_floor`` caps at
+    ``strong``, so this degrades safely rather than erroring. The signal itself
+    must still be computed — it is what would matter if the floor ever rose.
+    """
     from services.pipeline import stage_manager as sm
 
     monkeypatch.setattr(sm.settings, "core_complexity_routing", True)
@@ -1226,8 +1245,8 @@ def test_prior_quality_gate_block_escalates_starting_tier(monkeypatch) -> None:
     signals = sm._build_complexity_signals(stage, workspace)
     assert signals.prior_quality_gate_blocked is True
     route = sm._route_for_stage_generation("spec", workspace, signals=signals)
-    assert route.model_tier == "mid"
-    assert route.model == "gpt-5.4"
+    assert route.model_tier == "strong"
+    assert route.model == "gpt-5.5"
 
 
 def test_core_cheap_primary_no_longer_governs_full_artifact_generation(

@@ -142,7 +142,21 @@ def can_route(provider: str) -> bool:
     return not _circuit_open(provider)
 
 
-async def check_provider_health(provider: str) -> dict[str, object]:
+async def check_provider_health(
+    provider: str,
+    model: str | None = None,
+) -> dict[str, object]:
+    """Probe a provider with a 1-token completion and record the outcome.
+
+    ``model`` defaults to ``JUDGE_MODELS[provider]`` — passing None is
+    byte-identical to the historical behaviour.  Supplying an explicit model
+    matters because a provider key can authenticate while still being denied a
+    specific model: Anthropic keys carry per-workspace model permissions, so a
+    key that probes fine against the Haiku judge model can still be refused
+    ``claude-opus-5``, the model full-artifact generation depends on.  The
+    caller is responsible for validating the id against the catalog — an
+    arbitrary caller-supplied string must never reach a provider.
+    """
     if provider not in PROVIDER_DISPLAY:
         raise ValueError(f"Unknown provider: {provider!r}")
     if not is_provider_configured(provider):
@@ -155,7 +169,11 @@ async def check_provider_health(provider: str) -> dict[str, object]:
         # even when its circuit is open.  Without this, a tripped circuit
         # would block health checks, preventing them from detecting recovery
         # and resetting the circuit via record_provider_success().  CF-2 — T-197.
-        adapter = get_llm(provider, JUDGE_MODELS[provider], bypass_circuit=True)
+        adapter = get_llm(
+            provider,
+            model or JUDGE_MODELS[provider],
+            bypass_circuit=True,
+        )
         await asyncio.wait_for(
             adapter.complete(
                 "You are a provider health checker. Reply with OK.",

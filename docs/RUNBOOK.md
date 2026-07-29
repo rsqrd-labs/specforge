@@ -73,7 +73,7 @@ Search Grafana / Loki: `{app="thought2build"} |= "llm.circuit_open"`.
 - All generation requests routed to the tripped provider return **HTTP 503** immediately (no LLM call is made).
 - Health-check probes (`GET /providers/health`) are **not** blocked — they
   bypass the circuit via `bypass_circuit=True` and can detect recovery for all
-  configured providers. The endpoint requires an authenticated user.
+  configured providers. The endpoint is admin-gated (see §5).
 - The circuit **auto-resets** when either:
   1. `record_provider_success()` is called (health probe succeeds), or
   2. The last failure is older than 600 seconds (the window expires).
@@ -107,6 +107,47 @@ In `provider_status.py`, temporarily raise `_UNHEALTHY_FAILURE_THRESHOLD` or set
 ### Multi-Worker Note
 
 `_FAILURES` is **per-worker-process**. In multi-worker deployments (Gunicorn + multiple uvicorn workers) each process maintains an independent failure count. A provider may be circuit-open in one worker and healthy in another. This is an accepted trade-off — a distributed circuit would require a shared Redis counter. Monitor `thought2build_llm_circuit_rejections_total` across all instances to detect partial activation.
+
+### The Circuit Breaker IS the Provider-Failover Mechanism
+
+There is deliberately **no separate cross-provider failover machinery**. Core
+generation resolves through `resolve_platform_route_by_provider`, which walks
+`LLM_PROVIDER_PRIORITY` and skips any provider that fails **either**
+`is_provider_configured()` (blank / `placeholder-` key) **or** `can_route()`
+(circuit open). Those two checks cover both failure modes operators care about —
+"no Anthropic key" and "Claude is not responding" — and the next configured
+provider simply wins the route. Nothing needs to be flipped by hand.
+
+Know its real semantics before you rely on it:
+
+| Property | Behaviour | Consequence |
+|---|---|---|
+| Threshold | 3 failures / 600s, **per process** | With `WEB_CONCURRENCY > 1` plus the two worker services, roughly 3 failures *per process* are burned before the fleet fully sheds a dead provider |
+| Rate limits | 429/529/503 are **excluded** from the failure count (they meter on `thought2build_llm_provider_rate_limited_total` instead) | A throttled provider is retried in place with `Retry-After` backoff, not failed over. Folding them in would 503 the very backoff retry — see §14 |
+| In-flight generations | **Not rescued.** `_runtime_fallback_route` is pinned to the same provider (`allow_cross_provider=False`) | A generation already streaming when the breaker trips de-escalates Opus 5 → Sonnet 5 on the *same* dead provider, then errors. The *next* generation fails over cleanly |
+| Artifact tier on failover | Every provider runs `(strong, mid)` for full artifacts | OpenAI failover lands on **GPT-5.5**, not the cheap `mini` tier — a user charged frontier-tier credits never silently receives a much weaker artifact |
+
+**Alert on the state gauge, not on a fallback counter:**
+
+```promql
+# Anthropic (the primary) has been shed — traffic is now on a fallback provider.
+max by (provider) (thought2build_llm_circuit_state{provider="anthropic"}) == 1
+```
+
+`max by (provider)` is required because the gauge is per-process.
+
+> ⚠️ **Do not alert on `llm_cross_provider_fallback_total`.** That flag is set
+> only by `resolve_llm_route`'s explicit cross-provider loop, which core
+> generation does not use — a breaker-driven provider switch leaves
+> `cross_provider_fallback` **false**, so the counter never moves and the alert
+> would wait forever. Forensics for "what actually ran" come from the
+> `llm_cost_events` ledger (`provider`, `model`, `model_tier` columns).
+
+**Cost note:** GPT-5.5 is frontier-priced. During a sustained Anthropic outage,
+watch `llm_estimated_cost_usd_total{provider="openai"}` — fallback generations
+cost materially more than the cheap tier they used to land on. That is the
+intended trade (artifact quality over cost at the moment quality matters most),
+but it should not be a surprise on the invoice.
 
 ---
 
@@ -268,11 +309,39 @@ response also includes `db` and `redis`; production omits dependency details.
 
 ```
 GET /providers/health
+GET /providers/health?model=claude-opus-5
 ```
 
-Requires authentication. Triggers live health probes for all configured
-providers (bypassing the circuit breaker) and returns each provider's health
-status, failure count, and circuit state.
+**Admin-gated** — the caller's email must be in `ADMIN_USER_EMAILS` (403
+otherwise, and an empty allowlist authorises no one). It is not open to every
+logged-in user because each call makes a real outbound request per configured
+provider.
+
+Triggers a live 1-token probe against each provider (bypassing the circuit
+breaker) and returns, per provider: `id`, `name`, `configured`, `selectable`,
+`health`, `message`, and `probed_model` (`null` when the provider is
+unconfigured, so no probe was made). The response also carries `priority` — the
+server-owned precedence — so you never have to guess which provider will
+actually win a route.
+
+Two things to know:
+
+- **`?model=` proves model *permission*, not just key validity.** It takes any
+  catalog model id (unknown ids are rejected with 400 before anything reaches a
+  provider) and applies to the provider that owns it; the others keep their
+  default judge-model probe. This matters because Anthropic keys carry
+  per-workspace model permissions: a key that probes healthy against the Haiku
+  judge model can still be denied `claude-opus-5`, which is the model
+  full-artifact generation actually runs. **Probe both** after installing a key.
+- **A successful probe closes an open circuit.** The probe funnels through
+  `record_provider_success()`, so this endpoint doubles as the §1 manual reset
+  without a Railway shell. The circuit is per-process, so one call resets one
+  worker — see §1's multi-worker note.
+
+`configured: false` means the key is blank or `placeholder-`-prefixed. Since
+Anthropic is the platform primary, that state means **every generation fails to
+route** while `GET /health` still reports `ok`. Production refuses to boot in
+that state (see §8.5), but a non-production environment will happily run in it.
 
 ### Prometheus Metrics
 
@@ -287,6 +356,8 @@ Key metrics to monitor:
 | Metric | Alert Condition |
 |---|---|
 | `thought2build_llm_circuit_rejections_total` | Any increase → circuit tripped |
+| `llm_provider_configured{provider="anthropic"}` | `== 0` → the primary's key is blank/placeholder; generation cannot route (§8.5) |
+| `thought2build_llm_circuit_state{provider="anthropic"}` | `max(...) by (provider) == 1` → primary shed, running on a fallback provider (§1) |
 | `llm_request_total` | Drop in successful requests |
 | `http_request_duration_seconds` | P95 > 30s → LLM latency spike |
 | `sse_stream_duration_seconds` | P95 > 120s → streaming hung |
@@ -511,9 +582,19 @@ triggering the deploy.
 
 ## 8. Secret Rotation Procedures
 
-Thought2Build manages three categories of critical secrets, each with a distinct
-rotation impact and procedure.  Rotate proactively on a scheduled cadence or
-immediately when a compromise is suspected.
+Thought2Build manages several categories of critical secrets, each with a
+distinct rotation impact and procedure.  Rotate proactively on a scheduled
+cadence or immediately when a compromise is suspected.
+
+| Secret | Section | Two-secret rotation window? |
+|---|---|---|
+| `ENCRYPTION_MASTER_KEY` | §8.1 | Yes — via the re-encryption script |
+| `CSRF_SECRET` | §8.2 | No (tokens refresh on page reload) |
+| `JWT_PRIVATE_KEY` / `_PUBLIC_KEY` | §8.3 | No (forces re-authentication) |
+| Redis password | §8.4 | No |
+| `ANTHROPIC_API_KEY` / other LLM keys | §8.5 | **No — hard cutover** |
+| `GITHUB_APP_WEBHOOK_SECRET` | §12.1 | Yes — `_PREV` |
+| `LEMONSQUEEZY_WEBHOOK_SECRET` | §9 | Yes — `_PREV` |
 
 ### §8.1 — ENCRYPTION_MASTER_KEY Rotation
 
@@ -678,6 +759,114 @@ auth enabled):
 No data re-encryption is needed; Redis stores session and rate-limit state,
 not long-lived secrets.
 
+---
+
+### §8.5 — LLM Provider API-Key Installation & Rotation
+
+**Impact:** `ANTHROPIC_API_KEY` is the key that matters. Anthropic is the
+platform primary and runs **Claude Opus 5** for full-artifact generation (the
+four core stages, full regenerate, the harness gap-patch) and **Claude Haiku
+4.5** for every cheap path. A blank or `placeholder-`-prefixed value is treated
+as *unset* by routing, so a bad key does not degrade the fallback path — it
+breaks the **default** path, and every generation fails with
+`No platform LLM route is currently available` while `GET /health` still
+reports `ok`.
+
+> ⚠️ **There is no `_PREV` two-secret rotation window for LLM keys.** Unlike
+> `GITHUB_APP_WEBHOOK_SECRET` or `LEMONSQUEEZY_WEBHOOK_SECRET`, exactly one
+> value is live at a time. Rotation is a hard cutover: create the new key,
+> paste it, redeploy, verify, *then* revoke the old one in the provider console.
+> Never revoke first.
+
+**Rotation steps:**
+
+1. Create the key in the [Anthropic Console](https://console.anthropic.com/).
+   Confirm its workspace has **Opus 5 access** — Anthropic keys carry
+   per-workspace model permissions, so a key that authenticates fine can still
+   be denied the one model this deployment depends on. Also confirm the usage
+   tier can absorb *primary* traffic, not just fallback overflow.
+
+2. Set `ANTHROPIC_API_KEY` on **all three Railway services** — `backend`,
+   `worker`, and `worker-fast`. Use a **Shared Variable / Variable Reference**
+   so it is one value, not three pastes that can drift. A worker missing the key
+   fails silently per job; nothing validates it at job start.
+
+3. Redeploy all three (Deployments → Deploy). A variable change alone does not
+   restart a service.
+
+4. Revoke the old key in the Anthropic Console **only after** the verification
+   below passes.
+
+**Verification:**
+
+1. **Startup guard.** The `backend` deploy now *fails* rather than booting green
+   when every provider in `LLM_PROVIDER_PRIORITY` is unconfigured
+   (`validate_production_settings`). A successful deploy therefore already
+   proves at least one key is non-placeholder — but not *which*, and not that it
+   is valid. Continue.
+
+2. **Live probe** (admin token, ~1 token of spend). Run **both**:
+
+   ```bash
+   # Does the key authenticate at all?
+   curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+     "https://<prod-host>/providers/health"
+
+   # Is its workspace PERMITTED the model generation actually runs?
+   curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+     "https://<prod-host>/providers/health?model=claude-opus-5"
+   ```
+
+   Expect `configured: true`, `health: "healthy"`, and
+   `probed_model: "claude-opus-5"` on the second. A 401/403 from Anthropic
+   surfaces as `health: "unhealthy"` with the error class in `message`.
+
+3. **Metrics** (`Authorization: Bearer $METRICS_TOKEN`):
+   `llm_provider_configured{provider="anthropic"} == 1` and
+   `thought2build_llm_circuit_state{provider="anthropic"} == 0`. Both gauges are
+   per-process and written as a side effect of a probe, so hit
+   `/providers/health` first; use `max(...) by (provider)` under
+   `WEB_CONCURRENCY > 1`.
+
+4. **What actually ran** — the only check that proves Opus 5 *routing* rather
+   than mere key validity. After the first real generation:
+
+   ```sql
+   SELECT provider, model, model_tier, operation, usage_estimation_method
+   FROM llm_cost_events ORDER BY created_at DESC LIMIT 10;
+   ```
+
+   Expect `model='claude-opus-5'`, `model_tier='strong'`, and
+   `usage_estimation_method='provider_reported'` (`tokenizer_estimated` means no
+   real usage block came back). A `stage.chunk_generation_fallback` log line
+   means it de-escalated to Sonnet 5 — see §1.
+
+5. **Smoke script** (non-paid end-to-end):
+
+   ```bash
+   THOUGHT2BUILD_API_URL=https://<prod-host> \
+   THOUGHT2BUILD_ACCESS_TOKEN=$ADMIN_TOKEN \
+   THOUGHT2BUILD_SMOKE_MODEL=claude-opus-5 \
+     python scripts/production_smoke.py
+   ```
+
+   Set `THOUGHT2BUILD_RUN_LLM_SMOKE=1` to additionally stream one real spec
+   generation (this **does** consume credits).
+
+**Rollback:** restore the previous `ANTHROPIC_API_KEY` on all three services and
+redeploy. If the old key is already revoked and no replacement works, fail over
+to another platform with an **env-only** change — no redeploy of code:
+
+```
+LLM_PROVIDER_PRIORITY=google,anthropic,openai
+GOOGLE_API_KEY=<a real key>
+```
+
+Routing skips any provider whose key is blank or `placeholder-`-prefixed, so the
+reordered list takes effect on the next process start. Note the quality
+trade-off: Google's `strong` tier has no active model, so it runs Gemini Flash
+(`mid`). Reordering to `openai,...` with a real `OPENAI_API_KEY` lands on
+GPT-5.5, which is the closer substitute.
 
 ---
 

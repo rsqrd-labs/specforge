@@ -404,19 +404,33 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         # The old 32768 clamped the doubling repair to the same value the first
         # attempt failed at, so the repair was doomed and chunks truncated.
         default_max_output_tokens=64000,
-        # Core generation ops are RECOMMENDED (not default) so the frontier
-        # tier is never the primary route but stays eligible as the runtime
-        # escalation when a mid-tier generation times out or errors.
-        # storyboard.generate stays eligible so the strong tier is reachable as
-        # the storyboard escalation target when the cheap-primary flag is
-        # reverted (storyboard policy becomes mid→strong).
+        # Core generation ops are RECOMMENDED but NOT defaults — the same shape
+        # Opus 5 uses. This is now OpenAI's full-artifact PRIMARY (the
+        # _CORE_ARTIFACT_TIER_POLICY strong slot), reached whenever Anthropic is
+        # unconfigured or its circuit is open, and it wins the strong tier via
+        # ``selection_reason="active_same_tier"``. Leaving default_operations
+        # empty keeps validate_model_catalog's "exactly one active core-gen
+        # default per provider" invariant satisfied by GPT-5.4 Mini, which is
+        # still the primary for the SHARED cheap ladder that storyboard and
+        # increment read.
         recommended_operations=(*CORE_GENERATION_OPERATIONS, "storyboard.generate"),
         default_operations=(),
         supports_reasoning=True,
-        reasoning_effort="high",
+        # Medium, matching Opus 5 and for the identical reason: core stages are
+        # bound by a locked interactive deadline contract
+        # (stage_provider_call_timeout_seconds caps a single provider stream at
+        # 180s, stage_generation_deadline_seconds is validator-pinned to 300s)
+        # and high-effort reasoning tokens are spent before any visible output.
+        # This model is the FALLBACK artifact primary, so a high-effort timeout
+        # here would fail precisely when Anthropic is already down. Raising it
+        # back to high requires re-measuring per-chunk wall-clock first.
+        reasoning_effort="medium",
         rollout_notes=(
-            "OpenAI frontier escalation tier for core ASDD generation "
-            "(one-shot runtime retry after a mid-tier failure) and the storyboard "
+            "OpenAI full-artifact generation primary: the four core ASDD "
+            "stages, full regenerate and the harness gap-patch, in both standard "
+            "and Demo Day mode, reached when Anthropic is unconfigured or its "
+            "circuit is open. Resolves via active_same_tier. A hard runtime "
+            "failure retries down once on GPT-5.4 (mid). Also the storyboard "
             "escalation target when reverted to mid-first."
         ),
         routing_priority=1,

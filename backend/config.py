@@ -1184,5 +1184,35 @@ def validate_production_settings() -> None:
             "while the flag reads as enabled."
         )
 
+    # LLM provider-credential guard. Every generation resolves through
+    # ``resolve_platform_route*``, which skips any provider whose key is blank or
+    # ``placeholder-``-prefixed. If that skips *every* provider in
+    # LLM_PROVIDER_PRIORITY the app still boots green and reports /health ok —
+    # the failure surfaces only when a paying user's first generation 503s with
+    # LLMRoutingError. Since commit 9e79190 made Anthropic the primary (rather
+    # than fallback overflow) that is the default path, not an edge case.
+    #
+    # This deliberately requires ONE configured provider, not Anthropic
+    # specifically: an OpenAI-only or Google-only deploy is a valid
+    # configuration (the documented cheap-platform escape hatch is an env-only
+    # LLM_PROVIDER_PRIORITY reorder) and must keep booting. ``is_provider_configured``
+    # is imported function-locally because provider_status imports ``settings``
+    # from this module; reusing it keeps exactly one definition of "placeholder".
+    from services.llm.provider_status import is_provider_configured  # noqa: PLC0415
+
+    priority = [p for p in settings.llm_provider_priority.split(",") if p]
+    unconfigured = [p for p in priority if not is_provider_configured(p)]
+    if len(unconfigured) == len(priority):
+        errors.append(
+            "No LLM provider is configured: every provider in "
+            f"LLM_PROVIDER_PRIORITY ({', '.join(priority)}) has a blank or "
+            "'placeholder-'-prefixed API key, so every generation would fail "
+            "with 'No platform LLM route is currently available'. A "
+            "'placeholder-' prefix counts as UNSET. Set at least one of "
+            "ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY to a real "
+            "value (Anthropic is the primary and runs Claude Opus 5 for "
+            "full-artifact generation)."
+        )
+
     if errors:
         raise RuntimeError("; ".join(errors))

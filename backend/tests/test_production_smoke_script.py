@@ -54,3 +54,84 @@ def test_redirect_handler_rejects_cross_origin() -> None:
             {},
             "https://attacker.example/collect",
         )
+
+
+def _config(**overrides) -> object:
+    base = {
+        "api_url": "https://api.thought2build.example",
+        "access_token": "token",
+        "metrics_token": None,
+        "provider": None,
+        "model": None,
+        "run_llm_smoke": False,
+        "public_only": False,
+    }
+    base.update(overrides)
+    return production_smoke.SmokeConfig(**base)
+
+
+def _payload(**overrides) -> dict:
+    anthropic = {
+        "id": "anthropic",
+        "name": "Anthropic",
+        "configured": True,
+        "selectable": True,
+        "health": "healthy",
+        "message": "No provider issues detected.",
+        "probed_model": "claude-opus-5",
+    }
+    anthropic.update(overrides)
+    return {
+        "providers": [anthropic],
+        "priority": ["anthropic", "openai", "google"],
+    }
+
+
+def test_provider_health_accepts_a_configured_healthy_primary() -> None:
+    production_smoke.assert_provider_health(_config(), _payload())
+
+
+def test_provider_health_rejects_a_placeholder_key() -> None:
+    """The live production misconfiguration: the smoke must fail, not pass.
+
+    A ``placeholder-`` prefixed key reads as ``configured: false``, and every
+    generation then fails to route while /health still reports ok.
+    """
+    with pytest.raises(production_smoke.SmokeFailure, match="not configured"):
+        production_smoke.assert_provider_health(
+            _config(),
+            _payload(configured=False, health="not_configured", probed_model=None),
+        )
+
+
+def test_provider_health_rejects_an_unhealthy_primary() -> None:
+    with pytest.raises(production_smoke.SmokeFailure, match="unhealthy"):
+        production_smoke.assert_provider_health(
+            _config(),
+            _payload(
+                health="unhealthy", message="Recent failures: AuthenticationError."
+            ),
+        )
+
+
+def test_provider_health_checks_the_priority_leader_not_the_first_listed() -> None:
+    """The provider that matters is the one routing will actually pick."""
+    payload = _payload()
+    payload["priority"] = ["openai", "anthropic", "google"]
+
+    with pytest.raises(production_smoke.SmokeFailure, match="not in"):
+        production_smoke.assert_provider_health(_config(), payload)
+
+
+def test_provider_health_honours_an_explicit_provider_override() -> None:
+    payload = _payload()
+    payload["priority"] = ["openai", "anthropic", "google"]
+
+    production_smoke.assert_provider_health(_config(provider="anthropic"), payload)
+
+
+def test_provider_health_rejects_an_empty_response() -> None:
+    with pytest.raises(production_smoke.SmokeFailure):
+        production_smoke.assert_provider_health(
+            _config(), {"providers": [], "priority": ["anthropic"]}
+        )
