@@ -13,6 +13,16 @@ on:
       - "docs/evals/golden_prompts/**"
       - ".github/workflows/prompt-eval.yml"
 
+# This workflow makes LIVE, billed provider calls (the eval run below uses the
+# real ANTHROPIC/OPENAI/GOOGLE keys), so a superseded run costs money and not
+# just Actions minutes. Push three times to a prompt PR and the old two runs
+# would otherwise keep buying tokens for a report nobody will read. Cancel them.
+# Safe to cancel unconditionally: this is a PR-only advisory report — it ships
+# nothing and holds no lock.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   pull-requests: write
@@ -44,8 +54,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Same pinned, cache-enabled action the CI workflow uses, rather than a
+      # bare `pip install uv` + uncached resolve: this job downloads the whole
+      # backend dependency set cold on every run.
       - name: Install uv
-        run: pip install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.8"
+          enable-cache: true
 
       - name: Install backend dependencies
         run: uv sync --project backend
