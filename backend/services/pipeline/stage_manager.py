@@ -1782,29 +1782,42 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
     left than the first attempt had, so a too-ambitious target tends to burn the
     whole deadline and deliver nothing.
 
-    The 80,000-character document target is written for a *slice* of a document:
-    in standard mode spec/plan/tasks are 3-4 chunks, so no single call is ever
-    asked to fill it. ``whole_document`` chunks are the one case where a single
-    call must carry the ENTIRE artifact — in practice Demo Day's ``demo-full``
-    (spec, plan and tasks are all single-chunk there; see
-    ``_demo_day_chunk_specs_for_stage``, which keeps them single-pass on purpose
-    to avoid cross-chunk FR/AC/T-NNN drift). Handing that call the slice-sized
-    80,000-character target invites it to aim at ~20K output tokens, above the
-    ~15-18K-token dense-chunk band that fits inside the 180s bound at Opus 5's
-    ``effort=medium`` — i.e. the advertised ceiling sits at or past the measured
-    edge with no margin, in the *guarantee-bearing* mode.
+    Every non-harness target is therefore the SAME 55,000-character ceiling,
+    whether the chunk is a slice or the whole artifact. The earlier 80,000
+    figure was justified as a *slice* target — standard spec/plan/tasks are 3-4
+    chunks, so no single call was expected to fill it — but the string is
+    appended to the prompt of the call actually being made, and it advertises
+    80,000 characters for THAT call. A model that takes the ceiling at its word
+    aims at ~20K output tokens, above the ~15-18K-token dense-chunk band that
+    fits inside the 180s bound at Opus 5's ``effort=medium``, and the stream is
+    killed. What supplies total document length is the chunk split, not a
+    per-call ceiling no single call can reach inside the bound; leaving the two
+    shapes on different ceilings only protected Demo Day from a hazard that
+    applies identically to a standard chunk.
 
     55,000 characters (~14-15K tokens even at a dense 3.5 chars/token) sits
     inside that measured band, and is not a depth ceiling: a complete Demo Day
     package is 11 spec / 12 plan / 4 tasks sections over a ≤5-hour build, which
-    measures well under it. This trims only the unreachable head of the range —
-    it does not lower the 8,000-character floor, and the depth floors
-    (``_min_body_chars``, the task/requirement-id minimums) are unchanged.
+    measures well under it, and a standard *slice* is a fraction of a document
+    that already spans several chunks. This trims only the unreachable head of
+    the range — it does not lower the 8,000-character floor, and the depth
+    floors (``_min_body_chars``, the task/requirement-id minimums) are
+    unchanged.
 
-    Keyed on ``chunk.whole_document`` — a structural property — rather than the
-    ``"demo-full"`` key string, for the same reason ``_is_harness_files_chunk``
-    is: the two modes name their chunks differently, and key-string matching is
-    exactly what silently excluded Demo Day from the harness Files budget.
+    The two branches stay separate because ``whole_document`` chunks carry the
+    ENTIRE artifact in one call (Demo Day's ``demo-full``; see
+    ``_demo_day_chunk_specs_for_stage``, which keeps every stage single-pass on
+    purpose to avoid cross-chunk FR/AC/T-NNN drift) and so get the extra
+    substance instruction. That branch is keyed on ``chunk.whole_document`` — a
+    structural property — rather than the ``"demo-full"`` key string, for the
+    same reason ``_is_harness_files_chunk`` is: the two modes name their chunks
+    differently, and key-string matching is exactly what silently excluded Demo
+    Day from the harness Files budget.
+
+    The harness is deliberately exempt: its Files chunk emits runnable code
+    whose length is set by the promised file list rather than by prose depth,
+    and it has its own budget (49,152 tokens) and its own 180,000-character
+    bound.
     """
     if _is_harness_files_chunk(stage_type, chunk):
         return (
@@ -1819,7 +1832,7 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
             "Every required section must be substantive — spend the budget on "
             "concrete detail, not preamble, restatement, or filler."
         )
-    return "Length target: 8,000-80,000 characters for this document chunk."
+    return "Length target: 8,000-55,000 characters for this document chunk."
 
 
 def _should_cache_system_prompt(

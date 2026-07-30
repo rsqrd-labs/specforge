@@ -384,22 +384,25 @@ def test_non_harness_stages_keep_the_judge_coverage_field():
 
 
 # ---------------------------------------------------------------------------
-# 5. The single-call length target (Demo Day's whole-document chunks)
+# 5. The single-call length target (every non-harness chunk)
 #
 # A chunk is exactly one provider stream, killed at the
 # stage_provider_call_timeout_seconds hard cap (validator-capped at 180s) with
-# its partial text discarded. The 80,000-character "document chunk" target is
-# written for a SLICE — standard spec/plan/tasks are 3-4 chunks, so no single
-# call is asked to fill it. Demo Day runs spec/plan/tasks as ONE whole-document
-# chunk, so that same target asked one 180s call to produce ~20K output tokens,
-# past the ~15-18K dense-chunk band that fits at effort=medium. Timing out is
-# strictly worse than finishing short: the retry lands on the mid tier with less
-# time left than the first attempt had.
+# its partial text discarded. The old 80,000-character "document chunk" target
+# was justified as a SLICE target — standard spec/plan/tasks are 3-4 chunks, so
+# no single call was expected to fill it — but the string is appended to the
+# prompt of the call actually being made and advertises 80,000 characters for
+# THAT call, i.e. ~20K output tokens, past the ~15-18K dense-chunk band that
+# fits at effort=medium. Timing out is strictly worse than finishing short: the
+# retry lands on the mid tier with less time left than the first attempt had.
+# Both shapes therefore carry the same 55,000-character ceiling; the whole
+# artifact's length comes from the chunk split, not from a per-call ceiling no
+# single call can reach inside the bound.
 # ---------------------------------------------------------------------------
 
 
 _STANDARD_DOCUMENT_TARGET = (
-    "Length target: 8,000-80,000 characters for this document chunk."
+    "Length target: 8,000-55,000 characters for this document chunk."
 )
 
 
@@ -418,15 +421,32 @@ def test_whole_document_chunks_get_a_single_call_length_target():
         assert "8,000" in target
 
 
-def test_standard_document_chunks_are_unchanged():
-    """Byte-identical for every standard multi-chunk stage — the slice target
-    is correct there precisely because no single call carries the whole doc."""
+def test_standard_document_chunks_fit_one_provider_call():
+    """A standard slice is ALSO exactly one 180s call, so it carries the same
+    ceiling. The multi-chunk split is what supplies total document length."""
     for stage in ("spec", "plan", "tasks"):
         chunks = sm._chunk_specs_for_stage(stage, "standard")
         assert len(chunks) > 1, f"{stage} must stay multi-chunk in standard mode"
         for chunk in chunks:
             assert chunk.whole_document is False
-            assert sm._chunk_length_target(stage, chunk) == _STANDARD_DOCUMENT_TARGET
+            target = sm._chunk_length_target(stage, chunk)
+            assert target == _STANDARD_DOCUMENT_TARGET
+            assert "55,000" in target
+            # The floor is untouched: this trims the unreachable head of the
+            # range, it is not a depth reduction.
+            assert "8,000" in target
+
+
+def test_no_non_harness_chunk_advertises_a_ceiling_past_the_180s_band():
+    """The regression guard. Whatever branch a non-harness chunk takes, it must
+    never be told it can spend more than one provider stream can finish — that
+    is what times the stream out and de-escalates the retry to the mid tier."""
+    for mode in ("standard", "demo_day"):
+        for stage in ("spec", "plan", "tasks"):
+            for chunk in sm._chunk_specs_for_stage(stage, mode):
+                target = sm._chunk_length_target(stage, chunk)
+                assert "55,000" in target, (mode, stage, chunk.key, target)
+                assert "80,000" not in target, (mode, stage, chunk.key, target)
 
 
 def test_harness_length_targets_are_not_affected_by_the_whole_document_rule():
