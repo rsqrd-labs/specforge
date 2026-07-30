@@ -41,8 +41,8 @@ def test_0031_revises_0030_and_history_is_linear() -> None:
     # llm_cost_events cache-write token column). The guard is that there
     # is exactly ONE head — a branched history breaks `alembic upgrade head` on
     # deploy.
-    assert heads == ["0042"], (
-        f"Expected a single migration head (0042), got {heads!r} — a branched "
+    assert heads == ["0043"], (
+        f"Expected a single migration head (0043), got {heads!r} — a branched "
         "history breaks `alembic upgrade head` on deploy."
     )
 

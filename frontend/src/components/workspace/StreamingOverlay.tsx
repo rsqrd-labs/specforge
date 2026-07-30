@@ -11,6 +11,7 @@ export type GenerationActivityOperation =
   | "generate"
   | "regenerate"
   | "regenerate-gaps"
+  | "resume"
   | "focused-patch"
   | "quality-gate-regenerate"
 
@@ -41,6 +42,9 @@ interface StreamingOverlayProps {
   gate?: QualityGateInfo
   /** Re-run generation for the stage, replacing the blocked draft. */
   onRegenerate?: () => void
+  /** Generate ONLY the sections a partially-failed attempt never produced,
+   *  keeping the ones already saved. Free — the credit was never refunded. */
+  onResume?: () => void
   /** Accept the current blocked draft without disabling the workspace critic. */
   onOverride?: () => void
   /** Dismiss the findings panel without acting. */
@@ -58,6 +62,7 @@ export function StreamingOverlay({
   compact = false,
   gate,
   onRegenerate,
+  onResume,
   onOverride,
   onDismiss,
   actionsDisabled = false,
@@ -176,7 +181,15 @@ export function StreamingOverlay({
     // artifact and may finalise it as-is — so override is offered for all kinds
     // (the backend's override_quality_gate accepts them all).
     const canOverride = gate.override_allowed !== false
-    const regenerateLabel = "Regenerate"
+    // A resumable gate is a partial success, not a failure: the sections that
+    // completed are saved and paid for, and only the gap is outstanding. Resume
+    // becomes the primary action and regenerate is demoted to a secondary
+    // "start over" — regenerating would discard work the user already owns.
+    const canResume = Boolean(gate.resumable && gate.recovery?.action === "resume")
+    const missingSections = gate.missing_sections ?? []
+    const completedSections = gate.completed_sections ?? []
+    const totalSections = completedSections.length + missingSections.length
+    const regenerateLabel = canResume ? "Start over" : "Regenerate"
     // Billing-honest sub-copy, driven solely by the backend's refund truth — the
     // generation-time block refunds the failed attempt; the finalise-time
     // re-check reports `false`. Single source of truth, no per-kind guessing.
@@ -204,9 +217,15 @@ export function StreamingOverlay({
               ✕
             </button>
           ) : null}
-          <h3 className="quality-gate-title">Quality gate held this generation back</h3>
+          <h3 className="quality-gate-title">
+            {canResume
+              ? `${completedSections.length} of ${totalSections} sections generated`
+              : "Quality gate held this generation back"}
+          </h3>
           <p className="quality-gate-subtitle">
-            {isIncomplete
+            {canResume
+              ? `${gate.recovery?.message ?? ""} The saved sections stay exactly as they are.`
+              : isIncomplete
               ? `The generated ${gate.stage} stopped before completion${
                   gate.repair_attempted ? " after a repair attempt" : ""
                 }. Regenerate for a complete version, or override to finalise this one as-is.`
@@ -224,6 +243,16 @@ export function StreamingOverlay({
                   issueCount === 1 ? "issue" : "issues"
                 } in the generated ${gate.stage}. Regenerate to try again, or override to accept anyway.`}
           </p>
+          {canResume && missingSections.length > 0 ? (
+            <ul className="quality-gate-findings">
+              {missingSections.map((section) => (
+                <li key={section} className="quality-gate-finding">
+                  <span className="quality-gate-kind">Not yet generated</span>
+                  <span className="quality-gate-detail"> — {section}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
           {isIncomplete || isTechnologySafety ? (
             <ul className="quality-gate-findings">
               {structuredIssues.map((reason, index) => (
@@ -284,10 +313,22 @@ export function StreamingOverlay({
                 Your previous attempt was refunded.
               </p>
             ) : null}
-            {onRegenerate ? (
+            {canResume && onResume ? (
               <button
                 type="button"
                 className="btn btn-primary"
+                onClick={onResume}
+                disabled={actionsDisabled}
+                title={actionsDisabled ? disabledReason : undefined}
+                aria-describedby={actionsDisabled ? disabledReasonId : undefined}
+              >
+                Finish remaining {missingSections.length > 0 ? missingSections.length : ""} sections (free)
+              </button>
+            ) : null}
+            {onRegenerate ? (
+              <button
+                type="button"
+                className={canResume ? "btn btn-secondary" : "btn btn-primary"}
                 onClick={onRegenerate}
                 disabled={actionsDisabled}
                 title={actionsDisabled ? disabledReason : undefined}

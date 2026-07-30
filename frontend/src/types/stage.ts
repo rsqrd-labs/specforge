@@ -76,6 +76,8 @@ export interface QualityGateReason {
  *  The single authoritative source for the recovery action, override
  *  availability, retry cost, refund truth, and the user-facing message. */
 export interface QualityGateRecovery {
+  /** "resume" when the failed attempt banked usable sections — completing the
+   *  gap costs 0 credits because the artifact's credit was never refunded. */
   action: string
   overridable: boolean
   credit_required: number
@@ -91,6 +93,11 @@ export interface QualityGateInfo {
   reasons?: QualityGateReason[]
   override_allowed?: boolean
   repair_attempted?: boolean
+  /** Chunk-level resume state: the sections a partially-failed attempt banked
+   *  and the ones still outstanding. Only present on a resumable gate. */
+  resumable?: boolean
+  completed_sections?: string[]
+  missing_sections?: string[]
   policy_version?: string | null
   verified_at?: string | null
   sources?: string[]

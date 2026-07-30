@@ -6,6 +6,7 @@ import {
   getStageGeneration,
   regenerateStage,
   regenerateStageForGaps,
+  resumeStage,
 } from "../services/api"
 import {
   StreamError,
@@ -16,7 +17,7 @@ import {
 import { useStageStore } from "../store/stageStore"
 import type { EvalResult, Stage } from "../types/stage"
 
-type StreamAction = "generate" | "regenerate" | "regenerate-gaps"
+type StreamAction = "generate" | "regenerate" | "regenerate-gaps" | "resume"
 
 // docs/CRITIC_ASYNC_ADVISORY_PLAN.md §3.4: the critic now runs OFF the critical
 // path and attaches its advisory findings to Stage.quality_gate a few seconds
@@ -208,7 +209,9 @@ export function useStream(stageId: string | null) {
             ? await regenerateStage(stageId)
             : action === "regenerate-gaps"
               ? await regenerateStageForGaps(stageId)
-              : await generateStage(stageId)
+              : action === "resume"
+                ? await resumeStage(stageId)
+                : await generateStage(stageId)
 
         const doneStageId = await new Promise<string>((resolve, reject) => {
           // Defense in depth: close any prior connection before overwriting the

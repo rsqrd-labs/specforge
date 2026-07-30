@@ -16,7 +16,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from models import Base
@@ -46,7 +46,7 @@ class StageGenerationRun(Base):
     __tablename__ = "stage_generation_runs"
     __table_args__ = (
         CheckConstraint(
-            "action IN ('generate', 'regenerate')",
+            "action IN ('generate', 'regenerate', 'resume')",
             name="ck_stage_generation_runs_action",
         ),
         CheckConstraint(
@@ -121,6 +121,19 @@ class StageGenerationRun(Base):
         nullable=True,
     )
     action: Mapped[str] = mapped_column(String, nullable=False)
+    # The ordered chunk keys this run set out to produce. Stored rather than
+    # recomputed so a later resume can tell "which sections are missing" without
+    # re-deriving the chunk plan from the workspace mode — and so that a resume
+    # whose plan no longer matches (chunking changed under it) is detectable and
+    # falls back to a full regenerate instead of stitching incompatible halves.
+    chunk_plan: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # The terminal run whose completed checkpoints seeded this one. Set only on
+    # ``action='resume'``; the audit trail for a partially-charged artifact.
+    resume_source_run_id: Mapped[PythonUUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("stage_generation_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     status: Mapped[str] = mapped_column(
         String, nullable=False, server_default=text("'running'")
     )

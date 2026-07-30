@@ -371,6 +371,30 @@ async def regenerate_stage(
     )
 
 
+@router.post("/{id}/resume")
+async def resume_stage(
+    id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> StreamingResponse:
+    """Generate only the sections a previous attempt failed to produce.
+
+    Deliberately NOT behind ``require_credits``: the credit for this artifact was
+    already charged and, because the attempt banked usable sections, deliberately
+    not refunded. Charging again — or blocking a user at zero balance from
+    collecting work they have already paid for — is the bug this endpoint exists
+    to fix. ``generate(action="resume")`` refuses with ``resume_unavailable`` if
+    the stage is not actually holding a resumable gate, so a caller cannot use
+    this as a free full generation.
+    """
+    await _load_stage(id, db, user.id)
+    trace_id = str(uuid4())
+    return StreamingResponse(
+        _stream_stage(id, user, db, trace_id, action="resume"),
+        media_type="text/event-stream",
+    )
+
+
 async def _stream_harness_patch(
     stage_id: UUID,
     user: User,

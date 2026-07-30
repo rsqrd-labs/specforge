@@ -369,6 +369,78 @@ describe("StreamingOverlay quality gate", () => {
     ).toBe("auto")
   })
 
+  it("offers a free resume as the primary action on a resumable gate", () => {
+    // The partial-loss defect: 3 of 4 chunks succeeded, the 4th timed out, and
+    // the old behaviour refunded the credit and threw the 3 away. Now the
+    // banked sections are kept and only the gap is offered — for free.
+    const onResume = vi.fn()
+    const onRegenerate = vi.fn()
+    render(
+      <StreamingOverlay
+        isVisible={false}
+        gate={{
+          ...incompleteGate,
+          resumable: true,
+          // The backend sends rendered labels, never raw chunk keys — every
+          // stage describes its progress in the same voice.
+          completed_sections: [
+            "Product scope and requirements",
+            "System expectations and constraints",
+          ],
+          missing_sections: ["Validation and risks"],
+          recovery: {
+            action: "resume",
+            overridable: true,
+            credit_required: 0,
+            refunded_prior_attempt: false,
+            message:
+              "2 of 3 sections were generated and saved. Finish the remaining " +
+              "1 section at no extra credit cost, or finalise this draft as-is.",
+          },
+        }}
+        onRegenerate={onRegenerate}
+        onResume={onResume}
+        onOverride={vi.fn()}
+      />,
+    )
+
+    // Headline reframes a partial success as progress, not a failure.
+    expect(screen.getByText("2 of 3 sections generated")).toBeInTheDocument()
+    expect(screen.getByText(/no extra credit cost/i)).toBeInTheDocument()
+    // The outstanding section is named, so the user knows what they are buying.
+    expect(screen.getByText(/Validation and risks/)).toBeInTheDocument()
+
+    const resume = screen.getByRole("button", { name: /finish remaining/i })
+    resume.click()
+    expect(onResume).toHaveBeenCalledTimes(1)
+    expect(onRegenerate).not.toHaveBeenCalled()
+
+    // Regenerate is demoted to "Start over" — it discards work already paid for.
+    expect(screen.getByRole("button", { name: "Start over" })).toBeInTheDocument()
+    // Nothing was refunded, so the refund note must not appear.
+    expect(screen.queryByText(/was refunded/i)).not.toBeInTheDocument()
+  })
+
+  it("keeps the plain incomplete gate unchanged when it is not resumable", () => {
+    const onResume = vi.fn()
+    render(
+      <StreamingOverlay
+        isVisible={false}
+        gate={incompleteGate}
+        onRegenerate={vi.fn()}
+        onResume={onResume}
+        onOverride={vi.fn()}
+      />,
+    )
+
+    // A gate with no banked sections must never advertise a free resume.
+    expect(
+      screen.queryByRole("button", { name: /finish remaining/i }),
+    ).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Regenerate" })).toBeInTheDocument()
+    expect(onResume).not.toHaveBeenCalled()
+  })
+
   it("offers Regenerate + Override + refund sub-copy for incomplete output gates", () => {
     // Issue #34: incomplete_output is overridable now — the user can regenerate
     // OR finalise as-is. incomplete_output still refunds, so the note shows.

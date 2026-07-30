@@ -577,6 +577,13 @@ export async function regenerateStage(id: string): Promise<GenerateStageResponse
   return { stage_id: id, stream_url: `/stages/${id}/regenerate` }
 }
 
+/** Generate ONLY the sections a partially-failed attempt never produced.
+ *  Costs no credits: the artifact's credit was charged on the failed attempt and
+ *  deliberately not refunded, precisely so the banked sections stay paid for. */
+export async function resumeStage(id: string): Promise<GenerateStageResponse> {
+  return { stage_id: id, stream_url: `/stages/${id}/resume` }
+}
+
 export async function regenerateStageForGaps(id: string): Promise<GenerateStageResponse> {
   return { stage_id: id, stream_url: `/stages/${id}/regenerate-gaps` }
 }

@@ -1655,7 +1655,7 @@ async def test_research_enabled_generation_never_reads_or_writes_output_cache() 
 
 
 @pytest.mark.asyncio
-async def test_generate_provider_limit_stop_saves_partial_and_refunds() -> None:
+async def test_generate_provider_limit_stop_saves_partial_and_offers_resume() -> None:
     workspace_id = uuid4()
     spec_stage = _make_stage(workspace_id, "spec", status="draft")
     workspace = _make_workspace([spec_stage])
@@ -1693,13 +1693,25 @@ async def test_generate_provider_limit_stop_saves_partial_and_refunds() -> None:
         tokens = [token async for token in svc.generate(spec_stage.id, user, db)]
 
     mock_deduct.assert_awaited_once_with(db, user.id, 10, "generate")
-    mock_refund.assert_awaited_once_with(db, deduction.id, user_id=user.id)
+    # NOT refunded, deliberately: one of the two first-wave chunks completed and
+    # is banked in stage_generation_chunks. Refunding would mean discarding paid
+    # work and re-generating every chunk on the next attempt — the partial-loss
+    # defect. The credit stays spent so the banked section stays owned, and the
+    # gap is offered as a free resume instead.
+    mock_refund.assert_not_awaited()
     # The two independent first-wave chunks are each called once. A token-limit
     # stop is terminal for its chunk and never triggers whole-stage repair.
     assert sum(len(adapter.stream_calls) for adapter in adapters) == 2
     assert spec_stage.status == "draft"
     assert spec_stage.quality_gate_status == "blocked"
     assert spec_stage.quality_gate_kind == "incomplete_output"
+    payload = spec_stage.quality_gate_payload or {}
+    assert payload["resumable"] is True
+    assert payload["refunded_prior_attempt"] is False
+    assert payload["completed_sections"], "the surviving chunk must be named"
+    assert payload["missing_sections"], "the outstanding chunks must be named"
+    # The resume seed is addressed by run id, not by scanning for a recent run.
+    assert payload["resume_source_run_id"]
     assert any("generation_terminal" in token for token in tokens)
 
 

@@ -17,6 +17,7 @@ from config import settings
 from models import Stage, StageGenerationChunk, StageGenerationRun, StageVersion
 from models.stage_generation import TERMINAL_GENERATION_STATUSES
 from services.credit_service import credit_service
+from services.pipeline.chunk_labels import chunk_labels
 from services.security.output_validator import validate_async
 
 logger = logging.getLogger(__name__)
@@ -190,6 +191,8 @@ async def create_generation_run(
     deduction_ledger_id: UUID | None,
     total_parts: int,
     now: datetime | None = None,
+    chunk_plan: list[str] | None = None,
+    resume_source_run_id: UUID | None = None,
 ) -> StageGenerationRun:
     now = now or datetime.now(UTC)
     run = StageGenerationRun(
@@ -199,6 +202,8 @@ async def create_generation_run(
         user_id=user_id,
         deduction_ledger_id=deduction_ledger_id,
         action=action,
+        chunk_plan=list(chunk_plan) if chunk_plan else None,
+        resume_source_run_id=resume_source_run_id,
         status="running",
         phase="preparing",
         previous_status=stage.status,
@@ -303,6 +308,66 @@ async def load_checkpoint_content(db: AsyncSession, run_id: UUID) -> str:
         .all()
     )
     return "\n\n".join(chunk.content for chunk in chunks if chunk.content.strip())
+
+
+async def load_resume_seed(
+    db: AsyncSession, *, stage: Stage
+) -> tuple[UUID, dict[str, str], list[str]] | None:
+    """Return ``(source_run_id, {chunk_key: content}, planned_keys)`` to resume.
+
+    The stage's own quality gate is the authority on whether a resume is offered,
+    not a "most recent failed run" scan: ``quality_gate_version`` already pins the
+    payload to a specific stage version, so a stage that has since been
+    regenerated, edited, or finalised stops advertising the resume and this
+    returns None. That keeps completed chunks from one attempt from being
+    stitched onto a draft they were never part of.
+
+    Returns None (caller falls back to a normal, charged regenerate) whenever the
+    seed cannot be trusted: no gate, a non-resumable gate, a gate pinned to an
+    older version, a vanished source run, or a source run with no surviving
+    checkpoints.
+    """
+    payload = stage.quality_gate_payload or {}
+    if not payload.get("resumable"):
+        return None
+    if stage.quality_gate_version != stage.current_version:
+        return None
+    raw_run_id = payload.get("resume_source_run_id")
+    if not raw_run_id:
+        return None
+    try:
+        source_run_id = UUID(str(raw_run_id))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    source = (
+        await db.execute(
+            select(StageGenerationRun).where(
+                StageGenerationRun.id == source_run_id,
+                StageGenerationRun.stage_id == stage.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if source is None:
+        return None
+    chunks = (
+        (
+            await db.execute(
+                select(StageGenerationChunk)
+                .where(StageGenerationChunk.generation_run_id == source_run_id)
+                .order_by(StageGenerationChunk.ordinal)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    seed = {
+        chunk.chunk_key: chunk.content
+        for chunk in chunks
+        if chunk.content and chunk.content.strip()
+    }
+    if not seed:
+        return None
+    return source_run_id, seed, [str(key) for key in (source.chunk_plan or [])]
 
 
 async def lock_stage_for_run(db: AsyncSession, run: StageGenerationRun) -> Stage:
@@ -450,8 +515,24 @@ async def terminalize_interrupted_run(
             )
         )
 
+    # Resumability is decided BEFORE the refund, because it decides the refund.
+    # A run that banked at least one chunk and is missing at least one other has
+    # durable, paid-for work sitting in stage_generation_chunks; throwing that
+    # away and handing the credit back means the next attempt re-generates every
+    # chunk — including the ones that already succeeded — and re-enters the same
+    # deadline that just killed it. Keeping the charge and completing only the
+    # gap is both cheaper and far likelier to succeed.
+    surviving = [] if partial_was_discarded else checkpoint_rows
+    completed_keys = [chunk.chunk_key for chunk in surviving]
+    planned_keys = [str(key) for key in (run.chunk_plan or [])]
+    missing_keys = [key for key in planned_keys if key not in set(completed_keys)]
+    # ``combined`` is the gate on suppressing the refund: it is the content that
+    # actually reaches the user's draft. Without it there is nothing to resume
+    # onto, and withholding the credit would charge for nothing.
+    resumable = bool(completed_keys) and bool(missing_keys) and bool(combined)
+
     refunded = 0
-    if run.deduction_ledger_id is not None:
+    if run.deduction_ledger_id is not None and not resumable:
         refunded = await credit_service.refund(
             db, run.deduction_ledger_id, user_id=run.user_id
         )
@@ -472,14 +553,35 @@ async def terminalize_interrupted_run(
                 {
                     "code": error_code,
                     "detail": (
-                        "Generation stopped before every section completed. "
-                        "The safely received portion was saved."
+                        (
+                            f"Generation stopped after {len(completed_keys)} of "
+                            f"{len(planned_keys)} sections. The completed sections "
+                            "were saved — the remaining ones can be generated "
+                            "without spending another credit."
+                        )
+                        if resumable
+                        else (
+                            "Generation stopped before every section completed. "
+                            "The safely received portion was saved."
+                        )
                     ),
                     "reference": None,
                 }
             ],
             "repair_attempted": False,
-            "refunded_prior_attempt": run.deduction_ledger_id is not None,
+            "refunded_prior_attempt": (
+                run.deduction_ledger_id is not None and not resumable
+            ),
+            # Consumed by the UI to offer "complete the rest" instead of a full,
+            # re-charged regenerate. resume_source_run_id is what the resume run
+            # seeds its completed_content from.
+            "resumable": resumable,
+            "resume_source_run_id": str(run.id) if resumable else None,
+            # Rendered names, not routing keys: every stage describes its
+            # progress in the same voice. The resume itself joins on the chunk
+            # keys held in stage_generation_chunks, never on these strings.
+            "completed_sections": chunk_labels(stage.type, completed_keys),
+            "missing_sections": chunk_labels(stage.type, missing_keys),
         }
         stage.quality_gate_version = result_version
         stage.quality_gate_failed_at = now
@@ -530,4 +632,7 @@ def run_to_dict(run: StageGenerationRun) -> dict:
         "partial_saved": run.partial_saved,
         "refunded_credits": run.refunded_credits,
         "credit_was_deducted": run.credit_was_deducted,
+        "resume_source_run_id": (
+            str(run.resume_source_run_id) if run.resume_source_run_id else None
+        ),
     }

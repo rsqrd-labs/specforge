@@ -149,6 +149,12 @@ class StageQualityGate(BaseModel):
     reasons: list[dict[str, Any]] | None = None
     override_allowed: bool | None = None
     repair_attempted: bool | None = None
+    # Chunk-level resume: which sections a partially-failed attempt banked, and
+    # which are still outstanding. Present only on an incomplete_output gate that
+    # kept its credit rather than refunding.
+    resumable: bool | None = None
+    completed_sections: list[str] | None = None
+    missing_sections: list[str] | None = None
     policy_version: str | None = None
     verified_at: datetime | None = None
     sources: list[str] | None = None

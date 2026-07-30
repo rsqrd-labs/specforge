@@ -40,7 +40,15 @@ NON_OVERRIDABLE_GATE_KINDS: frozenset[str] = frozenset()
 GENERATION_CREDIT_COST = 10
 
 
-def _recovery_message(kind: str | None, *, overridable: bool, refunded: bool) -> str:
+def _recovery_message(
+    kind: str | None,
+    *,
+    overridable: bool,
+    refunded: bool,
+    resumable: bool = False,
+    completed_sections: int = 0,
+    total_sections: int = 0,
+) -> str:
     """Build the kind-specific, billing-honest recovery sentence shown to users.
 
     Every blocking kind is overridable since issue #34, so each message offers
@@ -48,6 +56,17 @@ def _recovery_message(kind: str | None, *, overridable: bool, refunded: bool) ->
     one as-is — phrased so a non-technical user knows exactly what each does.
     """
     refund_clause = " Your credit for this attempt was refunded." if refunded else ""
+    if resumable:
+        # The resumable case is deliberately NOT phrased as a failure to redo.
+        # The sections that succeeded are saved and already paid for; the only
+        # outstanding work is the gap, and collecting it costs nothing further.
+        remaining = max(0, total_sections - completed_sections)
+        return (
+            f"{completed_sections} of {total_sections} sections were generated "
+            f"and saved. Finish the remaining "
+            f"{remaining} {'section' if remaining == 1 else 'sections'} at no "
+            "extra credit cost, or finalise this draft as-is."
+        )
     if kind == "incomplete_output":
         return (
             "This draft looks cut off before it finished. Regenerate for a "
@@ -83,24 +102,41 @@ def _recovery_message(kind: str | None, *, overridable: bool, refunded: bool) ->
 
 
 def derive_quality_gate_recovery(
-    kind: str | None, *, refunded_prior_attempt: bool
+    kind: str | None,
+    *,
+    refunded_prior_attempt: bool,
+    resumable: bool = False,
+    completed_sections: int = 0,
+    total_sections: int = 0,
 ) -> dict:
     """Derive the user-facing recovery contract for a blocked quality gate.
 
-    A pure function of the gate ``kind`` and whether the blocking attempt was
-    refunded. No DB state and no migration — the result is attached to the
-    ``Stage.quality_gate`` property (so it ships in every stage GET and survives
-    refresh) and to the structured finalise 409, so the frontend renders one
-    authoritative recovery message from a single source of truth.
+    A pure function of the gate ``kind``, whether the blocking attempt was
+    refunded, and whether the attempt banked sections that can be completed
+    without re-generating (and re-charging for) the whole artifact. No DB state —
+    the result is attached to the ``Stage.quality_gate`` property (so it ships in
+    every stage GET and survives refresh) and to the structured finalise 409, so
+    the frontend renders one authoritative recovery message from a single source
+    of truth.
+
+    ``resumable`` changes both the offered action and its price: ``resume`` costs
+    **0** credits because the artifact's credit was charged and deliberately not
+    refunded, precisely so the banked sections stay paid for. A regenerate is
+    still available to the user, it is simply no longer the *recommended* action.
     """
     overridable = kind not in NON_OVERRIDABLE_GATE_KINDS
     return {
-        "action": "regenerate",
+        "action": "resume" if resumable else "regenerate",
         "overridable": overridable,
-        "credit_required": GENERATION_CREDIT_COST,
+        "credit_required": 0 if resumable else GENERATION_CREDIT_COST,
         "refunded_prior_attempt": refunded_prior_attempt,
         "message": _recovery_message(
-            kind, overridable=overridable, refunded=refunded_prior_attempt
+            kind,
+            overridable=overridable,
+            refunded=refunded_prior_attempt,
+            resumable=resumable,
+            completed_sections=completed_sections,
+            total_sections=total_sections,
         ),
     }
 
@@ -227,10 +263,15 @@ class Stage(Base):
         # retry cost / was I refunded / what do I tell the user." An overridden
         # version is not awaiting recovery, so it carries none.
         if status == "blocked":
+            completed = list(payload.get("completed_sections") or [])
+            missing = list(payload.get("missing_sections") or [])
             payload["recovery"] = derive_quality_gate_recovery(
                 self.quality_gate_kind,
                 refunded_prior_attempt=bool(
                     payload.get("refunded_prior_attempt", False)
                 ),
+                resumable=bool(payload.get("resumable", False)),
+                completed_sections=len(completed),
+                total_sections=len(completed) + len(missing),
             )
         return payload

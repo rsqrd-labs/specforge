@@ -382,7 +382,9 @@ export default function Workspace() {
   const storyboardActionInFlightRef = useRef(false)
   const storyboardLoadRequestRef = useRef(0)
   const storyboardLoadingRequestRef = useRef(0)
-  const lastGenerationActionRef = useRef<"generate" | "regenerate" | "regenerate-gaps">(
+  const lastGenerationActionRef = useRef<
+    "generate" | "regenerate" | "regenerate-gaps" | "resume"
+  >(
     "generate",
   )
   const { showAlert, dismissAlert } = useActionAlert()
@@ -1139,7 +1141,7 @@ export default function Workspace() {
   // Declared before confirmCredits/proceedThroughReviewGate which call it
   const runGeneration = useCallback(
     async (
-      action: "generate" | "regenerate" | "regenerate-gaps",
+      action: "generate" | "regenerate" | "regenerate-gaps" | "resume",
       operation: GenerationActivityOperation = action,
       activityAlreadyStarted = false,
     ) => {
@@ -1205,6 +1207,18 @@ export default function Workspace() {
     startGenerationActivity(activeStage, "quality-gate-regenerate", true)
     clearQualityGate(activeStage.id)
     await runGeneration("regenerate", "quality-gate-regenerate", true)
+  }, [activeStage, clearQualityGate, guardWorkspaceMutation, runGeneration, startGenerationActivity])
+
+  // Completing the gap is a different operation from starting over: it keeps the
+  // sections the failed attempt banked and generates only the missing ones, and
+  // it spends no credit. Same guards and activity handling as regenerate — only
+  // the action differs.
+  const handleGateResume = useCallback(async () => {
+    if (!activeStage) return
+    if (generationActivityRef.current || guardWorkspaceMutation()) return
+    startGenerationActivity(activeStage, "quality-gate-regenerate", true)
+    clearQualityGate(activeStage.id)
+    await runGeneration("resume", "quality-gate-regenerate", true)
   }, [activeStage, clearQualityGate, guardWorkspaceMutation, runGeneration, startGenerationActivity])
 
   const handleGateOverride = useCallback(async () => {
@@ -2674,6 +2688,7 @@ export default function Workspace() {
             isVisible={false}
             gate={activeGate}
             onRegenerate={handleGateRegenerate}
+            onResume={handleGateResume}
             onOverride={handleGateOverride}
             onDismiss={handleGateDismiss}
             actionsDisabled={workspaceGenerationLock.locked}

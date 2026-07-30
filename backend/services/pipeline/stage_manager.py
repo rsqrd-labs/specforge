@@ -149,6 +149,7 @@ from services.pipeline.generation_runs import (
     GenerationStoppedError,
     checkpoint_chunk,
     create_generation_run,
+    load_resume_seed,
     lock_running_run,
     lock_stage_for_run,
     mark_run_terminal,
@@ -2528,18 +2529,48 @@ class StageManager:
         ],
         phase_change: Callable[[str], Awaitable[None]],
         cache_policy: PromptCachePolicy | None = None,
+        resume_content: dict[str, str] | None = None,
     ) -> GeneratedArtifact:
-        """Generate dependency waves with durable, per-chunk retry boundaries."""
+        """Generate dependency waves with durable, per-chunk retry boundaries.
+
+        ``resume_content`` pre-seeds chunks banked by an earlier run so only the
+        gap is regenerated. A seeded chunk is skipped for provider purposes but
+        still checkpointed onto THIS run, so a resume that itself dies partway
+        leaves one complete checkpoint set behind and the next resume sees every
+        chunk banked so far — not just the ones this attempt happened to produce.
+        Seeded keys are also what feed ``prior`` for later waves, so a resumed
+        chunk conditions downstream chunks exactly as a freshly generated one
+        would.
+        """
         waves = _chunk_waves_for_stage(stage_type, mode)
         ordered_specs = [chunk for wave in waves for chunk in wave]
         ordinal_by_key = {
             chunk.key: ordinal for ordinal, chunk in enumerate(ordered_specs)
         }
-        completed_content: dict[str, str] = {}
+        # Only keys in the CURRENT plan are honoured: if the chunking changed
+        # since the seeded run, the stale keys are dropped and those chunks are
+        # regenerated rather than stitched into a document they no longer fit.
+        completed_content: dict[str, str] = {
+            key: text
+            for key, text in (resume_content or {}).items()
+            if key in ordinal_by_key and text and text.strip()
+        }
         content_generation_id: str | None = None
         generation_started = asyncio.get_running_loop().time()
         phase.set(PIPELINE_PHASE_STREAMING)
-        phase.set_parts(0, len(ordered_specs))
+        phase.set_parts(len(completed_content), len(ordered_specs))
+        # Re-bank the seeded chunks against this run before any provider call, so
+        # the checkpoint set is complete from the first instant. Doing it up front
+        # (rather than as each wave passes) means a resume killed in its very
+        # first wave still hands the NEXT resume everything it inherited.
+        for key, text in completed_content.items():
+            await checkpoint(
+                next(spec for spec in ordered_specs if spec.key == key),
+                ordinal_by_key[key],
+                text,
+                route,
+                0,
+            )
 
         async def _bounded_backoff(delay: float) -> None:
             control.raise_if_stopped()
@@ -2663,12 +2694,17 @@ class StageManager:
                 for prior_wave in waves[:wave_index]
                 for chunk in prior_wave
             ]
+            pending_chunks = [
+                chunk for chunk in wave if chunk.key not in completed_content
+            ]
+            if not pending_chunks:
+                continue
             tasks = [
                 asyncio.create_task(
                     _one_chunk(chunk, prior, stream_live=index == 0),
                     name=f"stage-chunk:{control.run_id}:{chunk.key}",
                 )
-                for index, chunk in enumerate(wave)
+                for index, chunk in enumerate(pending_chunks)
             ]
             first_error: BaseException | None = None
             try:
@@ -2690,7 +2726,7 @@ class StageManager:
                     except Exception as exc:  # retain successful siblings
                         first_error = first_error or exc
                         continue
-                    chunk = next(item for item in wave if item.key == key)
+                    chunk = next(item for item in pending_chunks if item.key == key)
                     completed_parts = await checkpoint(
                         chunk,
                         ordinal_by_key[key],
@@ -2987,7 +3023,7 @@ class StageManager:
         free: bool = False,
         action: str = "generate",
     ) -> AsyncGenerator[str, None]:
-        if action not in {"generate", "regenerate"}:
+        if action not in {"generate", "regenerate", "resume"}:
             raise PreflightError(
                 "invalid_generation_action",
                 "Invalid generation action.",
@@ -2995,6 +3031,23 @@ class StageManager:
 
         stage = await self._load_stage(stage_id, db, lock=True)
         workspace = await self._load_workspace(stage.workspace_id, db)
+
+        # A resume completes the sections a previous paid attempt banked, so it
+        # is always free: the credit for this artifact was already taken and
+        # deliberately not refunded. If the seed is gone or no longer trustworthy
+        # the resume degrades into an ordinary regenerate, which charges — never
+        # a free full generation.
+        resume_seed: dict[str, str] = {}
+        resume_source_run_id: UUID | None = None
+        if action == "resume":
+            resumed = await load_resume_seed(db, stage=stage)
+            if resumed is None:
+                raise PreflightError(
+                    "resume_unavailable",
+                    "There are no saved sections to complete. Regenerate instead.",
+                )
+            resume_source_run_id, resume_seed, _planned = resumed
+            free = True
 
         if stage.status not in ("draft", "stale"):
             # An already-generating stage gets a distinct, benign code: a
@@ -3410,6 +3463,14 @@ class StageManager:
                         for wave in _chunk_waves_for_stage(stage.type, gen_mode)
                     ),
                     now=commit_now,
+                    # Recorded on every run, not just resumable ones: it is what
+                    # lets the terminal path name the missing sections later.
+                    chunk_plan=[
+                        chunk.key
+                        for wave in _chunk_waves_for_stage(stage.type, gen_mode)
+                        for chunk in wave
+                    ],
+                    resume_source_run_id=resume_source_run_id,
                 )
             except IntegrityError as exc:
                 await db.rollback()
@@ -3735,6 +3796,7 @@ class StageManager:
                     phase=phase_tracker,
                     research=research,
                     admission=admission,
+                    resume_content=resume_seed,
                 )
             )
             # The pipeline now owns the admission slot (released in its body's
@@ -3815,6 +3877,7 @@ class StageManager:
         phase: _PhaseTracker,
         research: ResearchContext = _EMPTY_RESEARCH,
         admission: GenerationAdmission | None = None,
+        resume_content: dict[str, str] | None = None,
     ) -> None:
         """Run the post-preflight generation pipeline on its OWN DB session.
 
@@ -3874,6 +3937,7 @@ class StageManager:
                     cache_key=cache_key,
                     phase=phase,
                     research=research,
+                    resume_content=resume_content,
                 )
         except Exception as exc:
             if body_started:
@@ -3958,6 +4022,7 @@ class StageManager:
         cache_key: str,
         phase: _PhaseTracker,
         research: ResearchContext = _EMPTY_RESEARCH,
+        resume_content: dict[str, str] | None = None,
     ) -> None:
         """The full post-preflight pipeline, operating on the supplied session.
 
@@ -4085,6 +4150,7 @@ class StageManager:
                         db, generation_run_id, next_phase, commit=True
                     ),
                     cache_policy=cache_policy,
+                    resume_content=resume_content,
                 )
                 accumulated = generated.content
                 content_generation_id = generated.content_generation_id
