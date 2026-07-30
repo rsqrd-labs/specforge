@@ -387,7 +387,8 @@ def test_non_harness_stages_keep_the_judge_coverage_field():
 # 5. The single-call length target (every non-harness chunk)
 #
 # A chunk is exactly one provider stream, killed at the
-# stage_provider_call_timeout_seconds hard cap (validator-capped at 180s) with
+# stage_provider_call_timeout_seconds hard cap (240s — the most the 300s
+# deadline minus the 30s finalise reserve can grant) with
 # its partial text discarded. The old 80,000-character "document chunk" target
 # was justified as a SLICE target — standard spec/plan/tasks are 3-4 chunks, so
 # no single call was expected to fill it — but the string is appended to the
@@ -395,26 +396,26 @@ def test_non_harness_stages_keep_the_judge_coverage_field():
 # THAT call, i.e. ~20K output tokens, past the ~15-18K dense-chunk band that
 # fits at effort=medium. Timing out is strictly worse than finishing short: the
 # retry lands on the mid tier with less time left than the first attempt had.
-# Both shapes therefore carry the same 55,000-character ceiling; the whole
+# Both shapes therefore carry the same 30,000-character ceiling; the whole
 # artifact's length comes from the chunk split, not from a per-call ceiling no
 # single call can reach inside the bound.
 # ---------------------------------------------------------------------------
 
 
 _STANDARD_DOCUMENT_TARGET = (
-    "Length target: 8,000-55,000 characters for this document chunk."
+    "Length target: 8,000-30,000 characters for this document chunk."
 )
 
 
 def test_whole_document_chunks_get_a_single_call_length_target():
-    """Every Demo Day whole-document chunk is sized for one 180s call."""
+    """Every Demo Day whole-document chunk is sized for one 240s call."""
     for stage in ("spec", "plan", "tasks"):
         chunks = sm._chunk_specs_for_stage(stage, "demo_day")
         assert len(chunks) == 1, f"{stage} is expected to stay single-pass"
         chunk = chunks[0]
         assert chunk.whole_document is True
         target = sm._chunk_length_target(stage, chunk)
-        assert "55,000" in target
+        assert "30,000" in target
         assert target != _STANDARD_DOCUMENT_TARGET
         # The floor is untouched: this trims the unreachable head of the range,
         # it is not a depth reduction.
@@ -422,7 +423,7 @@ def test_whole_document_chunks_get_a_single_call_length_target():
 
 
 def test_standard_document_chunks_fit_one_provider_call():
-    """A standard slice is ALSO exactly one 180s call, so it carries the same
+    """A standard slice is ALSO exactly one 240s call, so it carries the same
     ceiling. The multi-chunk split is what supplies total document length."""
     for stage in ("spec", "plan", "tasks"):
         chunks = sm._chunk_specs_for_stage(stage, "standard")
@@ -431,13 +432,13 @@ def test_standard_document_chunks_fit_one_provider_call():
             assert chunk.whole_document is False
             target = sm._chunk_length_target(stage, chunk)
             assert target == _STANDARD_DOCUMENT_TARGET
-            assert "55,000" in target
+            assert "30,000" in target
             # The floor is untouched: this trims the unreachable head of the
             # range, it is not a depth reduction.
             assert "8,000" in target
 
 
-def test_no_non_harness_chunk_advertises_a_ceiling_past_the_180s_band():
+def test_no_non_harness_chunk_advertises_a_ceiling_past_the_measured_band():
     """The regression guard. Whatever branch a non-harness chunk takes, it must
     never be told it can spend more than one provider stream can finish — that
     is what times the stream out and de-escalates the retry to the mid tier."""
@@ -445,7 +446,7 @@ def test_no_non_harness_chunk_advertises_a_ceiling_past_the_180s_band():
         for stage in ("spec", "plan", "tasks"):
             for chunk in sm._chunk_specs_for_stage(stage, mode):
                 target = sm._chunk_length_target(stage, chunk)
-                assert "55,000" in target, (mode, stage, chunk.key, target)
+                assert "30,000" in target, (mode, stage, chunk.key, target)
                 assert "80,000" not in target, (mode, stage, chunk.key, target)
 
 
@@ -478,7 +479,7 @@ def test_length_target_keys_on_structure_not_the_demo_full_key_string():
         "Generate the complete artifact.",
         whole_document=True,
     )
-    assert "55,000" in sm._chunk_length_target("spec", renamed)
+    assert "30,000" in sm._chunk_length_target("spec", renamed)
 
 
 def test_demo_day_single_call_chunks_skip_the_anthropic_cache_write():

@@ -312,9 +312,26 @@ class Settings(BaseSettings):
     # Core stage-run deadline contract. These values are intentionally separate
     # from storyboard/increment timeouts: Spec/Plan/Harness/Tasks are interactive
     # and must reach a durable terminal state within five minutes.
+    # The per-call cap is 240, not the original 180, and the arithmetic that
+    # allows it is: the 300s deadline minus the 30s finalise reserve leaves 270
+    # provider-seconds, so a 240s call fits with 30s of slack for preflight and
+    # the quality gates. The 300s product contract is untouched.
+    #
+    # 180 was measured too low on 2026-07-30 (generation 65fe5f10): two parallel
+    # Opus 5 spec chunks were both killed at exactly 180,000ms having produced
+    # 6,821 and 7,521 visible output tokens — ~38 tok/s at effort=medium, so one
+    # call buys ~26,000 characters, not the ~15-18K tokens this code assumed
+    # without ever measuring it. Both partials were discarded and the run
+    # terminalised as incomplete_output.
+    #
+    # A deliberate consequence: after a 240s first attempt only ~30s remains,
+    # below stage_retry_min_remaining_seconds, so the mid-tier retry no longer
+    # starts. That retry was structurally doomed — in the same trace both Sonnet
+    # 5 retries were killed at ~90s redoing work Opus could not finish in 180 —
+    # so a clean terminal failure is strictly better than paying for it.
     stage_generation_deadline_seconds: int = 300
     stage_generation_finalise_reserve_seconds: int = 30
-    stage_provider_call_timeout_seconds: int = 180
+    stage_provider_call_timeout_seconds: int = 240
     stage_provider_idle_timeout_seconds: int = 90
     stage_retry_min_remaining_seconds: int = 45
     stage_generation_cancel_poll_seconds: float = 1.0
@@ -331,8 +348,20 @@ class Settings(BaseSettings):
             raise ValueError("STAGE_GENERATION_DEADLINE_SECONDS must be 300")
         if self.stage_generation_finalise_reserve_seconds != 30:
             raise ValueError("STAGE_GENERATION_FINALISE_RESERVE_SECONDS must be 30")
-        if not 1 <= self.stage_provider_call_timeout_seconds <= 180:
-            raise ValueError("STAGE_PROVIDER_CALL_TIMEOUT_SECONDS must be 1..180")
+        # The ceiling is the provider budget the deadline actually grants:
+        # deadline - finalise reserve. Anything above it is a bound the run can
+        # never reach, which is how a call cap silently becomes a lie.
+        provider_budget = (
+            self.stage_generation_deadline_seconds
+            - self.stage_generation_finalise_reserve_seconds
+        )
+        if not 1 <= self.stage_provider_call_timeout_seconds <= 240:
+            raise ValueError("STAGE_PROVIDER_CALL_TIMEOUT_SECONDS must be 1..240")
+        if self.stage_provider_call_timeout_seconds > provider_budget:
+            raise ValueError(
+                "STAGE_PROVIDER_CALL_TIMEOUT_SECONDS cannot exceed the deadline "
+                "minus the finalise reserve"
+            )
         if not 1 <= self.stage_provider_idle_timeout_seconds <= 90:
             raise ValueError("STAGE_PROVIDER_IDLE_TIMEOUT_SECONDS must be 1..90")
         if (

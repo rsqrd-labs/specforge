@@ -297,3 +297,30 @@ def test_settings_reject_generation_bounds_outside_contract() -> None:
         config.Settings(stage_provider_idle_timeout_seconds=91)
     with pytest.raises(ValidationError, match="at least 45"):
         config.Settings(stage_retry_min_remaining_seconds=44)
+    with pytest.raises(ValidationError, match="must be 1..240"):
+        config.Settings(stage_provider_call_timeout_seconds=241)
+
+
+def test_call_cap_cannot_exceed_the_provider_budget_the_deadline_grants() -> None:
+    """A call cap above (deadline - finalise reserve) is a bound the run can
+    never reach: the watchdog takes min(call_remaining, run_remaining), so the
+    advertised cap silently becomes a lie and the real kill lands earlier.
+
+    Measured 2026-07-30 (generation 65fe5f10): Opus 5 chunks died at exactly the
+    180s cap, and the mid-tier retries then died at ~90s — the remainder of the
+    run budget, not the cap they were nominally granted.
+    """
+    import config
+
+    assert config.settings.stage_provider_call_timeout_seconds == 240
+    budget = (
+        config.settings.stage_generation_deadline_seconds
+        - config.settings.stage_generation_finalise_reserve_seconds
+    )
+    assert config.settings.stage_provider_call_timeout_seconds <= budget
+
+    # The budget rule in the validator is defence-in-depth and is deliberately
+    # UNREACHABLE today: the deadline and reserve are pinned to exactly 300/30
+    # by checks that run first, so nothing can shrink the budget below the cap.
+    # It is there to fail loudly the day those pins are relaxed without anyone
+    # revisiting the cap, which is precisely how 180 outlived its justification.

@@ -211,10 +211,14 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         supports_reasoning=True,
         # Medium, NOT the Claude-API default of high. Core stages are bound by a
         # locked interactive deadline contract — stage_provider_call_timeout_seconds
-        # caps a single provider stream at 180s and stage_generation_deadline_seconds
+        # caps a single provider stream at 240s and stage_generation_deadline_seconds
         # is validator-pinned to 300s — and high-effort reasoning tokens are spent
-        # before any visible output. Medium buys the latency headroom that keeps a
-        # dense ~15-18K-token chunk inside the 180s bound.
+        # before any visible output. Measured 2026-07-30 (generation 65fe5f10):
+        # medium sustains ~38 visible tok/s on a dense spec chunk, i.e. ~9K tokens
+        # inside the 240s bound. Raising this to high spends more of that window on
+        # invisible reasoning and needs a fresh per-chunk wall-clock measurement
+        # first — the ~15-18K-token band this comment used to cite was assumed,
+        # never measured, and was wrong by ~2x.
         reasoning_effort="medium",
         rollout_notes=(
             "Anthropic full-artifact generation primary: the four core ASDD "
@@ -422,7 +426,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         # Medium, matching Opus 5 and for the identical reason: core stages are
         # bound by a locked interactive deadline contract
         # (stage_provider_call_timeout_seconds caps a single provider stream at
-        # 180s, stage_generation_deadline_seconds is validator-pinned to 300s)
+        # 240s, stage_generation_deadline_seconds is validator-pinned to 300s)
         # and high-effort reasoning tokens are spent before any visible output.
         # This model is the FALLBACK artifact primary, so a high-effort timeout
         # here would fail precisely when Anthropic is already down. Raising it

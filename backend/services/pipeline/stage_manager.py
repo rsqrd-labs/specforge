@@ -1774,35 +1774,37 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
 
     Every target is sized against what ONE provider stream can actually finish,
     because a chunk is exactly one call: ``_watchdog_stream`` kills it at the
-    absolute ``stage_provider_call_timeout_seconds`` hard cap (validator-capped
-    at 180s), and the whole run is pinned to a 300s deadline minus the 30s
-    finalise reserve. Overshooting the bound is not a soft failure — the stream
-    is killed, its partial text is discarded, and the ``(ProviderError,
-    TimeoutError)`` handler retries the chunk on the mid tier with *less* time
-    left than the first attempt had, so a too-ambitious target tends to burn the
-    whole deadline and deliver nothing.
+    absolute ``stage_provider_call_timeout_seconds`` hard cap (240s, the most
+    the 300s deadline minus the 30s finalise reserve can grant), and the whole
+    run is pinned to that deadline. Overshooting the bound is not a soft failure
+    — the stream is killed and its partial text is discarded. At 240s there is
+    no longer time for the mid-tier retry either (the remainder falls below
+    ``stage_retry_min_remaining_seconds``), so a too-ambitious target burns the
+    whole deadline and delivers nothing.
 
-    Every non-harness target is therefore the SAME 55,000-character ceiling,
+    Every non-harness target is therefore the SAME 30,000-character ceiling,
     whether the chunk is a slice or the whole artifact. The earlier 80,000
     figure was justified as a *slice* target — standard spec/plan/tasks are 3-4
     chunks, so no single call was expected to fill it — but the string is
     appended to the prompt of the call actually being made, and it advertises
-    80,000 characters for THAT call. A model that takes the ceiling at its word
-    aims at ~20K output tokens, above the ~15-18K-token dense-chunk band that
-    fits inside the 180s bound at Opus 5's ``effort=medium``, and the stream is
-    killed. What supplies total document length is the chunk split, not a
-    per-call ceiling no single call can reach inside the bound; leaving the two
-    shapes on different ceilings only protected Demo Day from a hazard that
-    applies identically to a standard chunk.
+    that number for THAT call. What supplies total document length is the chunk
+    split, not a per-call ceiling no single call can reach inside the bound.
 
-    55,000 characters (~14-15K tokens even at a dense 3.5 chars/token) sits
-    inside that measured band, and is not a depth ceiling: a complete Demo Day
-    package is 11 spec / 12 plan / 4 tasks sections over a ≤5-hour build, which
-    measures well under it, and a standard *slice* is a fraction of a document
-    that already spans several chunks. This trims only the unreachable head of
-    the range — it does not lower the 8,000-character floor, and the depth
+    30,000 is derived from measurement, not from a target we would like to hit.
+    On 2026-07-30 (generation 65fe5f10) two parallel Opus 5 spec chunks were
+    both killed at exactly 180,000ms having produced 6,821 and 7,521 visible
+    output tokens: **~38 tok/s at effort=medium**, so 240s of the raised
+    ``stage_provider_call_timeout_seconds`` buys ~9K tokens ≈ 32,000 characters
+    at a dense 3.5 chars/token. 30,000 sits just inside that with margin for a
+    slower call. The successive 80,000 and 55,000 ceilings were both derived
+    from an assumed ~15-18K-token band that no one had ever measured, and both
+    were unreachable — the first by ~3x, the second by ~2x. Advertising a
+    ceiling the model cannot reach inside the bound is what runs the clock out.
+
+    This is not a depth floor change: the 8,000-character floor and the depth
     floors (``_min_body_chars``, the task/requirement-id minimums) are
-    unchanged.
+    untouched, and a standard spec is 3 chunks, so the document as a whole is
+    still budgeted well above any floor.
 
     The two branches stay separate because ``whole_document`` chunks carry the
     ENTIRE artifact in one call (Demo Day's ``demo-full``; see
@@ -1828,11 +1830,11 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
         return "Length target: 6,000-45,000 characters for this contract chunk."
     if chunk.whole_document:
         return (
-            "Length target: 8,000-55,000 characters for this complete document. "
+            "Length target: 8,000-30,000 characters for this complete document. "
             "Every required section must be substantive — spend the budget on "
             "concrete detail, not preamble, restatement, or filler."
         )
-    return "Length target: 8,000-55,000 characters for this document chunk."
+    return "Length target: 8,000-30,000 characters for this document chunk."
 
 
 def _should_cache_system_prompt(
