@@ -245,3 +245,5 @@ handoff.md
 frontend/coverage/
 frontend/playwright-report/
 frontend/test-results/
+.vercel
+.env*
