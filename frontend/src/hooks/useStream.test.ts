@@ -20,6 +20,10 @@ vi.mock("../services/api", () => ({
     stage_id: id,
     stream_url: `/stages/${id}/regenerate-gaps`,
   })),
+  resumeStage: vi.fn(async (id: string) => ({
+    stage_id: id,
+    stream_url: `/stages/${id}/resume`,
+  })),
   getStage: vi.fn(),
   getStageGeneration: vi.fn(),
 }))
@@ -36,6 +40,7 @@ import {
   getStageGeneration,
   regenerateStage,
   regenerateStageForGaps,
+  resumeStage,
 } from "../services/api"
 import { StreamError, createSSEConnection } from "../services/sseService"
 import { useStageStore } from "../store/stageStore"
@@ -47,6 +52,7 @@ const mockCancelStageGeneration = vi.mocked(cancelStageGeneration)
 const mockGenerateStage = vi.mocked(generateStage)
 const mockRegenerateStage = vi.mocked(regenerateStage)
 const mockRegenerateGaps = vi.mocked(regenerateStageForGaps)
+const mockResumeStage = vi.mocked(resumeStage)
 const mockCreateSSE = vi.mocked(createSSEConnection)
 
 function makeStage(overrides: Partial<Stage> = {}): Stage {
@@ -386,6 +392,10 @@ describe("useStream event and cancellation lifecycle", () => {
     ["generate", mockGenerateStage],
     ["regenerate", mockRegenerateStage],
     ["regenerate-gaps", mockRegenerateGaps],
+    // `resume` collects the chunks a partial generation already banked and paid
+    // for, so it must reach POST /stages/{id}/resume and never fall through to
+    // generateStage — that would re-run every chunk and re-charge the user.
+    ["resume", mockResumeStage],
   ] as const)("dispatches the %s operation through its dedicated endpoint", async (action, endpoint) => {
     sseDone("s1")
     mockGetStage.mockResolvedValue(makeStage({ current_version: 2 }))

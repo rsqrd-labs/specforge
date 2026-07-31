@@ -655,6 +655,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/providers/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Provider Health
+         * @description Live-probe every provider and return its snapshot.
+         *
+         *     ``?model=`` targets a specific model because key validity and model
+         *     *permission* are different things — an Anthropic key can authenticate
+         *     against the Haiku judge model and still be denied ``claude-opus-5``, which
+         *     is the model this deployment's full-artifact generation depends on.
+         */
+        get: operations["get_provider_health_providers_health_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/public/{slug}": {
         parameters: {
             query?: never;
@@ -980,6 +1005,34 @@ export interface paths {
         put?: never;
         /** Reject Diff */
         post: operations["reject_diff_stages__id__reject_diff_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/stages/{id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume Stage
+         * @description Generate only the sections a previous attempt failed to produce.
+         *
+         *     Deliberately NOT behind ``require_credits``: the credit for this artifact was
+         *     already charged and, because the attempt banked usable sections, deliberately
+         *     not refunded. Charging again — or blocking a user at zero balance from
+         *     collecting work they have already paid for — is the bug this endpoint exists
+         *     to fix. ``generate(action="resume")`` refuses with ``resume_unavailable`` if
+         *     the stage is not actually holding a resumable gate, so a caller cannot use
+         *     this as a free full generation.
+         */
+        post: operations["resume_stage_stages__id__resume_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2943,6 +2996,8 @@ export interface components {
         };
         /** StageQualityGate */
         StageQualityGate: {
+            /** Completed Sections */
+            completed_sections?: string[] | null;
             /** Failed At */
             failed_at?: string | null;
             /** Findings */
@@ -2953,6 +3008,8 @@ export interface components {
             kind?: string | null;
             /** Missing */
             missing?: string[] | null;
+            /** Missing Sections */
+            missing_sections?: string[] | null;
             /** Override Allowed */
             override_allowed?: boolean | null;
             /** Policy Version */
@@ -2964,6 +3021,8 @@ export interface components {
             recovery?: components["schemas"]["StageQualityGateRecovery"] | null;
             /** Repair Attempted */
             repair_attempted?: boolean | null;
+            /** Resumable */
+            resumable?: boolean | null;
             /** Sources */
             sources?: string[] | null;
             /**
@@ -4267,6 +4326,40 @@ export interface operations {
             };
         };
     };
+    get_provider_health_providers_health_get: {
+        parameters: {
+            query?: {
+                /** @description Optional catalog model id to probe instead of the provider's judge model. Applies only to the provider that owns it; the others keep their default probe. */
+                model?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_public_workspace_public__slug__get: {
         parameters: {
             query?: never;
@@ -4810,6 +4903,37 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resume_stage_stages__id__resume_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
