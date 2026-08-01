@@ -82,6 +82,12 @@ describe("useUserStore", () => {
     })
   })
 
+  it("does not carry a stale unreachable flag across an explicit sign-out", async () => {
+    useUserStore.setState({ user, reachability: "unreachable" })
+    useUserStore.getState().clearUser()
+    expect(useUserStore.getState()).toMatchObject({ user: null, reachability: "ok" })
+  })
+
   it("clears the unreachable flag once the API answers again", async () => {
     useUserStore.setState({ reachability: "unreachable" })
     getCurrentUser.mockResolvedValue(user)
