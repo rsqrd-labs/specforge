@@ -29,7 +29,11 @@ export const useUserStore = create<UserState>((set) => ({
 
   setUser: (user) => set({ user }),
 
-  clearUser: () => set({ user: null }),
+  // Reset reachability too: a stale "unreachable" left over from a transient
+  // blip would, after a deliberate sign-out, show the next protected route the
+  // "can't reach the API" panel instead of the landing redirect — on a
+  // perfectly healthy network.
+  clearUser: () => set({ user: null, reachability: "ok" }),
 
   fetchMe: async () => {
     set({ isLoading: true })
