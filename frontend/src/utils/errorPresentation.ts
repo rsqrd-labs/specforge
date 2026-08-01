@@ -334,6 +334,37 @@ export function authCallbackAlert(
   })
 }
 
+/**
+ * The API could not be reached at all — as opposed to answering with an error.
+ * Names the exact host so someone behind a corporate proxy (the case this was
+ * written for) can hand IT something actionable instead of guessing.
+ */
+export function apiUnreachableAlert(options: AlertOptions = {}): ActionAlertContent {
+  return actionAlertFromMessage({
+    title: "We can't reach Thought2Build",
+    // Deliberately says nothing about session state: this alert renders both
+    // for a signed-in user whose session is untouched and for a visitor who
+    // never signed in. Claiming either would be the same unfounded assertion
+    // the silent redirect used to make.
+    message: `Your browser could not connect to ${apiHostLabel()}. The request never reached our servers, so nothing has changed on your account.`,
+    recovery:
+      "This is usually a network, VPN, or corporate firewall block. Retry, or ask IT to allow that address.",
+    source: "Connection",
+    ...options,
+  })
+}
+
+/** Hostname of the API, for display only. Falls back to the page's own origin
+ *  when the API is same-origin (a relative `VITE_API_URL`). */
+function apiHostLabel(): string {
+  const configured = import.meta.env.VITE_API_URL
+  try {
+    return new URL(configured ?? "", window.location.origin).host
+  } catch {
+    return window.location.host
+  }
+}
+
 export function storyboardLoadAlert(
   message: string,
   options: AlertOptions = {},

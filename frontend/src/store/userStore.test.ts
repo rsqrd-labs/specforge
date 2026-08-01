@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { User } from "../types/user"
 
 const getCurrentUser = vi.hoisted(() => vi.fn())
-vi.mock("../services/api", () => ({ getCurrentUser }))
+const isTransportError = vi.hoisted(() => vi.fn(() => false))
+vi.mock("../services/api", () => ({ getCurrentUser, isTransportError }))
 
 import { useUserStore } from "./userStore"
 
@@ -19,7 +20,9 @@ const user: User = {
 describe("useUserStore", () => {
   beforeEach(() => {
     getCurrentUser.mockReset()
-    useUserStore.setState({ user: null, isLoading: false })
+    isTransportError.mockReset()
+    isTransportError.mockReturnValue(false)
+    useUserStore.setState({ user: null, isLoading: false, reachability: "ok" })
   })
 
   it("sets and clears a session explicitly", () => {
@@ -43,6 +46,48 @@ describe("useUserStore", () => {
     useUserStore.setState({ user })
     getCurrentUser.mockRejectedValue(new Error("unauthorized"))
     await useUserStore.getState().fetchMe()
-    expect(useUserStore.getState()).toMatchObject({ user: null, isLoading: false })
+    expect(useUserStore.getState()).toMatchObject({
+      user: null,
+      isLoading: false,
+      reachability: "ok",
+    })
+  })
+
+  // The corporate-proxy regression: a request that never reached the API used
+  // to be indistinguishable from a rejected session, so it wiped `user` and let
+  // ProtectedRoute bounce a signed-in person to the landing page.
+  it("keeps the session and flags unreachable when the API cannot be reached", async () => {
+    useUserStore.setState({ user })
+    getCurrentUser.mockRejectedValue(new Error("blocked by proxy"))
+    isTransportError.mockReturnValue(true)
+
+    await useUserStore.getState().fetchMe()
+
+    expect(useUserStore.getState()).toMatchObject({
+      user,
+      isLoading: false,
+      reachability: "unreachable",
+    })
+  })
+
+  it("does not invent a session for a logged-out visitor when the API is unreachable", async () => {
+    getCurrentUser.mockRejectedValue(new Error("blocked by proxy"))
+    isTransportError.mockReturnValue(true)
+
+    await useUserStore.getState().fetchMe()
+
+    expect(useUserStore.getState()).toMatchObject({
+      user: null,
+      reachability: "unreachable",
+    })
+  })
+
+  it("clears the unreachable flag once the API answers again", async () => {
+    useUserStore.setState({ reachability: "unreachable" })
+    getCurrentUser.mockResolvedValue(user)
+
+    await useUserStore.getState().fetchMe()
+
+    expect(useUserStore.getState()).toMatchObject({ user, reachability: "ok" })
   })
 })

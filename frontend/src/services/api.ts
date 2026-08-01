@@ -66,7 +66,18 @@ export interface CreditBalance {
 
 
 let accessToken: string | null = null
-let refreshPromise: Promise<string | null> | null = null
+
+/**
+ * Why a refresh attempt produced no token. `transportFailure` means the request
+ * never reached the server (see `isTransportError`), so the refresh token may
+ * still be perfectly valid — callers must not treat it as a dead session.
+ */
+interface RefreshOutcome {
+  token: string | null
+  transportFailure: boolean
+}
+
+let refreshPromise: Promise<RefreshOutcome> | null = null
 
 // Session-death circuit breaker (resilience fix: an idle tab whose 15-minute
 // access token expires must not retry-loop /auth/refresh forever). Once the
@@ -155,6 +166,46 @@ function markSessionExpired(): void {
       // A subscriber must never be able to break the auth pipeline.
     }
   }
+}
+
+/**
+ * Thrown when a helper needs to report "the API was unreachable" through a
+ * non-axios rejection. Without this, wrappers that repackage an axios failure
+ * as a plain `Error` (see `getCurrentUser`) erase the distinction between "the
+ * request never landed" and "the server said no" — which is exactly how a
+ * blocked corporate proxy used to present as a silent logout.
+ */
+export class TransportError extends Error {
+  constructor(message = "Could not reach the Thought2Build API.") {
+    super(message)
+    this.name = "TransportError"
+  }
+}
+
+/**
+ * True when a request never produced an HTTP response: DNS/proxy block, a
+ * rejected CORS preflight, a connection reset, a timeout, or an offline
+ * browser. All of these surface in axios as an error with no `response`.
+ *
+ * This is the single discriminator between "we could not reach the API" and
+ * "the API answered, and the answer was no" — do not re-derive it per call
+ * site. A deliberate cancellation is excluded: aborting a request is a
+ * client-side decision, not evidence that the API is unreachable.
+ */
+export function isTransportError(error: unknown): boolean {
+  if (error instanceof TransportError) {
+    return true
+  }
+  if (!axios.isAxiosError(error)) {
+    return false
+  }
+  if (error.code === "ERR_CANCELED") {
+    // Aborting a request is a client-side decision, not evidence that the API
+    // is unreachable. (Checked via `code` rather than `axios.isCancel` so this
+    // predicate depends on nothing beyond `isAxiosError`.)
+    return false
+  }
+  return error.response === undefined
 }
 
 export function getApiErrorMessage(
@@ -273,13 +324,19 @@ export async function getCsrfToken(): Promise<string | null> {
   }
 }
 
-export async function refreshAccessToken(): Promise<string | null> {
+/**
+ * Refresh, reporting *why* it failed as well as whether it did. Callers that
+ * only need the token use `refreshAccessToken`; callers that must distinguish
+ * "the proxy ate the request" from "the refresh token is dead" use this.
+ */
+async function refreshAccessTokenOutcome(): Promise<RefreshOutcome> {
   if (isSessionExpired()) {
     // Still within the cooldown window from a definitively-dead refresh —
     // skip the network call rather than re-asking a question the server just
     // answered. The window is bounded (not permanent), so a later, deliberate
-    // attempt can still probe again.
-    return null
+    // attempt can still probe again. This is a known-dead session, not an
+    // unreachable one.
+    return { token: null, transportFailure: false }
   }
 
   if (!refreshPromise) {
@@ -289,11 +346,11 @@ export async function refreshAccessToken(): Promise<string | null> {
       .then((response) => {
         const refreshedToken = response.data.access_token ?? response.data.accessToken
         if (!refreshedToken) {
-          return null
+          return { token: null, transportFailure: false }
         }
 
         setAccessToken(refreshedToken)
-        return refreshedToken
+        return { token: refreshedToken, transportFailure: false }
       })
       .catch((error) => {
         // A definitive 401 from the refresh endpoint means the refresh token
@@ -307,7 +364,7 @@ export async function refreshAccessToken(): Promise<string | null> {
         if (isDefinitiveRejection && authGeneration === generationAtStart) {
           markSessionExpired()
         }
-        return null
+        return { token: null, transportFailure: isTransportError(error) }
       })
       .finally(() => {
         refreshPromise = null
@@ -315,6 +372,11 @@ export async function refreshAccessToken(): Promise<string | null> {
   }
 
   return refreshPromise
+}
+
+export async function refreshAccessToken(): Promise<string | null> {
+  const { token } = await refreshAccessTokenOutcome()
+  return token
 }
 
 async function attachCsrfHeader(
@@ -351,17 +413,25 @@ export async function handleUnauthorizedResponse(
 ): Promise<AxiosResponse> {
   const originalRequest = error.config as RetryableRequestConfig | undefined
 
+  // Discard the in-memory token only when the API actually answered. A request
+  // that never landed (blocked corporate proxy, rejected CORS preflight,
+  // timeout, offline) says nothing about whether the token is still good, and
+  // throwing it away here is what turned a network outage into a logout: the
+  // next call finds no token, tries to refresh, is blocked too, and the user is
+  // bounced to the landing page as if signed out.
   if (!originalRequest || !shouldAttemptRefresh(error)) {
-    setAccessToken(null)
+    if (!isTransportError(error)) {
+      setAccessToken(null)
+    }
     return Promise.reject(error)
   }
 
   originalRequest._retry = true
 
   try {
-    const refreshedToken =
+    const { token: refreshedToken, transportFailure } =
       refreshClient === refreshApi
-        ? await refreshAccessToken()
+        ? await refreshAccessTokenOutcome()
         : await refreshClient
             .post<RefreshTokenResponse>("/auth/refresh")
             .then((response) => {
@@ -369,17 +439,21 @@ export async function handleUnauthorizedResponse(
               if (token) {
                 setAccessToken(token)
               }
-              return token ?? null
+              return { token: token ?? null, transportFailure: false }
             })
 
     if (!refreshedToken) {
-      setAccessToken(null)
+      if (!transportFailure) {
+        setAccessToken(null)
+      }
       return Promise.reject(error)
     }
 
     return client(attachAuthorizationHeader(originalRequest, refreshedToken))
   } catch (refreshError) {
-    setAccessToken(null)
+    if (!isTransportError(refreshError)) {
+      setAccessToken(null)
+    }
     return Promise.reject(refreshError)
   }
 }
@@ -420,9 +494,14 @@ api.interceptors.response.use(
 
 export async function getCurrentUser(): Promise<User> {
   if (!getAccessToken()) {
-    const refreshedToken = await refreshAccessToken()
-    if (!refreshedToken) {
-      throw new Error("Not authenticated")
+    const { token, transportFailure } = await refreshAccessTokenOutcome()
+    if (!token) {
+      // A blocked refresh and a dead refresh token both produce "no token", but
+      // they mean opposite things to the caller: one is "we could not ask", the
+      // other is "the answer was no". Throwing an undifferentiated Error here
+      // made `isTransportError` blind and presented an unreachable API as a
+      // signed-out session.
+      throw transportFailure ? new TransportError() : new Error("Not authenticated")
     }
   }
   const response = await api.get<User>("/auth/me")

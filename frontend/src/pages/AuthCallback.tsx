@@ -5,11 +5,19 @@ import { ActionAlertPanel } from "../components/shared/ActionAlert"
 import { BrandLoader } from "../components/shared/BrandLoader"
 import { BrandLockup } from "../components/shared/BrandLogo"
 import { featureFlags } from "../config/featureFlags"
-import { completeGoogleCallback, setAccessToken } from "../services/api"
+import { completeGoogleCallback, isTransportError, setAccessToken } from "../services/api"
 import { useUserStore } from "../store/userStore"
-import { authCallbackAlert } from "../utils/errorPresentation"
+import { apiUnreachableAlert, authCallbackAlert } from "../utils/errorPresentation"
 
-type AuthErrorReason = "cancelled" | "missing-code" | "exchange-failed"
+type AuthErrorReason = "cancelled" | "missing-code" | "exchange-failed" | "unreachable"
+
+/** "unreachable" is a connectivity problem, not an OAuth problem — it must not
+ *  be reported as a sign-in failure telling the user to check OAuth config. */
+function alertForReason(reason: AuthErrorReason) {
+  return reason === "unreachable"
+    ? apiUnreachableAlert()
+    : authCallbackAlert(reason)
+}
 
 export default function AuthCallback() {
   const [searchParams] = useSearchParams()
@@ -28,19 +36,19 @@ export default function AuthCallback() {
     const code = searchParams.get("code")
     const state = searchParams.get("state")
 
-    if (error) {
-      const alert = authCallbackAlert("cancelled")
+    function fail(reason: AuthErrorReason) {
       setStatus("error")
-      setErrorReason("cancelled")
-      setMessage(alert.message)
+      setErrorReason(reason)
+      setMessage(alertForReason(reason).message)
+    }
+
+    if (error) {
+      fail("cancelled")
       return
     }
 
     if (!code || !state) {
-      const alert = authCallbackAlert("missing-code")
-      setStatus("error")
-      setErrorReason("missing-code")
-      setMessage(alert.message)
+      fail("missing-code")
       return
     }
 
@@ -48,15 +56,37 @@ export default function AuthCallback() {
       .then(async ({ access_token }) => {
         setAccessToken(access_token)
         await fetchMe()
+        // The token exchange succeeded, so the user IS signed in. If the
+        // follow-up profile fetch could not reach the API, navigating to
+        // /dashboard would hand them to ProtectedRoute with no user — the
+        // silent bounce back to the landing page this screen exists to prevent.
+        if (useUserStore.getState().reachability === "unreachable") {
+          fail("unreachable")
+          return
+        }
         void navigate("/dashboard", { replace: true })
       })
-      .catch(() => {
-        const alert = authCallbackAlert("exchange-failed")
-        setStatus("error")
-        setErrorReason("exchange-failed")
-        setMessage(alert.message)
+      .catch((cause: unknown) => {
+        fail(isTransportError(cause) ? "unreachable" : "exchange-failed")
       })
   }, [fetchMe, navigate, searchParams])
+
+  async function retryProfileFetch() {
+    setStatus("loading")
+    setErrorReason(null)
+    setMessage("Reconnecting...")
+    await fetchMe()
+    const { user, reachability } = useUserStore.getState()
+    if (user) {
+      void navigate("/dashboard", { replace: true })
+      return
+    }
+    const reason: AuthErrorReason =
+      reachability === "unreachable" ? "unreachable" : "exchange-failed"
+    setStatus("error")
+    setErrorReason(reason)
+    setMessage(alertForReason(reason).message)
+  }
 
   return (
     <main className="auth-callback-shell">
@@ -94,7 +124,11 @@ export default function AuthCallback() {
             {status === "error" ? "Sign-in needs attention" : "Securing session"}
           </span>
           <h1>
-            {status === "error" ? "Could not finish sign-in" : "Taking you to your workspace"}
+            {status !== "error"
+              ? "Taking you to your workspace"
+              : errorReason === "unreachable"
+                ? "We can't reach Thought2Build"
+                : "Could not finish sign-in"}
           </h1>
           <p>{message}</p>
         </div>
@@ -107,7 +141,7 @@ export default function AuthCallback() {
 
         {status === "error" && errorReason && (
           <ActionAlertPanel
-            {...authCallbackAlert(errorReason)}
+            {...alertForReason(errorReason)}
             className="auth-callback-alert"
           />
         )}
@@ -117,7 +151,14 @@ export default function AuthCallback() {
             <button
               type="button"
               className="auth-callback-primary"
-              onClick={() => window.location.assign(`${import.meta.env.VITE_API_URL}/auth/google`)}
+              // An unreachable API already granted the session — restarting
+              // OAuth would just re-hit the same blocked host. Re-probe instead
+              // and continue if the network has recovered.
+              onClick={
+                errorReason === "unreachable"
+                  ? () => void retryProfileFetch()
+                  : () => window.location.assign(`${import.meta.env.VITE_API_URL}/auth/google`)
+              }
             >
               Try again
             </button>
