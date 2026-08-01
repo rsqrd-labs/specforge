@@ -153,6 +153,57 @@ describe("AuthCallback", () => {
     expect(await screen.findByText("Dashboard loaded")).toBeInTheDocument()
   })
 
+  it("falls back to a sign-in failure when the retry reaches the API but has no session", async () => {
+    vi.mocked(completeGoogleCallback).mockResolvedValue({ access_token: "access-token" })
+    const fetchMe = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        useUserStore.setState({ reachability: "unreachable" })
+      })
+      // Reachable again, but the session genuinely is not valid — that is a
+      // sign-in failure, not a connectivity problem.
+      .mockImplementationOnce(async () => {
+        useUserStore.setState({ reachability: "ok", user: null })
+      })
+    useUserStore.setState({ fetchMe })
+
+    render(
+      <MemoryRouter initialEntries={["/auth/callback?code=google-code&state=test-state"]}>
+        <Routes>
+          <Route path="/auth/callback" element={<AuthCallback />} />
+          <Route path="/dashboard" element={<div>Dashboard loaded</div>} />
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    fireEvent.click(await screen.findByRole("button", { name: /try again/i }))
+
+    expect(await screen.findByText(/could not finish sign-in/i)).toBeInTheDocument()
+    expect(screen.queryByText("Dashboard loaded")).toBeNull()
+  })
+
+  it("restarts the OAuth flow when retrying a non-connectivity failure", async () => {
+    const assign = vi.fn()
+    Object.defineProperty(window, "location", {
+      value: { ...window.location, assign },
+      writable: true,
+      configurable: true,
+    })
+    vi.mocked(completeGoogleCallback).mockRejectedValue(new Error("exchange failed"))
+
+    render(
+      <MemoryRouter initialEntries={["/auth/callback?code=bad&state=state"]}>
+        <Routes>
+          <Route path="/auth/callback" element={<AuthCallback />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    fireEvent.click(await screen.findByRole("button", { name: /try again/i }))
+
+    expect(assign).toHaveBeenCalledWith(expect.stringContaining("/auth/google"))
+  })
+
   it("reports a blocked token exchange as unreachable, not as a sign-in failure", async () => {
     vi.mocked(completeGoogleCallback).mockRejectedValue(new Error("Network Error"))
     vi.mocked(isTransportError).mockReturnValue(true)
