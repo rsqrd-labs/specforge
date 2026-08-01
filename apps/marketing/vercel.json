@@ -11,6 +11,11 @@
     { "source": "/auth/:path*", "destination": "https://thought2build.vercel.app/auth/:path*" },
     { "source": "/p/:path*", "destination": "https://thought2build.vercel.app/p/:path*" },
     { "source": "/sb/:path*", "destination": "https://thought2build.vercel.app/sb/:path*" },
+    { "source": "/github", "destination": "https://thought2build.vercel.app/github" },
+    { "source": "/github/:path*", "destination": "https://thought2build.vercel.app/github/:path*" },
+    { "source": "/storyboards/:path*", "destination": "https://thought2build.vercel.app/storyboards/:path*" },
+    { "source": "/legal/terms", "destination": "https://thought2build.vercel.app/legal/terms" },
+    { "source": "/legal/privacy", "destination": "https://thought2build.vercel.app/legal/privacy" },
     { "source": "/assets/:path*", "destination": "https://thought2build.vercel.app/assets/:path*" }
   ]
 }
