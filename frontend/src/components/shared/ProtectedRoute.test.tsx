@@ -25,7 +25,7 @@ function renderRoute() {
 
 describe("ProtectedRoute session boundary", () => {
   beforeEach(() => {
-    useUserStore.setState({ user: null, isLoading: false })
+    useUserStore.setState({ user: null, isLoading: false, reachability: "ok" })
   })
 
   it("probes once, shows the fallback loader, and redirects a guest", async () => {
@@ -63,6 +63,56 @@ describe("ProtectedRoute session boundary", () => {
     act(() => useUserStore.setState({ user: null }))
     await waitFor(() => expect(screen.getByText("signed out")).toBeInTheDocument())
     expect(fetchMe).not.toHaveBeenCalled()
+  })
+
+  // Redirecting here asserts "you are signed out", which an unreachable API
+  // gives us no basis to claim — that assertion is the silent logout.
+  it("shows an unreachable-API panel instead of redirecting when the API is blocked", async () => {
+    const fetchMe = vi.fn().mockImplementation(async () => {
+      useUserStore.setState({ reachability: "unreachable" })
+    })
+    useUserStore.setState({ fetchMe })
+
+    renderRoute()
+
+    expect(await screen.findByText(/we can't reach thought2build/i)).toBeInTheDocument()
+    expect(await screen.findByRole("alert")).toBeInTheDocument()
+    expect(screen.queryByText("signed out")).toBeNull()
+    expect(screen.queryByText("protected content")).toBeNull()
+  })
+
+  it("retries from the unreachable panel and renders content once the API answers", async () => {
+    const fetchMe = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        useUserStore.setState({ reachability: "unreachable" })
+      })
+      .mockImplementationOnce(async () => {
+        useUserStore.setState({
+          reachability: "ok",
+          user: { id: "u1" } as never,
+        })
+      })
+    useUserStore.setState({ fetchMe })
+
+    renderRoute()
+    const retry = await screen.findByRole("button", { name: /try again/i })
+
+    await act(async () => {
+      retry.click()
+    })
+
+    expect(await screen.findByText("protected content")).toBeInTheDocument()
+    expect(fetchMe).toHaveBeenCalledTimes(2)
+  })
+
+  it("still redirects a genuinely signed-out visitor when the API is reachable", async () => {
+    const fetchMe = vi.fn().mockResolvedValue(undefined)
+    useUserStore.setState({ fetchMe })
+
+    renderRoute()
+
+    expect(await screen.findByText("signed out")).toBeInTheDocument()
   })
 
   it("keeps content gated while the store is loading", () => {

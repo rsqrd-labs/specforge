@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react"
 import { Navigate } from "react-router-dom"
 import { useUserStore } from "../../store/userStore"
+import { apiUnreachableAlert } from "../../utils/errorPresentation"
+import { ActionAlertPanel } from "./ActionAlert"
 import { BrandLoader } from "./BrandLoader"
 import { featureFlags } from "../../config/featureFlags"
 
@@ -9,7 +11,7 @@ interface ProtectedRouteProps {
 }
 
 export function ProtectedRoute({ children }: ProtectedRouteProps) {
-  const { user, isLoading, fetchMe } = useUserStore()
+  const { user, isLoading, fetchMe, reachability } = useUserStore()
   const [hasCheckedSession, setHasCheckedSession] = useState(Boolean(user))
   const attemptedRef = useRef(false)
 
@@ -49,6 +51,22 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
         ) : (
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900" />
         )}
+      </div>
+    )
+  }
+
+  // The API is unreachable, so we never learned whether this session is valid.
+  // Redirecting to the landing page here would assert "you are signed out",
+  // which we do not know and which reads as a silent logout. Say what actually
+  // happened and offer a retry instead.
+  if (!user && reachability === "unreachable") {
+    return (
+      <div className="flex items-center justify-center min-h-screen p-6">
+        <ActionAlertPanel
+          {...apiUnreachableAlert({
+            primaryAction: { label: "Try again", onSelect: () => void fetchMe() },
+          })}
+        />
       </div>
     )
   }
