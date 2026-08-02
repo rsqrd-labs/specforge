@@ -108,7 +108,19 @@ _STANDARD_PLAN_COVERAGE: dict[str, tuple[str, ...]] = {
         "operations",
         "rollout",
     ),
+    "## Frontend Architecture": (
+        "frontend architecture",
+        "design token",
+        "visual identity",
+        "frontend",
+    ),
 }
+
+# ``## Frontend Architecture`` is the one conditional section in this table — a
+# backend-only plan legitimately answers it with the prompt-blessed "Not
+# applicable because <reason>" one-liner (artifact_validator._CONDITIONAL_SECTIONS),
+# so it must not be flagged as an orphaned load-bearing section in that case.
+_PLAN_COVERAGE_NONE_ESCAPES = ("## Frontend Architecture",)
 
 
 def _task_blocks(tasks_md: str) -> list[tuple[int, str, str]]:
@@ -336,6 +348,7 @@ def _check_plan_coverage(
         task_blocks=blocks,
         required=_STANDARD_PLAN_COVERAGE,
         section_body=_section_body,
+        skip_if_body_starts_with_none=_PLAN_COVERAGE_NONE_ESCAPES,
     )
     return CheckResult("plan_coverage", not gaps, gaps)
 

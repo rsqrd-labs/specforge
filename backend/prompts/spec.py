@@ -115,6 +115,13 @@ Required SPEC.md structure (every section mandatory, 17 sections — dense, not 
   per case — no paragraph per entry. Include error-category handling (validation, auth, not found, server,
   third-party) as entries: user-visible state, behavior, recovery path. No retry/circuit-breaker internals.
 - ## Constraints — business, legal, operational, UX, platform, timeline, compliance; distinguish hard from assumed.
+  When the product has a user-facing surface, include one UX-constraint line naming the intended brand
+  personality and emotional register as a contrast against a plausible alternative (e.g. "confident fintech, not
+  playful consumer"; "artisanal and unhurried, not corporate SaaS"). Pick a specific pairing grounded in the
+  product's actual domain and audience — never a placeholder like "modern and clean" or "professional yet
+  friendly", which fits every product and therefore commits to nothing. This line is load-bearing for PLAN.md's
+  visual-identity decisions; do not defer it to Open Questions even when the problem statement is silent on
+  brand — pick the smallest safe interpretation of the product's domain and audience and commit to it here.
 - ## Risks — RISK-001, … description, impacted IDs, likelihood, impact, mitigation, owner, residual risk.
 - ## Assumptions and Open Questions — per question: decision needed, options, recommended default, who decides.
 - ## Out of Scope — features considered and explicitly deferred.
@@ -179,5 +186,6 @@ Before returning, verify (internal — do not include in output):
 - Every In-Scope (MVP) capability cites ≥ 1 FR-ID, and every FR traces to exactly one In-Scope capability.
 - Every User Story cites a persona from Overview and ≥ 1 realizing FR-ID; no story merely restates a User Flow's step sequence.
 - Edge Cases has ≥ 15 entries in condition → behavior format, one row each — no restated headings, no padding toward a longer document.
+- If the product has a user-facing surface, Constraints names a specific brand personality/emotional register as a contrast (not a generic placeholder, not an Open Question).
 
 Return only SPEC.md. No preamble, commentary, or summary."""

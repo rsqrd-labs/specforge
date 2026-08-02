@@ -113,12 +113,23 @@ _DEMO_DAY_PLAN_COVERAGE: dict[str, tuple[str, ...]] = {
     ),
     # The declared auth stance is designed and never implemented.
     "## Security Architecture": ("security architecture", "security", "auth"),
+    # The design-token system is specified and every screen invents its own.
+    "## Frontend Architecture": (
+        "frontend architecture",
+        "design token",
+        "visual identity",
+        "frontend",
+    ),
 }
 
-# The plan's own "nothing external is called" escape — the prompt mandates the
-# single line "None — <reason>". A build that calls nothing external needs no
-# integration task, so requiring one would be a guaranteed false positive.
-_PLAN_COVERAGE_NONE_ESCAPES = ("## External Integrations and Secrets",)
+# The plan's own "nothing external is called" / "not browser-facing" escapes —
+# the prompt mandates a single "None — <reason>" / "Not applicable because
+# <reason>" line. A build with no such surface needs no matching task, so
+# requiring one would be a guaranteed false positive.
+_PLAN_COVERAGE_NONE_ESCAPES = (
+    "## External Integrations and Secrets",
+    "## Frontend Architecture",
+)
 
 
 # ---------------------------------------------------------------------------

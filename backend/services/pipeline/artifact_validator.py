@@ -140,6 +140,12 @@ DEMO_DAY_SECTION_CONTRACTS: dict[str, list[str]] = {
         "## Architecture Decision Records",
         "## Scalability and Performance",
         "## Security Architecture",
+        # Same heading string as the standard contract — see _CONDITIONAL_SECTIONS:
+        # Demo Day's copy is unconditionally listed here (Demo Day has no
+        # sentinel-gated conditional-section mechanism) but still honours the
+        # shared "Not applicable because <reason>" escape for a non-browser-facing
+        # build, since that exemption keys off the heading string, not the mode.
+        "## Frontend Architecture",
         "## Risks and Mitigations",
     ],
     "harness": [
@@ -310,7 +316,11 @@ def validate_sections(
     The contract is selected by ``mode`` (standard vs demo_day). Conditional
     sections (T-242 Frontend Architecture) are a standard-mode concept enforced
     only when their sentinel matches in the upstream deps; the lean Demo Day
-    contract has no conditional sections.
+    contract has no *sentinel-gated* conditional sections — its own Frontend
+    Architecture entry is unconditionally required instead, but still honours
+    the same "Not applicable because <reason>" escape (see
+    ``_conditional_headings_for_stage``, which is not mode-gated) for a
+    non-browser-facing build.
 
     Raises MissingSectionError listing all absent headings (does NOT
     short-circuit at the first miss — returning the full list improves UX).

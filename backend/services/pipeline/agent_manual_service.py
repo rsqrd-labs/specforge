@@ -20,6 +20,7 @@ from typing import Protocol
 
 from services.integrations import agents_md_builder
 from services.integrations.task_parser import parse_tasks
+from services.pipeline.artifact_validator import _section_body
 from services.security.downstream_command_guard import redact_unsafe_lines
 from services.security.sanitizer import sanitize_downstream_agent_content
 
@@ -31,7 +32,11 @@ DEMO_MANAGED_END = "<!-- thought2build:demo-day:end -->"
 
 # The plan's ## Technology Stack section heading (Demo Day plan contract).
 _TECH_STACK_HEADING = "## Technology Stack"
-_SECTION_RE_TEMPLATE = r"^{heading}\s*$([\s\S]*?)(?=^##\s+|\Z)"
+# Same heading string as the standard plan contract (T-242) and the Demo Day
+# plan contract's own Frontend Architecture entry — join-key parity matters
+# here exactly as it does for the linters (see demo_day_plan_linter.py).
+_FRONTEND_ARCHITECTURE_HEADING = "## Frontend Architecture"
+_NOT_APPLICABLE_RE = re.compile(r"^\s*not\s+applicable\b", re.IGNORECASE)
 
 
 class _WorkspaceLike(Protocol):
@@ -64,17 +69,35 @@ def _extract_technology_stack(plan_content: str) -> str:
     """
     if not plan_content:
         return "See PLAN.md ## Technology Stack."
-    pattern = re.compile(
-        _SECTION_RE_TEMPLATE.format(heading=re.escape(_TECH_STACK_HEADING)),
-        re.MULTILINE,
-    )
-    match = pattern.search(plan_content)
-    body = match.group(1).strip() if match else ""
+    # artifact_validator._section_body tolerates the heading at any level 2-6
+    # and with a trailing parenthetical, so a model that decorates the heading
+    # (the same variance the Frontend Architecture harvest below must tolerate)
+    # is still matched instead of silently falling through to the fallback.
+    body = _section_body(plan_content, _TECH_STACK_HEADING)
     # This body lands verbatim in the pinned-stack section of the high-trust
     # manual; strip any injected shell-exec directive smuggled through PLAN.md
     # (same defense the standard AGENTS.md harvest applies).
     body = redact_unsafe_lines(sanitize_downstream_agent_content(body)).strip()
     return body or "See PLAN.md ## Technology Stack."
+
+
+def _extract_frontend_architecture(plan_content: str) -> str | None:
+    """Pull PLAN.md's Frontend Architecture (visual identity) body, if any.
+
+    Returns None when the build has no such section, or when the plan
+    explicitly answered it "Not applicable because <reason>" (a backend-only
+    Demo Day build) — the manual must not pin an empty or nonsensical design
+    block for a product with no screen to build.
+    """
+    if not plan_content:
+        return None
+    body = _section_body(plan_content, _FRONTEND_ARCHITECTURE_HEADING)
+    if not body:
+        return None
+    body = redact_unsafe_lines(sanitize_downstream_agent_content(body)).strip()
+    if not body or _NOT_APPLICABLE_RE.match(body):
+        return None
+    return body
 
 
 def _agent_todo_note(target_agent: str | None) -> str:
@@ -105,6 +128,7 @@ def build_agent_manual(
     selected = target_agent or workspace.target_agent
     filename = manual_filename(selected)
     stack = _extract_technology_stack(plan_content)
+    design_direction = _extract_frontend_architecture(plan_content)
     todo_note = _agent_todo_note(selected)
     name = (workspace.name or "this build").strip() or "this build"
     task_lines = [
@@ -113,6 +137,18 @@ def build_agent_manual(
         for task in parse_tasks(tasks_content)
     ]
     checklist = "\n".join(task_lines) or "- Follow the ordered tasks in `TASKS.md`."
+    design_invariant = (
+        "8. The visual identity below (if present) is pinned. Implement every screen "
+        "with those exact colors, type pairing, and signature element — never fall "
+        "back to a component library's default theme or invent alternate values.\n"
+        if design_direction
+        else ""
+    )
+    design_section = (
+        f"\n## Design direction (pinned)\n{design_direction}\n"
+        if design_direction
+        else ""
+    )
     managed = f"""# Build Protocol — {name}
 
 _Renderer: demo-day-v2. Managed by Thought2Build._
@@ -133,10 +169,10 @@ is how to execute them safely.
 6. The app must run and the end-to-end smoke test must pass after every task.
 7. If blocked on a task for more than ~15 minutes, stop and report the blocker rather
    than hacking the test or stubbing the contract.
-
+{design_invariant}
 ## Stack (pinned)
 {stack}
-
+{design_section}
 ## The loop
 For each task T-NNN:
   a. Read the task: its Spec refs, Plan refs, Harness refs, Precondition.

@@ -198,8 +198,9 @@ def plan_coverage_gaps(
       terminal ``MissingSectionError`` from ``validate_sections``; reporting it
       again here would double-charge the user for one defect.
     - A section listed in ``skip_if_body_starts_with_none`` whose body opens with
-      "None" is skipped — that is the prompt's explicit "nothing to build here"
-      escape (e.g. a plan that calls no external service).
+      "None" or "Not applicable" is skipped — the prompt's two explicit
+      "nothing to build here" escapes (e.g. a plan that calls no external
+      service, or a Frontend Architecture section on a backend-only build).
     - Only the ``**Plan refs:**`` FIELD VALUE is searched, never Steps or
       Description prose, so a task that merely mentions "the data model" in a
       sentence does not count as implementing it.
@@ -222,7 +223,9 @@ def plan_coverage_gaps(
         if not body.strip():
             # Absent (or empty) in the plan — validate_sections owns this.
             continue
-        if heading in skip_none and normalise_reference(body).startswith("none"):
+        if heading in skip_none and normalise_reference(body).startswith(
+            ("none", "not applicable")
+        ):
             continue
         needles = tuple(
             f" {normalised} "

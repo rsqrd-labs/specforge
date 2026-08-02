@@ -7,6 +7,7 @@ import time
 import pytest
 
 from services.pipeline.artifact_validator import (
+    DEMO_DAY_SECTION_CONTRACTS,
     SECTION_CONTRACTS,
     IncompleteArtifactError,
     MissingSectionError,
@@ -136,6 +137,55 @@ def test_validate_sections_frontend_conditional_skipped_when_no_sentinel() -> No
     deps = {"spec": "A nightly batch ETL job ingesting CSV files into a warehouse."}
     # No UI sentinel → Frontend Architecture not required → no error.
     validate_sections("plan", artifact, deps)
+
+
+# ---------------------------------------------------------------------------
+# "AI slop" frontend remediation — Demo Day's own Frontend Architecture entry
+# (previously absent entirely). Unlike standard mode it is NOT sentinel-gated
+# (Demo Day has no conditional-section mechanism), but still honours the same
+# "Not applicable because <reason>" escape via the shared, mode-independent
+# _conditional_headings_for_stage lookup.
+# ---------------------------------------------------------------------------
+
+
+def _deep_demo_day_plan_artifact(*, frontend_body: str = _DEEP_SECTION_BODY) -> str:
+    parts = [
+        f"{heading}\n{_DEEP_SECTION_BODY}\n"
+        for heading in DEMO_DAY_SECTION_CONTRACTS["plan"]
+        if heading != "## Frontend Architecture"
+    ]
+    parts.append(f"## Frontend Architecture\n{frontend_body}\n")
+    return "\n\n".join(parts)
+
+
+def test_demo_day_plan_contract_requires_frontend_architecture() -> None:
+    assert "## Frontend Architecture" in DEMO_DAY_SECTION_CONTRACTS["plan"]
+    artifact = "\n\n".join(
+        f"{heading}\nbody\n"
+        for heading in DEMO_DAY_SECTION_CONTRACTS["plan"]
+        if heading != "## Frontend Architecture"
+    )
+    with pytest.raises(MissingSectionError) as excinfo:
+        validate_sections("plan", artifact, {}, mode="demo_day")
+    assert excinfo.value.missing == ["## Frontend Architecture"]
+
+
+def test_demo_day_frontend_architecture_not_applicable_one_liner_is_valid() -> None:
+    artifact = _deep_demo_day_plan_artifact(
+        frontend_body="Not applicable because this is an API-only demo with no UI."
+    )
+    validate_artifact_completeness("plan", artifact, {}, mode="demo_day")
+
+
+def test_demo_day_frontend_architecture_genuinely_shallow_still_flagged() -> None:
+    artifact = _deep_demo_day_plan_artifact(frontend_body="See above.")
+    with pytest.raises(IncompleteArtifactError) as excinfo:
+        validate_artifact_completeness("plan", artifact, {}, mode="demo_day")
+    assert any(
+        issue.code == "shallow_required_section"
+        and issue.reference == "## Frontend Architecture"
+        for issue in excinfo.value.issues
+    )
 
 
 def test_validate_sections_unknown_stage_is_noop() -> None:

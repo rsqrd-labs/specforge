@@ -136,7 +136,12 @@ PLAN.md), never on WHAT (every behaviour the build must exhibit is pinned here).
 
 Required SPEC.md structure (every section mandatory, in this order):
 - ## Overview — a short paragraph naming the prototype, the single capability it demos,
-  and the concrete artifact the user shows judges (the screen, output, or transaction).
+  and the concrete artifact the user shows judges (the screen, output, or transaction). If
+  the demo is browser-facing, end with one clause naming the intended brand personality and
+  emotional register as a contrast against a plausible alternative (e.g. "confident fintech,
+  not playful consumer") — a specific pairing grounded in this product's domain, never a
+  placeholder like "modern and clean". This grounds PLAN.md's Visual Identity decision; do
+  not defer it to Open Questions.
 - ## Target User and Core Problem — the specific user and the one problem this build
   solves, with a concrete example of the situation today and why it is painful.
 - ## Demo Day Scope — the single happy path that WILL be built, as a concrete numbered
@@ -220,6 +225,19 @@ Required PLAN.md structure (every section mandatory, in this order):
   State the AUTH STANCE as exactly one of: real (name the mechanism), mocked (name the
   hardcoded identity and why real auth is not demo-critical), or none (why). Mocked is a
   legitimate Demo Day choice — pick it deliberately, never by default.
+- ## Frontend Architecture — omit only if the build is not browser-facing, in which case
+  write one line "Not applicable because <reason>". Otherwise the FROZEN visual identity
+  a coding agent implements without inventing anything: a named, non-monochrome color
+  system (5-6 hex values with roles — background/surface/text/primary/accent/status); a
+  type pairing (a display face used with restraint for headings + a complementary body
+  face, each justified against the product's personality from Overview/Target User); one
+  named layout or interaction signature — the single element judges will visually
+  remember the demo by. Explicitly reject generic AI-default patterns unless the product's
+  own domain specifically calls for one: the unmodified default shadcn/ui Tailwind theme,
+  Inter/system-ui as the only typeface, a purple-to-blue gradient hero, centered generic
+  card-grid dashboards with no visual hierarchy, decorative numbered markers (01/02/03)
+  where nothing is actually sequential. Name the exact mechanism (Tailwind config, CSS
+  variables, theme file) that encodes it, so a task can point at it unchanged.
 - ## Risks and Mitigations — the build-time risks (what could make the e2e go red) and
   their concrete mitigations. Include at least one row per DEMO-VISIBLE failure mode: the
   trigger, and the concrete fallback the audience sees instead of a stack trace or a blank
@@ -281,9 +299,10 @@ Required TASKS.md structure (every section mandatory, in this order):
   `Data Model and Persistence`. Across the whole list every one of these MUST be cited by at
   least one task: Data Model and Persistence (the seed dataset), Environment and Bootstrap
   (the run/demo surface), External Integrations and Secrets (unless the plan wrote
-  "None — …"), Security Architecture (the auth stance). A section no task cites is designed
-  and never built — the demo then misses the seed data, the run command, the integration, or
-  the auth stance.
+  "None — …"), Security Architecture (the auth stance), and Frontend Architecture (the
+  design-token system) unless the plan wrote "Not applicable — …". A section no task cites is
+  designed and never built — the demo then misses the seed data, the run command, the
+  integration, the auth stance, or ships a screen built from invented, generic styling.
 **Harness refs:** `tests/e2e/test_smoke.py` — literal harness file paths WITH their file
   extension, exactly as they appear in the harness ## Files / ## File Tree; for setup-only
   tasks with no test use `_(none — <brief reason>)_`
@@ -308,8 +327,14 @@ Task rules:
 - Every `AC-NNN` is referenced by ≥1 task's `Spec refs`; every harness test by ≥1 task.
 - Between them, the tasks' `Plan refs:` cite the seed dataset (Data Model and Persistence),
   the run/demo surface (Environment and Bootstrap), each external integration (External
-  Integrations and Secrets, unless the plan wrote "None — …"), and the auth stance (Security
-  Architecture)."""
+  Integrations and Secrets, unless the plan wrote "None — …"), the auth stance (Security
+  Architecture), and — when the plan's Frontend Architecture is in scope — the design-token
+  system (color/type/signature from PLAN.md's Frontend Architecture, applied verbatim, never
+  reinvented mid-build).
+- When Frontend Architecture is in scope, the FIRST frontend-touching task sets up the
+  design tokens from PLAN.md (as CSS variables/theme config) before any screen is built; every
+  later frontend task's Acceptance Criteria checks it renders using those tokens rather than
+  ad hoc values."""
 
 
 _STAGE_ROLES: dict[str, str] = {
@@ -371,6 +396,8 @@ Before returning, verify (internal — do not include in output):
   cites ≥1 FR.
 - The three rubric sections (AI Usage, Security Posture, Scalability Story) are honest and
   specific (named controls/choices, not adjectives).
+- If the demo is browser-facing, Overview names a specific brand personality/emotional
+  register as a contrast (not a generic placeholder, not an Open Question).
 
 Return only SPEC.md. No preamble, commentary, or summary."""
 
@@ -407,6 +434,10 @@ Before returning, verify (internal — do not include in output):
   "None — <reason>" line if nothing external is called.
 - ## Security Architecture names exactly one auth stance (real / mocked / none) with its
   reason; ## Risks and Mitigations covers each demo-visible failure with its fallback.
+- If the build is browser-facing, ## Frontend Architecture names a specific non-monochrome
+  hex palette, a type pairing, and a signature element — not an Open Question and not an
+  unmodified component-library default theme; otherwise it states "Not applicable because
+  <reason>" in one line.
 
 Return only PLAN.md. No preamble, commentary, or summary."""
 
@@ -475,6 +506,9 @@ Before returning, verify (internal — do not include in output):
 - `Precondition:` lists only earlier `T-NNN` ids (the order is acyclic).
 - Every `AC-NNN` is referenced by ≥1 task; the final task cites the e2e smoke test path.
 - The Effort Summary states `Estimated build time: ~Xh (target ≤ 5h)`.
+- If the plan's Frontend Architecture is in scope, ≥1 task cites it in `Plan refs`, the first
+  frontend task sets up its design tokens before any screen is built, and later frontend
+  tasks' Acceptance Criteria check those tokens are actually used.
 
 Return only TASKS.md. No preamble, commentary, or summary."""
 

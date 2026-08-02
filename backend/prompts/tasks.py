@@ -58,7 +58,8 @@ Each task uses this exact format (9 fields — dense, not exhaustive):
   how the plan and the task list are joined. Across the whole task list, every one of these load-bearing plan
   sections MUST be cited by at least one task: API Design, Data Model and Persistence, Authentication and
   Authorization, Security Architecture, Error Handling and Recovery, Observability and Audit Logging,
-  Deployment and Operations. A section with no task is a designed capability nothing builds.
+  Deployment and Operations, and — whenever PLAN.md's Frontend Architecture is in scope (not "Not applicable") —
+  Frontend Architecture itself. A section with no task is a designed capability nothing builds.
 **Harness refs:** `path/to/test_file.py::TestClass::test_method` (all tests that must pass when this task is
   complete; for setup-only tasks with no harness test write `_(none — <brief reason>)_`)
 **Priority:** MUST / SHOULD / COULD — exactly one. MUST = cannot ship without it; SHOULD = strongly desired in V1
@@ -114,6 +115,12 @@ Task design rules:
   or an RTL role-based query that fails when the semantic role is missing). If the task adds a runtime dependency,
   Acceptance Criteria MUST include the bundle-size delta in KB gzipped (ceiling +15 KB/task; if exceeded, reference
   the PLAN.md Frontend Architecture bundle-budget entry that justifies it).
+- When Frontend Architecture is in scope, the FIRST frontend task establishes the design-token system verbatim
+  from PLAN.md's Visual Identity sub-bullet (the color system as CSS variables/theme config, the type pairing,
+  the spacing/radius primitives) before any other frontend task starts — a screen built before the tokens exist
+  will invent its own, generic ones. Every later frontend task's Acceptance Criteria MUST include a check that it
+  renders using those tokens (e.g. "no raw hex/px values outside the token file — computed styles read the
+  themed color/font values"), not only the existing accessibility/bundle-size assertions.
 """  # nosec B608
 
 
@@ -191,13 +198,13 @@ Example — a well-formed task (different product; do not copy into your output)
 Before returning, verify (internal — do not include a checklist in your output):
 - Every FR/NFR/SEC/AC-NNN the spec commits to is referenced by ≥ 1 task's **Spec refs** field. Appearing only in the Traceability Overview is NOT sufficient — that table documents an ID, a Spec refs entry is what makes a task responsible for building it. (Requirements the spec itself defers under Out of Scope / Non-Goals are excluded.)
 - Every harness test path appears in ≥ 1 task's Harness refs, using the exact path from the harness artifact. Citing a whole test FILE claims every test in it; cite `file::test_name` when a task makes only one of them pass.
-- Every load-bearing plan section (API Design, Data Model and Persistence, Authentication and Authorization, Security Architecture, Error Handling and Recovery, Observability and Audit Logging, Deployment and Operations) is named in ≥ 1 task's Plan refs.
+- Every load-bearing plan section (API Design, Data Model and Persistence, Authentication and Authorization, Security Architecture, Error Handling and Recovery, Observability and Audit Logging, Deployment and Operations, and Frontend Architecture when in scope) is named in ≥ 1 task's Plan refs.
 - At least one task's Harness refs cites the end-to-end/journey test that exercises the product end to end.
 - The Effort Summary counts match the emitted task blocks exactly (N total, MUST/SHOULD/COULD, size/estimate buckets).
 - Every task has ≥ 1 Acceptance Criterion with an exact runnable command (pytest, curl, or named smoke step).
 - No task's Dependencies lists a higher T-NNN — the graph is acyclic; security control and data/migration tasks precede what depends on them.
 - Every dependency-adding task carries the three Acceptance Criteria (SCA exit-0 with no critical/high CVEs, version-pin matching PLAN.md Technology Stack, non-Deprecated/non-EOL Support status).
-- Every Frontend/Full-stack task has Steps for loading + error + empty states and ≥ 1 accessibility assertion in Acceptance Criteria.
+- Every Frontend/Full-stack task has Steps for loading + error + empty states and ≥ 1 accessibility assertion in Acceptance Criteria; when Frontend Architecture is in scope, the first frontend task establishes the design-token system and every later frontend task's Acceptance Criteria checks it uses those tokens.
 - Every harness `TestCategoryGap` record has an explicit acknowledgement in TASKS.md — a task or an Open Questions/Assumptions entry naming the category and the affected requirement IDs.
 
 Return only TASKS.md. No preamble, commentary, or summary."""  # nosec B608
