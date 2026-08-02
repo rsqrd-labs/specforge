@@ -18,45 +18,60 @@ from dataclasses import dataclass, field
 # presence), but keeping the list in canonical order makes it easier to audit
 # against the system prompt.
 SECTION_CONTRACTS: dict[str, list[str]] = {
+    # Density initiative (2026-08-02): trimmed from 25 to 17 sections. Merges
+    # (old -> new home): User Problems, Users and Personas -> Overview;
+    # Success Metrics -> Product Goals; User Journeys, User Flow Diagrams ->
+    # User Flows (new); High-Level System Context, Feature Interaction
+    # Overview, Integrations and External Touchpoints -> System Context (new);
+    # Permissions and Access Expectations -> Security, Privacy, and Abuse
+    # Expectations; Error Handling and Recovery -> Edge Cases. No topic was
+    # dropped, only the standalone heading + its own preamble overhead.
     "spec": [
         "## Overview",
         "## Product Goals",
-        "## User Problems",
         "## In-Scope (MVP)",
         "## Non-Goals",
-        "## Users and Personas",
         "## User Stories",
-        "## User Journeys",
-        "## User Flow Diagrams",
+        "## User Flows",
         "## Functional Requirements",
         "## Non-Functional Requirements",
         "## Conceptual Domain Model",
-        "## Integrations and External Touchpoints",
-        "## Permissions and Access Expectations",
+        "## System Context",
         "## Security, Privacy, and Abuse Expectations",
-        "## Error Handling and Recovery",
-        "## High-Level System Context",
-        "## Feature Interaction Overview",
         "## Acceptance Criteria",
-        "## Success Metrics",
         "## Edge Cases",
         "## Constraints",
         "## Risks",
         "## Assumptions and Open Questions",
         "## Out of Scope",
     ],
+    # Density initiative (2026-08-02): trimmed from 27(+1) to 20(+1) sections.
+    # Merges (old -> new home): Assumptions and Open Questions -> Planning
+    # Summary; Scalability and Performance -> Capacity Model; Risks and
+    # Mitigations -> Failure Mode and Effects Analysis; Directory and File
+    # Structure + Module Boundaries and Interfaces -> Codebase Structure
+    # (new); Privacy and Data Handling -> Security Architecture; Testing
+    # Strategy + Rollout and Migration Plan -> Deployment and Operations.
+    # ## Prompt and AI Safety Controls is deleted entirely (it was never in
+    # this contract, never validated, never graded — pure prompt cleanup).
+    # Order matches the four chunk groupings in stage_manager.py's
+    # _chunk_specs_for_stage("plan") contiguously (4/5/6/5) so tests and
+    # fixtures can slice this list directly instead of re-deriving the split.
+    # Architecture Decision Records sits at the END of the third group (not
+    # grouped with Planning Summary/Tech Stack) specifically so its position
+    # relative to Data Model/API Design/Security Architecture matches
+    # prompt_eval/graders/format.py's _EXPECTED_H2["plan"] canonical order
+    # (unchanged, pre-existing) — moving it earlier would flag every
+    # already-committed golden-corpus fixture as heading-order-violating.
     "plan": [
         "## Planning Summary",
         "## Architecture Overview",
         "## Requirement Traceability Matrix",
         "## Technology Stack and Rationale",
-        "## Architecture Decision Records",  # T-239
         "## Architecture Anti-Patterns",  # T-239
         "## Multi-tenancy Stance",  # T-239
         "## Capacity Model",  # T-240
         "## Threat Model",  # T-240 (STRIDE)
-        "## SLOs and Error Budgets",  # T-240
-        "## Failure Mode and Effects Analysis",  # T-240
         # Stored as the FULL heading (not the truncated "## Architecture Quality
         # Attribute") so it matches BOTH consumers of this list: the substring
         # check in validate_sections AND the line-anchored regex in _section_body.
@@ -65,21 +80,17 @@ SECTION_CONTRACTS: dict[str, list[str]] = {
         # advisory on every plan (audit finding #1). Keep contract headings
         # verbatim with the prompt's real heading.
         "## Architecture Quality Attribute Matrix",  # T-240
-        "## Directory and File Structure",
-        "## Module Boundaries and Interfaces",
+        "## Codebase Structure",
         "## Data Model and Persistence",
         "## API Design",
         "## Authentication and Authorization",
         "## Security Architecture",
-        "## Privacy and Data Handling",
+        "## Architecture Decision Records",  # T-239
+        "## Failure Mode and Effects Analysis",  # T-240
+        "## SLOs and Error Budgets",  # T-240
         "## Error Handling and Recovery",
         "## Observability and Audit Logging",
-        "## Testing Strategy",
         "## Deployment and Operations",
-        "## Scalability and Performance",
-        "## Rollout and Migration Plan",
-        "## Risks and Mitigations",
-        "## Assumptions and Open Questions",
     ],
     "harness": [
         "## Harness Overview",
@@ -642,10 +653,10 @@ def _section_body(artifact_md: str, heading: str) -> str:
 def _normalise_body_for_depth(body: str) -> str:
     # Strip only the fence *markers* (``` and any language tag) and keep the
     # fenced body — a Mermaid/ASCII diagram or code block is real, measurable
-    # substance.  Sections like "## User Flow Diagrams" are prompted to be a
-    # diagram in a fenced block; discarding the whole block made every such
-    # section read as empty and trip a spurious shallow finding (the refund
-    # bleed this fix targets).
+    # substance.  Sections like "## User Flows" and "## System Context" are
+    # prompted to include a diagram in a fenced block; discarding the whole
+    # block made every such section read as empty and trip a spurious shallow
+    # finding (the refund bleed this fix targets).
     body = re.sub(r"(?m)^[ \t]*```[^\n]*$", " ", body)
     # Drop markdown table rules/pipes but keep cell text.
     body = re.sub(r"\|?-+\|[-|\s]*", " ", body)
@@ -1358,9 +1369,13 @@ def dedupe_file_blocks(artifact_md: str) -> tuple[str, int]:
 # Per-stage headings the duplicate-section guard treats as contract sections
 # even though ``validate_sections`` does not require them: they are conditional
 # in the system prompt, so two chunks could still both emit them.
-_DEDUPE_EXTRA_HEADINGS: dict[str, list[str]] = {
-    "plan": ["## Prompt and AI Safety Controls"],
-}
+#
+# Density initiative (2026-08-02): plan.py's "## Prompt and AI Safety
+# Controls" — the section this dict used to carry — was deleted entirely (it
+# was never in SECTION_CONTRACTS, never validated, never graded), so this
+# dict is currently empty. Left in place as the extension point for any
+# future conditional-but-not-formally-conditional plan heading.
+_DEDUPE_EXTRA_HEADINGS: dict[str, list[str]] = {}
 
 # ``## Files`` is additive and heterogeneous (### File: blocks) and has its own
 # first-wins self-heal (``dedupe_file_blocks``). Dropping a second ``## Files``
@@ -2002,6 +2017,13 @@ def _task_issues(artifact_md: str, deps: dict[str, str]) -> list[CompletenessIss
                 reference="tasks",
             )
         )
+    # Density initiative (2026-08-02): trimmed from 16 to 9 fields. Cut header
+    # fields (Estimated size, Risk, Owner) and cut body blocks (Description,
+    # Inputs, Outputs, Rollback / Recovery) were presence-checked only here —
+    # no downstream join (not a GitHub assignee/label, not read by
+    # pr_export_builder.py/github_projects.py/standard_plan_linter.py). Steps,
+    # Acceptance Criteria, and Dependencies are kept: all three are hard
+    # construction-verifier joins (standard_plan_linter.py's C1/C2/C3).
     required_fields = [
         "**Phase:**",
         "**Spec refs:**",
@@ -2009,15 +2031,8 @@ def _task_issues(artifact_md: str, deps: dict[str, str]) -> list[CompletenessIss
         "**Harness refs:**",
         "**Priority:**",
         "**Estimate:**",
-        "**Estimated size:**",
-        "**Risk:**",
-        "**Owner:**",
-        "**Description**",
-        "**Inputs**",
-        "**Outputs**",
         "**Steps**",
         "**Acceptance Criteria**",
-        "**Rollback / Recovery**",
         "**Dependencies**",
     ]
     issues: list[CompletenessIssue] = issues_floor

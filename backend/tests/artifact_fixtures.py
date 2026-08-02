@@ -178,9 +178,9 @@ SPEC_SECTION_BODIES = {
 # Section groups must mirror _chunk_specs_for_stage in stage_manager so the
 # joined chunks reproduce SECTION_CONTRACTS order exactly.
 SPEC_CHUNK_SECTIONS: dict[str, tuple[str, ...]] = {
-    "product-scope": tuple(SECTION_CONTRACTS["spec"][:10]),
-    "system-expectations": tuple(SECTION_CONTRACTS["spec"][10:18]),
-    "validation-risk": tuple(SECTION_CONTRACTS["spec"][18:]),
+    "product-scope": tuple(SECTION_CONTRACTS["spec"][:7]),
+    "system-expectations": tuple(SECTION_CONTRACTS["spec"][7:11]),
+    "validation-risk": tuple(SECTION_CONTRACTS["spec"][11:]),
 }
 
 
@@ -230,10 +230,10 @@ def _rtm_section_body() -> str:
 
 
 PLAN_CHUNK_SECTIONS: dict[str, tuple[str, ...]] = {
-    "architecture-foundation": tuple(SECTION_CONTRACTS["plan"][:7]),
-    "quality-and-structure": tuple(SECTION_CONTRACTS["plan"][7:14]),
-    "data-api-security": tuple(SECTION_CONTRACTS["plan"][14:19]),
-    "operations-risk": tuple(SECTION_CONTRACTS["plan"][19:]),
+    "architecture-foundation": tuple(SECTION_CONTRACTS["plan"][:4]),
+    "quality-and-structure": tuple(SECTION_CONTRACTS["plan"][4:9]),
+    "data-api-security": tuple(SECTION_CONTRACTS["plan"][9:15]),
+    "operations-risk": tuple(SECTION_CONTRACTS["plan"][15:]),
 }
 
 

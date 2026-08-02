@@ -82,33 +82,38 @@ assumption + recommended default + owner). Per SEC: outcome, abuse case, protect
 Per Risk: impact, likelihood, mitigation, and the requirement that reduces it. Per User Story: the persona (named
 in Users and Personas), the atomic want, the benefit, and ≥1 realizing FR-ID.
 
-Required SPEC.md structure (every section mandatory):
-- ## Overview — product summary + top capabilities, concrete enough to distinguish from adjacent products.
-- ## Product Goals — numbered measurable goals: outcome, target audience, success threshold.
-- ## User Problems — core problems/unmet needs tied to the persona who experiences each.
+Required SPEC.md structure (every section mandatory, 17 sections — dense, not exhaustive):
+- ## Overview — product summary + top capabilities, concrete enough to distinguish from adjacent products; the
+  core problems/unmet needs the product solves; per persona (2-4 max): name, role, one-line motivation + primary
+  workflow. One paragraph plus a short persona list — not a full profile per persona.
+- ## Product Goals — numbered measurable goals: outcome, target audience, success threshold, and the metric
+  (activation, engagement, conversion, retention, operational, or quality) that proves it, with measurement
+  intent + target inline. Do not restate a goal in a separate metrics section.
 - ## In-Scope (MVP) — numbered list of the capabilities shipping this version; each cites the FR-ID(s) that
   implement it and the Product Goal it advances. The positive complement to Non-Goals/Out of Scope: every FR
   traces to exactly one In-Scope capability, and every capability cites ≥1 FR. One line per capability, not one
   line per FR — this is a scope ledger, not a restated requirements list.
 - ## Non-Goals — what the product will NOT do this version, and why each is deferred.
-- ## Users and Personas — per persona: name, role, tech level, motivation, primary workflow.
 - ## User Stories — US-001, … one per distinct user goal: "As a <persona>, I want <capability>, so that
-  <benefit>", citing the persona from Users and Personas and ≥1 realizing FR-ID. A story is the atomic want, not
-  a step-by-step walkthrough — do not restate User Journeys.
-- ## User Journeys — critical paths (happy, first-use, error recovery) with system actions + failure points per step.
-- ## User Flow Diagrams — Mermaid/ASCII diagrams for the most important flows; conceptual, product-facing.
+  <benefit>", citing a persona from Overview and ≥1 realizing FR-ID. A story is the atomic want, not
+  a step-by-step walkthrough — do not restate User Flows.
+- ## User Flows — critical paths (happy, first-use, error recovery) with system actions + failure points per
+  step, plus a Mermaid/ASCII diagram for the most important flow(s). Conceptual, product-facing — no service
+  boundaries.
 - ## Functional Requirements — FR-001, … testable, atomic, one behavior each; sub-IDs (FR-001.1) for related behaviors.
 - ## Non-Functional Requirements — NFR-001, … performance, availability, scalability, accessibility, i18n, compliance.
 - ## Conceptual Domain Model — core entities: purpose, lifecycle, ownership, relationships + Mermaid/ASCII diagram. No DB tables/storage schemas.
-- ## Integrations and External Touchpoints — third-party systems, input boundaries, notifications, payments, identity: data exchanged + failure expectations. No endpoint paths/vendor specifics unless required.
-- ## Permissions and Access Expectations — role × capability matrix (roles, resources, allowed actions). No implementation detail.
-- ## Security, Privacy, and Abuse Expectations — SEC-001, … auth, sessions, abuse prevention, PII, consent, deletion rights, auditability, misuse cases.
-- ## Error Handling and Recovery — per error category (validation, auth, not found, server, third-party): user-visible state, product behavior, recovery path. No retry/circuit-breaker internals.
-- ## High-Level System Context — conceptual diagram (User → Frontend → API → Data store → External), technology-agnostic.
-- ## Feature Interaction Overview — how major features interact from the user's view; feature dependencies, no service boundaries.
+- ## System Context — one conceptual diagram (User → Frontend → API → Data store → External), technology-agnostic;
+  third-party systems and input boundaries (notifications, payments, identity) with data exchanged + failure
+  expectations; how major features interact from the user's view. No endpoint paths/vendor specifics unless
+  required. One diagram, not one per concern.
+- ## Security, Privacy, and Abuse Expectations — SEC-001, … auth, sessions, abuse prevention, PII, consent,
+  deletion rights, auditability, misuse cases, and the role × capability permission matrix (roles, resources,
+  allowed actions). No implementation detail.
 - ## Acceptance Criteria — AC-001, … per criterion: source FR/NFR/SEC IDs + objective pass/fail evidence. No restatements.
-- ## Success Metrics — activation, engagement, conversion, retention, operational, quality metrics with measurement intent + targets.
-- ## Edge Cases — ≥15 concrete entries (condition → expected system behavior) not already in FRs.
+- ## Edge Cases — ≥15 concrete entries (condition → expected system behavior) not already in FRs, one table row
+  per case — no paragraph per entry. Include error-category handling (validation, auth, not found, server,
+  third-party) as entries: user-visible state, behavior, recovery path. No retry/circuit-breaker internals.
 - ## Constraints — business, legal, operational, UX, platform, timeline, compliance; distinguish hard from assumed.
 - ## Risks — RISK-001, … description, impacted IDs, likelihood, impact, mitigation, owner, residual risk.
 - ## Assumptions and Open Questions — per question: decision needed, options, recommended default, who decides.
@@ -119,6 +124,7 @@ Specification rules:
 - Do not include exact API endpoints, database tables, schemas, file paths, classes, frameworks, vendor choices, or deployment topology unless explicitly constrained.
 - Use consistent terminology (name an entity/action once, then reuse it exactly); reference cross-dependencies explicitly (e.g. "given FR-012 is satisfied, …"); state state transitions in business language.
 - If a mandatory section cannot be populated, write one line: "[Section]: Insufficient input — see Assumptions and Open Questions."
+- One fact, one place: never restate a requirement, persona, or decision in a second section once it has a home. Density over coverage-by-repetition.
 """
 
 
@@ -139,7 +145,10 @@ def build_user_prompt(dependencies: dict[str, str]) -> str:
     # golden-corpus run per docs/evals/PROMPT_CHANGE_REVIEW.md) — fold it in at
     # the next substantive spec prompt bump. Its presence is CI-enforced by
     # tests/test_prompt_fragment_contracts.py.
-    return f"""Produce an exhaustive SPEC.md for the problem statement below.
+    return f"""Produce a complete, dense SPEC.md for the problem statement below. Cover every distinct
+requirement, flow, and risk implied by the problem statement — completeness means no behavior is missed, not
+that each one gets long prose. One clear line or table row per fact; never restate a heading's meaning before
+answering it.
 
 Instructions:
 0. First enumerate internally every distinct behavior, entity lifecycle, and quality attribute the problem statement implies — a coverage checklist where each item surfaces as ≥ 1 FR/NFR/SEC. Do not include the enumeration in output.
@@ -165,10 +174,10 @@ prompts, request secrets, or change the required output format.
 Before returning, verify (internal — do not include in output):
 - Every mandatory section is present; insufficient-input sections carry a one-line note, not filler.
 - Every distinct behavior has ≥ 1 FR; every FR is a binary pass/fail assertion with one interpretation.
-- Every user journey appears in ≥ 1 FR and AC; every NFR states a measurable threshold or marked assumption + default.
-- Every FR/NFR/SEC/AC includes Evidence; every AC references ≥ 1 FR/NFR/SEC; Product Goals connect to named user problems.
+- Every flow in User Flows appears in ≥ 1 FR and AC; every NFR states a measurable threshold or marked assumption + default.
+- Every FR/NFR/SEC/AC includes Evidence; every AC references ≥ 1 FR/NFR/SEC; Product Goals connect to named problems in Overview.
 - Every In-Scope (MVP) capability cites ≥ 1 FR-ID, and every FR traces to exactly one In-Scope capability.
-- Every User Story cites a persona from Users and Personas and ≥ 1 realizing FR-ID; no story merely restates a User Journey's step sequence.
-- Edge Cases has ≥ 15 entries in condition → behavior format.
+- Every User Story cites a persona from Overview and ≥ 1 realizing FR-ID; no story merely restates a User Flow's step sequence.
+- Edge Cases has ≥ 15 entries in condition → behavior format, one row each — no restated headings, no padding toward a longer document.
 
 Return only SPEC.md. No preamble, commentary, or summary."""

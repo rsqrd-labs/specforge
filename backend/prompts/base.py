@@ -32,19 +32,59 @@ logger = structlog.get_logger(__name__)
 # list in stage_manager.py, and the spec keep-list in prompt_builder.py all
 # updated in lockstep. Demo Day's spec contract is untouched (pinned
 # separately per the §4 regression contract).
-ASDD_PROMPT_VERSION = "asdd-v2.5.0"
+# v2.6.0 — 2026-08-02 density initiative: PROFESSIONAL_OUTPUT_RULES gains a
+# bullet against restated headings/preambles/self-summary ("every fact earns
+# its place"). Standard-mode only — DEMO_DAY_OUTPUT_RULES is a deliberate
+# sibling, not merged (see the comment above that block), and already carries
+# an equivalent breadth-trimming contract. Paired with per-stage scaffold
+# trims (spec/plan/tasks) and a lowered chunk length-target floor in
+# stage_manager.py. Per docs/evals/PROMPT_CHANGE_REVIEW.md: golden-corpus run
+# (`prompt_eval.run --version asdd-v2.6.0 --baseline asdd-v1.8.0`) exits 0 —
+# but that PASS is against the pre-existing golden_workspaces/ fixtures,
+# which were generated under the OLD prompts and were already stale before
+# this change (pinned at asdd-v1.8.0, missing headings both the pre- and
+# post-trim contracts added since). It proves this change's grader/format
+# edits don't crash or regress on old content; it does NOT validate the new
+# prompts' output quality. A live regeneration of the 3 golden workspaces
+# under these prompts, human quality review, and re-pinned baseline_scores.json
+# is a required follow-up before this version can be considered eval-verified
+# — deferred pending the user's go-ahead to spend the live-generation cost.
+ASDD_PROMPT_VERSION = "asdd-v2.6.0"
 STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # spec-v5: audit M8 — the clarification Q&A block is now fenced with
     # wrap_untrusted_content instead of rendering user-typed answers raw in
     # the instruction region.
     # spec-v6: adds ## In-Scope (MVP) and ## User Stories to the required
     # structure, the stable-ID contract, and the verify checklist (v2.5.0).
-    "spec": f"{ASDD_PROMPT_VERSION}:spec-v6",
+    # spec-v7: density initiative (2026-08-02) — 25 sections -> 17. Merges:
+    # User Problems/Users and Personas -> Overview; Success Metrics -> Product
+    # Goals; User Journeys/User Flow Diagrams -> new User Flows;
+    # High-Level System Context/Feature Interaction Overview/Integrations and
+    # External Touchpoints -> new System Context; Permissions and Access
+    # Expectations -> Security, Privacy, and Abuse Expectations; Error
+    # Handling and Recovery -> Edge Cases. SECTION_CONTRACTS["spec"] and the
+    # spec chunk-scope lists in stage_manager.py updated in lockstep.
+    "spec": f"{ASDD_PROMPT_VERSION}:spec-v7",
     # plan-v5: finding #7 — the hard-denylist sentence is now generated from
     # tech_safety_policy.json (render_hard_denylist_prose()) instead of
     # hand-duplicated, changing plan.py's own prompt text specifically.
-    "plan": f"{ASDD_PROMPT_VERSION}:plan-v5",
-    "harness": f"{ASDD_PROMPT_VERSION}:harness-v4",
+    # plan-v6: density initiative (2026-08-02) — 27(+1) sections -> 20(+1).
+    # Merges: Assumptions and Open Questions -> Planning Summary; Scalability
+    # and Performance -> Capacity Model; Risks and Mitigations -> FMEA;
+    # Directory and File Structure + Module Boundaries and Interfaces -> new
+    # Codebase Structure; Privacy and Data Handling -> Security Architecture;
+    # Testing Strategy + Rollout and Migration Plan -> Deployment and
+    # Operations. ## Prompt and AI Safety Controls deleted (never validated).
+    # SECTION_CONTRACTS["plan"] and the plan chunk-scope lists in
+    # stage_manager.py updated in lockstep (manually audited — see the
+    # WARNING comment there about the one-directional pinned test).
+    "plan": f"{ASDD_PROMPT_VERSION}:plan-v6",
+    # harness-v5: density initiative (2026-08-02) — tightened the two prose
+    # sections only (Harness Overview, Coverage Plan): one line/row per
+    # category instead of a paragraph, no restated-heading preambles. No
+    # section-count change; RTM/File Tree/Files and their length targets in
+    # stage_manager.py are untouched (file-count/test-code driven, not prose).
+    "harness": f"{ASDD_PROMPT_VERSION}:harness-v5",
     # tasks-v5: finding #8 — tasks.py now instructs acknowledgement of any
     # harness TestCategoryGap record (a task or Open Questions/Assumptions
     # entry naming the deferred category), closing the gap where known-
@@ -63,7 +103,15 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # the file-vs-`file::test` distinction C2 read. Only tasks.py's bytes moved,
     # so ASDD_PROMPT_VERSION is unchanged and the other three stages keep their
     # prompt caches.
-    "tasks": f"{ASDD_PROMPT_VERSION}:tasks-v7",
+    # tasks-v8: density initiative (2026-08-02) — task block fields 16 -> 9.
+    # Cut header fields (Estimated size, Risk, Owner) and cut body blocks
+    # (Description, Inputs, Outputs, Rollback / Recovery) were presence-
+    # checked only, no downstream join. Rollback/Recovery survives as an
+    # optional trailing Steps line for genuinely hard-to-reverse tasks only.
+    # artifact_validator.py's _task_issues required_fields updated in
+    # lockstep. Task count target (20-50) is untouched — that's substance,
+    # not presentation overhead.
+    "tasks": f"{ASDD_PROMPT_VERSION}:tasks-v8",
 }
 
 # Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md). Separate version
@@ -212,6 +260,7 @@ Professional output rules:
 - State assumptions and open questions explicitly when information is missing; never silently fill critical product, security, legal, or data-retention gaps with risky guesses.
 - Every artifact MUST cover security, privacy, accessibility, observability, reliability, and abuse cases WITHIN its required structure: address each category in the mandated section(s) where it belongs (requirements, design sections, tests, or tasks — as the stage's own structure dictates), and do not invent extra headings beyond the stage's required section set to hold them. If a category is genuinely not applicable to the product, say so in one line where it would naturally be addressed — never silently drop a category.
 - Keep terminology stable: requirement IDs, API names, model names, file paths, and test names stay constant once introduced.
+- Every fact earns its place: no restated headings, no throat-clearing preambles, no "this section covers…", no summary of what was just said. State the identifier, the decision, or the assertion — not the fact that you are about to state it. This artifact is read by coding agents, not skimmed by humans end to end — density beats coverage-by-volume.
 """.strip()
 
 # A short, scoped injection-defense fragment for cheap/latency-sensitive judge

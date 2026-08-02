@@ -267,10 +267,10 @@ def test_spec_prompt_stays_product_level_not_implementation_blueprint() -> None:
     prompt = spec.SYSTEM_PROMPT
 
     assert "Product Goals" in prompt
-    assert "User Problems" in prompt
-    assert "High-Level System Context" in prompt
+    assert "core problems" in prompt
+    assert "System Context" in prompt
     assert "Acceptance Criteria" in prompt
-    assert "Success Metrics" in prompt
+    assert "activation, engagement, conversion, retention" in prompt
     assert "Do not include exact API endpoints" in prompt
     assert "database tables" in prompt
     assert "vendor choices" in prompt
@@ -288,7 +288,7 @@ def test_plan_prompt_is_implementation_ready_without_scope_creep() -> None:
     assert "Data Model and Persistence" in prompt
     assert "API Design" in prompt
     assert "Observability and Audit Logging" in prompt
-    assert "Rollout and Migration Plan" in prompt
+    assert "Deployment and Operations" in prompt
     assert "Never invent product scope beyond the spec" in prompt
     assert "smallest safe technical assumption" in prompt
     assert "Prefer fewer well-justified components" in prompt
@@ -320,7 +320,7 @@ def test_tasks_prompt_is_ordered_traceable_and_agent_executable() -> None:
     assert "Traceability Overview" in prompt
     assert "Dependency Graph" in prompt
     assert "**Plan refs:**" in prompt
-    assert "**Rollback / Recovery**" in prompt
+    assert "rollback" in prompt
     assert "topologically ordered" in prompt
     assert "Every harness test must be referenced" in prompt
     assert "Do not invent files, modules, endpoints" in prompt

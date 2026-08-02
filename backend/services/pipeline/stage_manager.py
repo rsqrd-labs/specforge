@@ -1802,10 +1802,12 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
     were unreachable — the first by ~3x, the second by ~2x. Advertising a
     ceiling the model cannot reach inside the bound is what runs the clock out.
 
-    This is not a depth floor change: the 8,000-character floor and the depth
-    floors (``_min_body_chars``, the task/requirement-id minimums) are
-    untouched, and a standard spec is 3 chunks, so the document as a whole is
-    still budgeted well above any floor.
+    The lower bound of the target (below) is a density lever, deliberately
+    distinct from the depth floors (``_min_body_chars``, the task/requirement-
+    id minimums), which are untouched: those are advisory correctness floors
+    on the FINAL artifact, while this is prompt guidance for one call's prose
+    budget. A standard spec is 3 chunks, so the document as a whole is still
+    budgeted well above any floor even at the lower per-chunk target.
 
     The two branches stay separate because ``whole_document`` chunks carry the
     ENTIRE artifact in one call (Demo Day's ``demo-full``; see
@@ -1828,14 +1830,21 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
             "the complete chunk below 180,000 characters."
         )
     if stage_type == "harness":
-        return "Length target: 6,000-45,000 characters for this contract chunk."
+        return "Length target: 3,000-45,000 characters for this contract chunk."
     if chunk.whole_document:
         return (
-            "Length target: 8,000-30,000 characters for this complete document. "
-            "Every required section must be substantive — spend the budget on "
-            "concrete detail, not preamble, restatement, or filler."
+            "Length target: 3,500-30,000 characters for this complete document. "
+            "Every required section must be substantive and dense — spend the "
+            "budget on concrete IDs, decisions, and assertions, never on "
+            "preamble, restated headings, or filler. Shorter and denser beats "
+            "longer and padded; do not pad toward the upper bound."
         )
-    return "Length target: 8,000-30,000 characters for this document chunk."
+    return (
+        "Length target: 3,500-30,000 characters for this document chunk. "
+        "Shorter and denser beats longer and padded; do not pad toward the "
+        "upper bound — every sentence must earn its place (see Professional "
+        "output rules)."
+    )
 
 
 def _should_cache_system_prompt(
@@ -1880,6 +1889,12 @@ def _chunk_specs_for_stage(
     if mode == "demo_day":
         return _demo_day_chunk_specs_for_stage(stage_type)
     if stage_type == "spec":
+        # Density initiative (2026-08-02): 17-section contract (was 25). Every
+        # heading here must appear in exactly one scope AND set-match
+        # SECTION_CONTRACTS["spec"] verbatim — a pinned test
+        # (test_spec_chunk_scopes_list_compound_heading_verbatim) asserts full
+        # set-equality between the union of these three lists and the
+        # contract, in both directions, so drift here fails loudly.
         return [
             ArtifactChunkSpec(
                 "product-scope",
@@ -1888,13 +1903,10 @@ def _chunk_specs_for_stage(
                     [
                         "## Overview",
                         "## Product Goals",
-                        "## User Problems",
                         "## In-Scope (MVP)",
                         "## Non-Goals",
-                        "## Users and Personas",
                         "## User Stories",
-                        "## User Journeys",
-                        "## User Flow Diagrams",
+                        "## User Flows",
                         "## Functional Requirements",
                     ],
                 ),
@@ -1906,12 +1918,8 @@ def _chunk_specs_for_stage(
                     [
                         "## Non-Functional Requirements",
                         "## Conceptual Domain Model",
-                        "## Integrations and External Touchpoints",
-                        "## Permissions and Access Expectations",
+                        "## System Context",
                         "## Security, Privacy, and Abuse Expectations",
-                        "## Error Handling and Recovery",
-                        "## High-Level System Context",
-                        "## Feature Interaction Overview",
                     ],
                 ),
             ),
@@ -1921,7 +1929,6 @@ def _chunk_specs_for_stage(
                     "SPEC.md",
                     [
                         "## Acceptance Criteria",
-                        "## Success Metrics",
                         "## Edge Cases",
                         "## Constraints",
                         "## Risks",
@@ -1932,13 +1939,33 @@ def _chunk_specs_for_stage(
             ),
         ]
     if stage_type == "plan":
-        # Audit H1: every one of the plan's mandatory sections (plus its two
-        # conditional ones) is enumerated into EXACTLY one chunk by verbatim
-        # heading — no ranges over the system prompt's order, no judgment calls
-        # left to the model. All four chunks run in one parallel wave with no
-        # cross-visibility, so a section named in two scopes yields two
-        # conflicting bodies in one PLAN.md; keep these lists disjoint (a pinned
-        # test asserts disjointness and full coverage of the section contract).
+        # Audit H1 + density initiative (2026-08-02): every one of the plan's
+        # mandatory sections (plus its one conditional) is enumerated into
+        # EXACTLY one chunk by verbatim heading — no ranges over the system
+        # prompt's order, no judgment calls left to the model. All four
+        # chunks run in one parallel wave with no cross-visibility, so a
+        # section named in two scopes yields two conflicting bodies in one
+        # PLAN.md; keep these lists disjoint (a pinned test asserts
+        # disjointness and coverage — but only in one direction, see the
+        # WARNING below).
+        #
+        # 27(+1) -> 20(+1) sections. Merges (old -> new home): Assumptions and
+        # Open Questions -> Planning Summary; Scalability and Performance ->
+        # Capacity Model; Risks and Mitigations -> Failure Mode and Effects
+        # Analysis; Directory and File Structure + Module Boundaries and
+        # Interfaces -> Codebase Structure (new); Privacy and Data Handling ->
+        # Security Architecture; Testing Strategy + Rollout and Migration Plan
+        # -> Deployment and Operations. ## Prompt and AI Safety Controls is
+        # deleted entirely (never in SECTION_CONTRACTS, never validated,
+        # never graded, no frontend reference — pure cleanup).
+        #
+        # WARNING: test_plan_chunk_scopes_are_disjoint_and_cover_the_contract
+        # only iterates `for heading in SECTION_CONTRACTS["plan"]` — it does
+        # NOT assert the reverse (that every heading listed here is IN the
+        # contract). A heading removed from SECTION_CONTRACTS but left in a
+        # scope list below would not be caught by that test; these four lists
+        # were manually audited against SECTION_CONTRACTS["plan"] as part of
+        # this change instead.
         return [
             ArtifactChunkSpec(
                 "architecture-foundation",
@@ -1949,14 +1976,15 @@ def _chunk_specs_for_stage(
                         "## Architecture Overview",
                         "## Requirement Traceability Matrix",
                         "## Technology Stack and Rationale",
-                        "## Architecture Decision Records",
-                        "## Architecture Anti-Patterns (explicitly avoid)",
-                        "## Multi-tenancy Stance",
                     ],
                     extra=(
                         "Preserve all requirement IDs from SPEC.md exactly; the "
                         "Requirement Traceability Matrix must cover every "
-                        "FR/NFR/SEC/AC ID."
+                        "FR/NFR/SEC/AC ID. Planning Summary also covers every "
+                        "assumption where the spec was silent and every "
+                        "decision needing product/legal sign-off — do not "
+                        "create a separate Assumptions and Open Questions "
+                        "section for these."
                     ),
                 ),
             ),
@@ -1965,20 +1993,23 @@ def _chunk_specs_for_stage(
                 _chunk_section_scope(
                     "PLAN.md",
                     [
-                        "## Directory and File Structure",
-                        "## Module Boundaries and Interfaces",
+                        "## Architecture Anti-Patterns (explicitly avoid)",
+                        "## Multi-tenancy Stance",
                         "## Capacity Model",
-                        "## SLOs and Error Budgets",
-                        "## Failure Mode and Effects Analysis (FMEA-lite)",
+                        "## Threat Model (STRIDE)",
                         "## Architecture Quality Attribute Matrix",
                     ],
                     extra=(
                         "Use concrete diagrams, tables, interfaces, and "
-                        "trade-offs. If the SPEC describes a UI, web app, "
-                        "dashboard, page, or console, also include "
-                        "## Frontend Architecture in this chunk (it belongs to "
-                        "no other chunk); if the product is backend-only, omit "
-                        "it entirely."
+                        "trade-offs. Capacity Model also covers per-endpoint "
+                        "latency budget and how it is met, horizontal-scaling "
+                        "trigger, DB connection pooling, and cache eviction "
+                        "policy — do not create a separate Scalability and "
+                        "Performance section for these. If the SPEC describes "
+                        "a UI, web app, dashboard, page, or console, also "
+                        "include ## Frontend Architecture in this chunk (it "
+                        "belongs to no other chunk); if the product is "
+                        "backend-only, omit it entirely."
                     ),
                 ),
             ),
@@ -1987,19 +2018,24 @@ def _chunk_specs_for_stage(
                 _chunk_section_scope(
                     "PLAN.md",
                     [
+                        "## Codebase Structure",
                         "## Data Model and Persistence",
                         "## API Design",
                         "## Authentication and Authorization",
                         "## Security Architecture",
-                        "## Privacy and Data Handling",
-                        "## Threat Model (STRIDE)",
+                        "## Architecture Decision Records",
                     ],
                     extra=(
                         "Give exact schemas, API contracts, auth rules, and "
-                        "threat controls. If the product has LLM-facing inputs, "
-                        "also include ## Prompt and AI Safety Controls in this "
-                        "chunk (it belongs to no other chunk); otherwise omit "
-                        "it entirely."
+                        "threat controls. Codebase Structure covers repo "
+                        "layout to important source files (per file/module: "
+                        "responsibility, owning layer, key dependencies) AND "
+                        "module public interfaces/dependency graph in one "
+                        "section. Security Architecture also covers data "
+                        "classification, PII fields + encryption/masking, "
+                        "retention schedule, and third-party data-sharing "
+                        "inventory — do not create a separate Privacy and Data "
+                        "Handling section for these."
                     ),
                 ),
             ),
@@ -2008,15 +2044,23 @@ def _chunk_specs_for_stage(
                 _chunk_section_scope(
                     "PLAN.md",
                     [
+                        "## Failure Mode and Effects Analysis (FMEA-lite)",
+                        "## SLOs and Error Budgets",
                         "## Error Handling and Recovery",
                         "## Observability and Audit Logging",
-                        "## Testing Strategy",
                         "## Deployment and Operations",
-                        "## Scalability and Performance",
-                        "## Rollout and Migration Plan",
-                        "## Risks and Mitigations",
-                        "## Assumptions and Open Questions",
                     ],
+                    extra=(
+                        "Failure Mode and Effects Analysis also covers the "
+                        "top risks by severity x probability (impact, "
+                        "likelihood, mitigation, contingency) as additional "
+                        "rows — do not create a separate Risks and "
+                        "Mitigations section. Deployment and Operations also "
+                        "covers the test pyramid/CI strategy AND rollout "
+                        "phases, feature flags, data-migration steps, and "
+                        "launch checklist — do not create separate Testing "
+                        "Strategy or Rollout and Migration Plan sections."
+                    ),
                 ),
             ),
         ]

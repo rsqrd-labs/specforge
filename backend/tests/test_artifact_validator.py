@@ -173,7 +173,7 @@ def test_validate_artifact_completeness_rejects_shallow_required_section() -> No
 
 
 # A Mermaid/ASCII diagram is exactly what the spec prompt asks for in the User
-# Flow Diagrams section.  Regression: the depth normaliser used to strip the
+# Flows section.  Regression: the depth normaliser used to strip the
 # entire fenced block, so a diagram-only section read as empty and tripped a
 # spurious shallow finding that refunded nearly every spec.
 _DIAGRAM_BODY = (
@@ -193,8 +193,7 @@ _DIAGRAM_BODY = (
 def test_diagram_only_section_counts_as_substantive() -> None:
     detailed = "Detailed content that is specific enough for validation."
     artifact = "\n\n".join(
-        f"{heading}\n"
-        f"{_DIAGRAM_BODY if heading == '## User Flow Diagrams' else detailed}"
+        f"{heading}\n" f"{_DIAGRAM_BODY if heading == '## User Flows' else detailed}"
         for heading in SECTION_CONTRACTS["spec"]
     )
     # The diagram body is real substance, so no shallow finding for it.  (Other
@@ -208,7 +207,7 @@ def test_diagram_only_section_counts_as_substantive() -> None:
             for issue in exc.issues
             if issue.code == "shallow_required_section"
         }
-        assert "## User Flow Diagrams" not in shallow_refs
+        assert "## User Flows" not in shallow_refs
 
 
 def test_refundable_partition_separates_truncation_from_depth() -> None:
@@ -841,7 +840,7 @@ def test_dedupe_contract_sections_drops_second_occurrence_keeps_first() -> None:
         "## Data Model and Persistence\nFIRST data model\n\n"
         "## API Design\napi body\n\n"
         "## Data Model and Persistence\nSECOND conflicting data model\n\n"
-        "## Testing Strategy\ntesting body"
+        "## Observability and Audit Logging\nobservability body"
     )
     deduped, removed = dedupe_contract_sections("plan", artifact)
     assert removed == 1
@@ -850,7 +849,7 @@ def test_dedupe_contract_sections_drops_second_occurrence_keeps_first() -> None:
     assert deduped.count("## Data Model and Persistence") == 1
     # Neighbours are untouched.
     assert "api body" in deduped
-    assert "testing body" in deduped
+    assert "observability body" in deduped
 
 
 def test_dedupe_contract_sections_noop_without_duplicates() -> None:
@@ -915,7 +914,7 @@ def test_dedupe_contract_sections_ignores_headings_inside_fences() -> None:
     artifact = (
         "## API Design\napi body\n\n"
         "```markdown\n## API Design\n(fenced example, not a heading)\n```\n\n"
-        "## Testing Strategy\ntesting body"
+        "## Observability and Audit Logging\nobservability body"
     )
     deduped, removed = dedupe_contract_sections("plan", artifact)
     assert removed == 0

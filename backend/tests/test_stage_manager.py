@@ -1787,13 +1787,13 @@ _STAGE_DIAGRAM_BODY = (
 
 
 def _swap_user_flow_body(user_prompt: str, new_body: str) -> str:
-    """A spec chunk payload with the User Flow Diagrams body swapped out."""
+    """A spec chunk payload with the User Flows body swapped out."""
     key = artifact_fixtures.chunk_key_from_prompt(user_prompt, "product-scope")
     md = artifact_fixtures.spec_chunk_md(key)
     if key == "product-scope":
         md = md.replace(
-            f"## User Flow Diagrams\n{artifact_fixtures.SPEC_DEFAULT_BODY}",
-            f"## User Flow Diagrams\n{new_body}",
+            f"## User Flows\n{artifact_fixtures.SPEC_DEFAULT_BODY}",
+            f"## User Flows\n{new_body}",
         )
     return f"{md}\n{chunk_completion_sentinel('spec', key)}"
 
@@ -1859,7 +1859,7 @@ async def test_generate_missing_sentinel_is_delivered_not_refunded() -> None:
 
 @pytest.mark.asyncio
 async def test_generate_mermaid_user_flow_diagram_is_not_refunded() -> None:
-    # Regression: a Mermaid-only User Flow Diagrams section used to be stripped to
+    # Regression: a Mermaid-only User Flows section used to be stripped to
     # empty by the depth normaliser, flagged shallow, and refunded on every spec.
     # It is now substantive content — the stage completes clean, no refund.
     workspace_id = uuid4()
@@ -1944,8 +1944,8 @@ async def test_generate_depth_only_failure_is_advisory_not_refunded() -> None:
     assert spec_stage.quality_gate_status == "advisory"
     assert spec_stage.quality_gate_kind == "critic_findings"
     findings = spec_stage.quality_gate_payload["findings"]
-    assert any("User Flow Diagrams" in f["detail"] for f in findings)
-    assert "## User Flow Diagrams" in spec_stage.content
+    assert any("User Flows" in f["detail"] for f in findings)
+    assert "## User Flows" in spec_stage.content
     assert any("done" in token for token in tokens)
 
 
@@ -5642,8 +5642,15 @@ def _scope_headings(instruction: str) -> list[str]:
 
 def test_plan_chunk_scopes_are_disjoint_and_cover_the_contract() -> None:
     # H1: every mandatory plan section is assigned to EXACTLY one chunk by
-    # verbatim heading; the two conditional sections are assigned to exactly
-    # one chunk each via their conditional sentences.
+    # verbatim heading; the one conditional section (Frontend Architecture)
+    # is assigned to exactly one chunk via its conditional sentence.
+    #
+    # Density initiative (2026-08-02): this test only iterates
+    # SECTION_CONTRACTS["plan"] -> chunk lists, not the reverse — it would NOT
+    # catch a heading left in a chunk's scope list after being removed from
+    # the contract (see the WARNING comment in stage_manager.py's plan chunk
+    # spec). "## Prompt and AI Safety Controls" was manually verified removed
+    # from every chunk instruction as part of this change instead.
     from services.pipeline.artifact_validator import SECTION_CONTRACTS
 
     listed: list[str] = []
@@ -5655,7 +5662,7 @@ def test_plan_chunk_scopes_are_disjoint_and_cover_the_contract() -> None:
         assert len(matches) == 1, f"{heading} not assigned to exactly one chunk"
     joined = " ".join(c.instruction for c in _chunk_specs_for_stage("plan"))
     assert joined.count("## Frontend Architecture") == 1
-    assert joined.count("## Prompt and AI Safety Controls") == 1
+    assert "## Prompt and AI Safety Controls" not in joined
 
 
 def test_spec_chunk_scopes_list_compound_heading_verbatim() -> None:

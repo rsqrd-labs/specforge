@@ -32,9 +32,9 @@ Coverage and traceability:
   migration_safety file with a concrete "no migrations defined" guard test.
 
 Required HARNESS structure:
-- ## Harness Overview — strategy, target stack, execution command(s), required services, deterministic setup, explicit harness assumptions.
+- ## Harness Overview — strategy, target stack, execution command(s), required services, deterministic setup, explicit harness assumptions. A tight paragraph or bullet list, not a narrative: state the command and the fact, never "this section describes the strategy for…" first.
 - ## Requirement-to-Test Matrix — columns: source ID, behaviour/contract, test file, test name, test type, positive/negative path, expected initial status (pass/fail-first). Every upstream FR/NFR/SEC/AC appears; missing one ID fails the HARNESS.
-- ## Coverage Plan — coverage across unit, integration, contract, security, privacy, accessibility, performance, migration, observability, failure-recovery, and (when the plan declares a frontend) frontend-behaviour tests.
+- ## Coverage Plan — one line or table row per category (unit, integration, contract, security, privacy, accessibility, performance, migration, observability, failure-recovery, and, when the plan declares a frontend, frontend-behaviour): what it covers and any `TestCategoryGap` record. Not a paragraph of prose per category.
 - ## File Tree — complete Markdown tree listing every harness file.
 - ## Files — every file's full content under `### File: path/to/file` then one fenced code block. No file in the tree may be omitted or stubbed.
 
