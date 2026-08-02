@@ -1,0 +1,317 @@
+---
+// The Thought2Build squirrel as a self-hosted, animated SVG — the marketing-zone
+// port of frontend/src/components/shared/SquirrelMark.tsx. That component
+// replaced the static `/brand/squirrel-mark.png` raster in the product app
+// (e02183a, "animate the product logo with the loader's squirrel mark") but
+// the port was never extended to this Astro zone, which kept rendering the
+// pre-animation PNG in the header, footer, and homepage hero. This is the same
+// geometry and the same compositor-only animation (tail flick, body bob,
+// blink), scoped to this component so it can appear more than once per page
+// (header + hero + footer) without id or keyframe collisions.
+interface Props {
+  class?: string
+  width?: number
+  height?: number
+}
+
+const { class: className, width, height } = Astro.props
+
+// Astro re-renders this frontmatter per instance, so each squirrel on the page
+// gets its own gradient id — the same reason SquirrelMark.tsx uses useId().
+const gradientId = `squirrel-fur-${crypto.randomUUID().replace(/-/g, "")}`
+---
+
+<svg
+  class={["squirrel-mark", className].filter(Boolean).join(" ")}
+  viewBox="0 0 48 48"
+  width={width}
+  height={height}
+  focusable="false"
+  role="presentation"
+>
+  <defs>
+    <linearGradient id={gradientId} x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff9933"></stop>
+      <stop offset="100%" stop-color="#fd80a9"></stop>
+    </linearGradient>
+  </defs>
+  <g class="squirrel">
+    <g class="squirrel-tail-rig">
+      <path
+        class="squirrel-outline"
+        d="M25 41 C41 44 48 27 41 14 C37.5 6.5 30 4 26 9 C31 11 33 17 31.5 23 C30 29 26 30 25 34 C24 37 23.5 39 25 41 Z"
+      ></path>
+      <path
+        class="squirrel-tail"
+        fill={`url(#${gradientId})`}
+        d="M25 41 C41 44 48 27 41 14 C37.5 6.5 30 4 26 9 C31 11 33 17 31.5 23 C30 29 26 30 25 34 C24 37 23.5 39 25 41 Z"
+      ></path>
+      <path class="squirrel-fur-highlight" d="M28.5 9.5 C34.5 10 38.5 17 37.2 24.5"></path>
+      <path class="squirrel-tail-texture" d="M29.5 13 C33 17 34 22 31.7 26.7"></path>
+      <path
+        class="squirrel-tail-texture squirrel-tail-texture-inner"
+        d="M32.6 16.3 C35.5 20 36 24.3 33.3 28.4"
+      ></path>
+    </g>
+    <g class="squirrel-outline">
+      <ellipse cx="13.5" cy="43" rx="4.8" ry="2.3"></ellipse>
+      <path d="M17 20 C24 19 27.5 26 27.5 33 C27.5 40 23.5 43.5 18 43.5 C12.5 43.5 10.5 38 11 32 C11.4 25.5 12.5 21 17 20 Z"></path>
+      <path d="M10.3 8 C9.6 2.4 16.2 2.4 15.5 8 Z"></path>
+      <path d="M16.5 8.6 C15.9 3.1 21.8 3.1 21.2 8.6 Z"></path>
+      <circle cx="15.3" cy="14" r="8.4"></circle>
+      <path d="M13 17.8 C10.4 17.5 8.9 18.8 9.1 20.3 C9.3 21.8 11 22.1 12.7 21.3 C14.2 20.6 14.7 18.6 13 17.8 Z"></path>
+    </g>
+    <g class="squirrel-fur" fill={`url(#${gradientId})`}>
+      <ellipse class="squirrel-foot" cx="13.5" cy="43" rx="4.8" ry="2.3"></ellipse>
+      <path
+        class="squirrel-torso"
+        d="M17 20 C24 19 27.5 26 27.5 33 C27.5 40 23.5 43.5 18 43.5 C12.5 43.5 10.5 38 11 32 C11.4 25.5 12.5 21 17 20 Z"
+      ></path>
+      <path class="squirrel-ear" d="M10.3 8 C9.6 2.4 16.2 2.4 15.5 8 Z"></path>
+      <path class="squirrel-ear" d="M16.5 8.6 C15.9 3.1 21.8 3.1 21.2 8.6 Z"></path>
+      <circle class="squirrel-head" cx="15.3" cy="14" r="8.4"></circle>
+      <path
+        class="squirrel-muzzle"
+        d="M13 17.8 C10.4 17.5 8.9 18.8 9.1 20.3 C9.3 21.8 11 22.1 12.7 21.3 C14.2 20.6 14.7 18.6 13 17.8 Z"
+      ></path>
+    </g>
+    <path
+      class="squirrel-fur-shadow"
+      d="M12.5 38.5 C15.5 41.6 21 41.4 24.3 37.6 C23 40.6 19 43 17 43 C14 43 13 40.5 12.5 38.5 Z"
+    ></path>
+    <path class="squirrel-fur-highlight squirrel-fur-highlight-head" d="M13.5 6.6 C15.8 6 18.6 6.6 20.2 8.4"></path>
+    <path
+      class="squirrel-belly"
+      d="M14.2 25 C11.6 27.2 11.6 35 14.2 39.6 C15.5 41.9 18 41.2 18.4 36 C18.8 30.8 17.6 25.8 14.2 25 Z"
+    ></path>
+    <path class="squirrel-inner-ear" d="M11.4 6.9 C11 4.1 14.7 4.1 14.3 6.9 Z"></path>
+    <path class="squirrel-inner-ear" d="M17.5 7.5 C17.1 4.8 20.4 4.8 20 7.5 Z"></path>
+    <ellipse class="squirrel-cheek" cx="11.2" cy="16.8" rx="2.2" ry="1.7"></ellipse>
+    <path class="squirrel-brow" d="M12.5 9.3 C13.5 8.5 14.9 8.5 15.7 9.2"></path>
+    <g class="squirrel-whiskers">
+      <path d="M9 19.6 C6.8 19.1 5.6 18.9 4.6 19"></path>
+      <path d="M9 20.8 C6.8 20.9 5.6 21.2 4.7 21.6"></path>
+    </g>
+    <path class="squirrel-mouth" d="M9.4 21.1 C9.8 22.1 10.9 22.3 11.6 21.6"></path>
+    <g class="squirrel-eye">
+      <circle cx="14.5" cy="12" r="2.05"></circle>
+      <circle class="squirrel-eye-shine" cx="13.7" cy="11.2" r="0.65"></circle>
+      <circle class="squirrel-eye-shine squirrel-eye-shine-small" cx="15.3" cy="12.7" r="0.32"></circle>
+    </g>
+    <circle class="squirrel-nose" cx="9.2" cy="19.4" r="0.95"></circle>
+    <path
+      class="squirrel-acorn-nut"
+      d="M12.9 30.6 C12.9 29 17.6 29 17.6 30.6 C17.6 33.6 16.1 35.8 15.25 35.8 C14.4 35.8 12.9 33.6 12.9 30.6 Z"
+    ></path>
+    <path
+      class="squirrel-acorn-shine"
+      d="M13.6 30.4 C13.6 29.6 14.6 29.4 14.7 30.1 C14.8 31.8 14.3 33.4 13.9 33.4 C13.6 33.2 13.5 31.6 13.6 30.4 Z"
+    ></path>
+    <path
+      class="squirrel-acorn-cap-brim"
+      d="M12.2 30.4 C12.2 32 18.3 32 18.3 30.4 C18.3 28 12.2 28 12.2 30.4 Z"
+    ></path>
+    <path
+      class="squirrel-acorn-cap"
+      d="M12.5 29.9 C12.5 27.6 18 27.6 18 29.9 C18 30.9 12.5 30.9 12.5 29.9 Z"
+    ></path>
+    <path class="squirrel-acorn-stem" d="M15.25 27.7 L15.25 26.4"></path>
+    <path
+      class="squirrel-arm-outline"
+      d="M11 26.4 C8.9 27.6 8.6 30.4 10.2 32 C11.6 33.4 13.7 33 14 31.2 C14.2 29.6 13 26.4 11 26.4 Z"
+    ></path>
+    <path
+      class="squirrel-arm"
+      fill={`url(#${gradientId})`}
+      d="M11 26.4 C8.9 27.6 8.6 30.4 10.2 32 C11.6 33.4 13.7 33 14 31.2 C14.2 29.6 13 26.4 11 26.4 Z"
+    ></path>
+    <path
+      class="squirrel-arm-outline"
+      d="M19.5 26.4 C21.4 27.6 21.7 30.4 20.1 32 C18.7 33.4 16.6 33 16.3 31.2 C16.1 29.6 17.5 26.4 19.5 26.4 Z"
+    ></path>
+    <path
+      class="squirrel-arm"
+      fill={`url(#${gradientId})`}
+      d="M19.5 26.4 C21.4 27.6 21.7 30.4 20.1 32 C18.7 33.4 16.6 33 16.3 31.2 C16.1 29.6 17.5 26.4 19.5 26.4 Z"
+    ></path>
+  </g>
+</svg>
+
+<style>
+  /* Ported verbatim from frontend/src/index.css's "Animated CSS squirrel"
+     block so the marketing zone and the product app render the identical
+     mark. Transform/opacity only, so it runs on the compositor. */
+  .squirrel-outline,
+  .squirrel-arm-outline {
+    fill: #3b2a20;
+    stroke: #3b2a20;
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+  }
+
+  .squirrel-foot {
+    opacity: 0.85;
+  }
+
+  .squirrel-eye,
+  .squirrel-nose {
+    fill: #3b2a20;
+  }
+
+  .squirrel-eye-shine {
+    fill: #fff6ec;
+  }
+
+  .squirrel-belly {
+    fill: #ffe7c8;
+    opacity: 0.9;
+  }
+
+  .squirrel-inner-ear {
+    fill: #ffd0b0;
+  }
+
+  .squirrel-cheek {
+    fill: #fd80a9;
+    opacity: 0.45;
+  }
+
+  .squirrel-whiskers,
+  .squirrel-mouth,
+  .squirrel-brow {
+    fill: none;
+    stroke: #3b2a20;
+    stroke-linecap: round;
+  }
+
+  .squirrel-whiskers {
+    stroke-width: 0.4;
+    opacity: 0.5;
+  }
+
+  .squirrel-mouth {
+    stroke-width: 0.5;
+    opacity: 0.8;
+  }
+
+  .squirrel-brow {
+    stroke-width: 0.55;
+    opacity: 0.55;
+  }
+
+  .squirrel-eye-shine-small {
+    opacity: 0.85;
+  }
+
+  .squirrel-fur-shadow {
+    fill: #3b2a20;
+    opacity: 0.13;
+  }
+
+  .squirrel-fur-highlight {
+    fill: none;
+    stroke: #fff6ec;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    opacity: 0.4;
+  }
+
+  .squirrel-fur-highlight-head {
+    stroke-width: 1.1;
+    opacity: 0.3;
+  }
+
+  .squirrel-tail-texture {
+    fill: none;
+    stroke: #fff6ec;
+    stroke-width: 0.7;
+    stroke-linecap: round;
+    opacity: 0.32;
+  }
+
+  .squirrel-tail-texture-inner {
+    stroke-width: 0.55;
+    opacity: 0.24;
+  }
+
+  .squirrel-acorn-nut {
+    fill: #d98e4a;
+  }
+
+  .squirrel-acorn-shine {
+    fill: #f3c98a;
+    opacity: 0.7;
+  }
+
+  .squirrel-acorn-cap {
+    fill: #7a4a24;
+  }
+
+  .squirrel-acorn-cap-brim {
+    fill: #8a562c;
+  }
+
+  .squirrel-acorn-stem {
+    fill: none;
+    stroke: #6a3f1f;
+    stroke-width: 0.7;
+    stroke-linecap: round;
+  }
+
+  .squirrel {
+    transform-box: view-box;
+    transform-origin: 24px 40px;
+    animation: squirrel-bob 1.8s ease-in-out infinite;
+  }
+
+  .squirrel-tail-rig {
+    transform-box: view-box;
+    transform-origin: 25px 41px;
+    animation: squirrel-tail 1.4s ease-in-out infinite;
+  }
+
+  .squirrel-eye {
+    transform-box: view-box;
+    transform-origin: 14.5px 12px;
+    animation: squirrel-blink 3.4s ease-in-out infinite;
+  }
+
+  @keyframes squirrel-bob {
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(-2px);
+    }
+  }
+
+  @keyframes squirrel-tail {
+    0%,
+    100% {
+      transform: rotate(2deg);
+    }
+    50% {
+      transform: rotate(-8deg);
+    }
+  }
+
+  @keyframes squirrel-blink {
+    0%,
+    90%,
+    100% {
+      transform: scaleY(1);
+    }
+    95% {
+      transform: scaleY(0.1);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .squirrel,
+    .squirrel-tail-rig,
+    .squirrel-eye {
+      animation: none;
+    }
+  }
+</style>
