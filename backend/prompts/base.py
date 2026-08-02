@@ -32,19 +32,88 @@ logger = structlog.get_logger(__name__)
 # list in stage_manager.py, and the spec keep-list in prompt_builder.py all
 # updated in lockstep. Demo Day's spec contract is untouched (pinned
 # separately per the §4 regression contract).
-ASDD_PROMPT_VERSION = "asdd-v2.5.0"
+# v2.6.0 — 2026-08-02 density initiative: PROFESSIONAL_OUTPUT_RULES gains a
+# bullet against restated headings/preambles/self-summary ("every fact earns
+# its place"). Standard-mode only — DEMO_DAY_OUTPUT_RULES is a deliberate
+# sibling, not merged (see the comment above that block), and already carries
+# an equivalent breadth-trimming contract. Paired with per-stage scaffold
+# trims (spec/plan/tasks) and a lowered chunk length-target floor in
+# stage_manager.py. Per docs/evals/PROMPT_CHANGE_REVIEW.md: golden-corpus run
+# (`prompt_eval.run --version asdd-v2.6.0 --baseline asdd-v1.8.0`) exits 0 —
+# but that PASS is against the pre-existing golden_workspaces/ fixtures,
+# which were generated under the OLD prompts and were already stale before
+# this change (pinned at asdd-v1.8.0, missing headings both the pre- and
+# post-trim contracts added since). It proves this change's grader/format
+# edits don't crash or regress on old content; it does NOT validate the new
+# prompts' output quality. A live regeneration of the 3 golden workspaces
+# under these prompts, human quality review, and re-pinned baseline_scores.json
+# is a required follow-up before this version can be considered eval-verified
+# — deferred pending the user's go-ahead to spend the live-generation cost.
+# "AI slop" frontend remediation — only spec.py, plan.py, and tasks.py's own
+# bytes moved (a Constraints brand-personality line; Frontend Architecture's
+# design-system/design-tokens sub-bullets rewritten into a committed Visual
+# Identity with a named palette/type-pairing/signature + an explicit
+# generic-AI-default denylist, plus an Open-Questions carve-out so Plan commits
+# to a choice instead of deferring one; Frontend Architecture added to Tasks'
+# load-bearing Plan-refs list with a first-frontend-task token-system
+# requirement) — so ASDD_PROMPT_VERSION itself is unchanged and harness keeps
+# its prompt cache; only spec/plan/tasks bump below. Requires a golden-corpus
+# run before being considered eval-verified, per docs/evals/PROMPT_CHANGE_REVIEW.md.
+ASDD_PROMPT_VERSION = "asdd-v2.6.0"
 STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # spec-v5: audit M8 — the clarification Q&A block is now fenced with
     # wrap_untrusted_content instead of rendering user-typed answers raw in
     # the instruction region.
     # spec-v6: adds ## In-Scope (MVP) and ## User Stories to the required
     # structure, the stable-ID contract, and the verify checklist (v2.5.0).
-    "spec": f"{ASDD_PROMPT_VERSION}:spec-v6",
+    # spec-v7: density initiative (2026-08-02) — 25 sections -> 17. Merges:
+    # User Problems/Users and Personas -> Overview; Success Metrics -> Product
+    # Goals; User Journeys/User Flow Diagrams -> new User Flows;
+    # High-Level System Context/Feature Interaction Overview/Integrations and
+    # External Touchpoints -> new System Context; Permissions and Access
+    # Expectations -> Security, Privacy, and Abuse Expectations; Error
+    # Handling and Recovery -> Edge Cases. SECTION_CONTRACTS["spec"] and the
+    # spec chunk-scope lists in stage_manager.py updated in lockstep.
+    # spec-v8: "AI slop" frontend remediation — Constraints now requires one
+    # line naming the product's brand personality/emotional register as a
+    # named contrast (never a generic placeholder, never deferred to Open
+    # Questions) when the product is user-facing; grounds PLAN.md's Visual
+    # Identity decision. No section added/removed, so SECTION_CONTRACTS is
+    # unchanged.
+    "spec": f"{ASDD_PROMPT_VERSION}:spec-v8",
     # plan-v5: finding #7 — the hard-denylist sentence is now generated from
     # tech_safety_policy.json (render_hard_denylist_prose()) instead of
     # hand-duplicated, changing plan.py's own prompt text specifically.
-    "plan": f"{ASDD_PROMPT_VERSION}:plan-v5",
-    "harness": f"{ASDD_PROMPT_VERSION}:harness-v4",
+    # plan-v6: density initiative (2026-08-02) — 27(+1) sections -> 20(+1).
+    # Merges: Assumptions and Open Questions -> Planning Summary; Scalability
+    # and Performance -> Capacity Model; Risks and Mitigations -> FMEA;
+    # Directory and File Structure + Module Boundaries and Interfaces -> new
+    # Codebase Structure; Privacy and Data Handling -> Security Architecture;
+    # Testing Strategy + Rollout and Migration Plan -> Deployment and
+    # Operations. ## Prompt and AI Safety Controls deleted (never validated).
+    # SECTION_CONTRACTS["plan"] and the plan chunk-scope lists in
+    # stage_manager.py updated in lockstep (manually audited — see the
+    # WARNING comment there about the one-directional pinned test).
+    # plan-v7: "AI slop" frontend remediation — Frontend Architecture's
+    # "component architecture + design-system source; design tokens" sub-
+    # bullets are rewritten into a committed Visual Identity (5-6 named
+    # non-monochrome hex values with roles, a justified type pairing, one
+    # named layout/interaction signature) plus an explicit denylist of
+    # generic AI-default patterns (unmodified shadcn/Tailwind theme,
+    # Inter/system-ui only, purple-blue gradient hero, generic centered-card
+    # dashboards, decorative 01/02/03 numbering, purposeless animation).
+    # Planning rules gain a carve-out: Visual Identity is the one exception to
+    # "never invent" — it must be committed, never deferred to Open Questions
+    # or satisfied by naming a library's default theme. Still the same
+    # heading and still sentinel-gated/conditional (T-242 unchanged), so
+    # SECTION_CONTRACTS["plan"] itself is unchanged.
+    "plan": f"{ASDD_PROMPT_VERSION}:plan-v7",
+    # harness-v5: density initiative (2026-08-02) — tightened the two prose
+    # sections only (Harness Overview, Coverage Plan): one line/row per
+    # category instead of a paragraph, no restated-heading preambles. No
+    # section-count change; RTM/File Tree/Files and their length targets in
+    # stage_manager.py are untouched (file-count/test-code driven, not prose).
+    "harness": f"{ASDD_PROMPT_VERSION}:harness-v5",
     # tasks-v5: finding #8 — tasks.py now instructs acknowledgement of any
     # harness TestCategoryGap record (a task or Open Questions/Assumptions
     # entry naming the deferred category), closing the gap where known-
@@ -63,7 +132,24 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # the file-vs-`file::test` distinction C2 read. Only tasks.py's bytes moved,
     # so ASDD_PROMPT_VERSION is unchanged and the other three stages keep their
     # prompt caches.
-    "tasks": f"{ASDD_PROMPT_VERSION}:tasks-v7",
+    # tasks-v8: density initiative (2026-08-02) — task block fields 16 -> 9.
+    # Cut header fields (Estimated size, Risk, Owner) and cut body blocks
+    # (Description, Inputs, Outputs, Rollback / Recovery) were presence-
+    # checked only, no downstream join. Rollback/Recovery survives as an
+    # optional trailing Steps line for genuinely hard-to-reverse tasks only.
+    # artifact_validator.py's _task_issues required_fields updated in
+    # lockstep. Task count target (20-50) is untouched — that's substance,
+    # not presentation overhead.
+    # tasks-v9: "AI slop" frontend remediation — Frontend Architecture joins
+    # the load-bearing Plan-refs list (cited by ≥1 task whenever PLAN.md's
+    # copy is in scope, i.e. not "Not applicable"); the first frontend task
+    # must stand up the design-token system from PLAN.md's Visual Identity
+    # before any screen is built, and later frontend tasks' Acceptance
+    # Criteria must check they render using those tokens.
+    # standard_plan_linter.py's _STANDARD_PLAN_COVERAGE gains the matching
+    # entry (still un-enforced pending the golden-corpus gate, same as the
+    # other six load-bearing sections were when C4 first shipped).
+    "tasks": f"{ASDD_PROMPT_VERSION}:tasks-v9",
 }
 
 # Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md). Separate version
@@ -82,7 +168,13 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
 # keeps its breadth-trimming contract and did not inherit the M10 rewording).
 DEMO_DAY_PROMPT_VERSION = "demo-day-v2.2.0"
 DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
-    "spec": f"{DEMO_DAY_PROMPT_VERSION}:spec-v2",
+    # spec-v3: "AI slop" frontend remediation — Overview gains one clause
+    # naming the brand personality/emotional register (as a named contrast,
+    # never a placeholder) when the demo is browser-facing, so Demo Day's
+    # Plan has something to ground its new Frontend Architecture Visual
+    # Identity in instead of inventing or deferring it. No new heading, so
+    # DEMO_DAY_SECTION_CONTRACTS["spec"] is unchanged.
+    "spec": f"{DEMO_DAY_PROMPT_VERSION}:spec-v3",
     # plan-v3: demo-readiness gaps — adds the mandatory ## External Integrations
     # and Secrets section (per-service REAL/MOCKED stance, env-var credential
     # source, on-stage failure fallback) and folds four demo-day stages into
@@ -90,7 +182,19 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # seed dataset (Data Model), an explicit real/mocked/none auth stance
     # (Security Architecture), and demo-visible failure fallbacks (Risks). Only
     # the plan variant's bytes changed, so DEMO_DAY_PROMPT_VERSION is unmoved.
-    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v3",
+    # plan-v4: "AI slop" frontend remediation — adds a new ## Frontend
+    # Architecture section (Demo Day previously had none at all, the largest
+    # asymmetry against standard mode): a FROZEN Visual Identity — named
+    # non-monochrome hex palette, a justified type pairing, one signature
+    # element — with the same generic-AI-default denylist as standard mode,
+    # or "Not applicable because <reason>" for a non-browser-facing build.
+    # DEMO_DAY_SECTION_CONTRACTS["plan"] gains the matching entry (same
+    # heading string as standard, unconditionally listed but still honouring
+    # the "Not applicable" escape); demo_day_plan_linter.py's
+    # _DEMO_DAY_PLAN_COVERAGE and _PLAN_COVERAGE_NONE_ESCAPES gain the
+    # matching entries (still un-enforced pending the golden-corpus gate,
+    # same as the other four C6 sections).
+    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v4",
     "harness": f"{DEMO_DAY_PROMPT_VERSION}:harness-v2",
     # tasks-v3: the C6 plan_coverage join — `Plan refs` now names PLAN.md
     # sections and enumerates the four load-bearing ones (seed dataset, demo
@@ -99,7 +203,11 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # `path/to/test_file` sample did not, while C2 requires one to recognise a
     # path token). Only the tasks variant's bytes changed, so
     # DEMO_DAY_PROMPT_VERSION is unmoved.
-    "tasks": f"{DEMO_DAY_PROMPT_VERSION}:tasks-v3",
+    # tasks-v4: "AI slop" frontend remediation — Frontend Architecture (the
+    # design-token system) joins the enumerated load-bearing Plan-refs list
+    # (unless the plan wrote "Not applicable"), and the first frontend-
+    # touching task must set up those tokens before any screen is built.
+    "tasks": f"{DEMO_DAY_PROMPT_VERSION}:tasks-v4",
 }
 
 
@@ -212,6 +320,7 @@ Professional output rules:
 - State assumptions and open questions explicitly when information is missing; never silently fill critical product, security, legal, or data-retention gaps with risky guesses.
 - Every artifact MUST cover security, privacy, accessibility, observability, reliability, and abuse cases WITHIN its required structure: address each category in the mandated section(s) where it belongs (requirements, design sections, tests, or tasks — as the stage's own structure dictates), and do not invent extra headings beyond the stage's required section set to hold them. If a category is genuinely not applicable to the product, say so in one line where it would naturally be addressed — never silently drop a category.
 - Keep terminology stable: requirement IDs, API names, model names, file paths, and test names stay constant once introduced.
+- Every fact earns its place: no restated headings, no throat-clearing preambles, no "this section covers…", no summary of what was just said. State the identifier, the decision, or the assertion — not the fact that you are about to state it. This artifact is read by coding agents, not skimmed by humans end to end — density beats coverage-by-volume.
 """.strip()
 
 # A short, scoped injection-defense fragment for cheap/latency-sensitive judge

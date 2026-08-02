@@ -18,6 +18,7 @@ import pytest
 
 from services.pipeline import demo_day_plan_linter, standard_plan_linter
 from services.pipeline.artifact_validator import (
+    _CONDITIONAL_SECTIONS,
     DEMO_DAY_SECTION_CONTRACTS,
     REFUNDABLE_INCOMPLETE_CODES,
     SECTION_CONTRACTS,
@@ -132,6 +133,38 @@ def test_c6_honours_the_none_escape_for_external_integrations() -> None:
     tasks = _DD_TASKS.replace("External Integrations and Secrets, ", "")
     assert "None — the demo runs" in plan
     assert _dd_gaps(plan_md=plan, tasks_md=tasks) == []
+
+
+def test_c6_flags_a_frontend_architecture_no_task_implements() -> None:
+    """ "AI slop" remediation: a Visual Identity nothing builds is a real C6 gap."""
+    plan = _DD_PLAN + (
+        "\n## Frontend Architecture\nVisual Identity: #0B0E14 background, "
+        "#F5A623 primary. Space Grotesk headings, Inter body.\n"
+    )
+    gaps = _dd_gaps(plan_md=plan)
+    assert any("## Frontend Architecture" in gap for gap in gaps)
+
+
+def test_c6_frontend_architecture_cited_clears_the_gap() -> None:
+    plan = _DD_PLAN + (
+        "\n## Frontend Architecture\nVisual Identity: #0B0E14 background, "
+        "#F5A623 primary. Space Grotesk headings, Inter body.\n"
+    )
+    tasks = _DD_TASKS.replace(
+        "**Plan refs:** Data Model and Persistence, Environment and Bootstrap",
+        "**Plan refs:** Data Model and Persistence, Environment and Bootstrap, "
+        "Frontend Architecture",
+    )
+    assert _dd_gaps(plan_md=plan, tasks_md=tasks) == []
+
+
+def test_c6_honours_the_not_applicable_escape_for_frontend_architecture() -> None:
+    """A backend-only Demo Day build needs no frontend task."""
+    plan = _DD_PLAN + (
+        "\n## Frontend Architecture\nNot applicable because this is an "
+        "API-only demo with no UI.\n"
+    )
+    assert _dd_gaps(plan_md=plan) == []
 
 
 def test_c6_ignores_prose_mentions_outside_the_plan_refs_field() -> None:
@@ -382,6 +415,43 @@ def test_standard_c4_flags_a_product_nothing_deploys() -> None:
     )
 
 
+def test_standard_c4_flags_a_frontend_architecture_no_task_implements() -> None:
+    """ "AI slop" remediation: a committed Visual Identity nothing builds is a
+    real C4 gap — the same failure mode as Deployment and Operations above."""
+    plan = _STD_PLAN + (
+        "\n## Frontend Architecture\nVisual Identity: #0B0E14 background, "
+        "#F5A623 primary. Space Grotesk headings, Inter body.\n"
+    )
+    verdict = _std(plan=plan)
+    assert verdict.checks["C4"].passed is False
+    assert any("## Frontend Architecture" in gap for gap in verdict.checks["C4"].gaps)
+
+
+def test_standard_c4_frontend_architecture_cited_clears_the_gap() -> None:
+    plan = _STD_PLAN + (
+        "\n## Frontend Architecture\nVisual Identity: #0B0E14 background, "
+        "#F5A623 primary. Space Grotesk headings, Inter body.\n"
+    )
+    tasks = _STD_TASKS.replace(
+        "**Plan refs:** Data Model §things, API Design",
+        "**Plan refs:** Data Model §things, API Design, Frontend Architecture",
+    )
+    verdict = _std(plan=plan, tasks=tasks)
+    assert verdict.checks["C4"].passed is True
+
+
+def test_standard_c4_honours_the_not_applicable_escape_for_frontend_architecture() -> (
+    None
+):
+    """A backend-only product needs no frontend task."""
+    plan = _STD_PLAN + (
+        "\n## Frontend Architecture\nNot applicable because this is a "
+        "headless API product with no browser-facing surface.\n"
+    )
+    verdict = _std(plan=plan)
+    assert verdict.checks["C4"].passed is True
+
+
 def test_standard_c5_requires_a_task_to_cite_an_end_to_end_test() -> None:
     tasks = _STD_TASKS.replace(
         "`tests/e2e/test_journey.py::test_e2e_full_journey`", "`test_create_thing`"
@@ -433,13 +503,17 @@ def test_invariant_no_new_mandatory_section_heading() -> None:
         "## Tasks",
     ]
     # Every plan section the coverage checks join on is a REAL contract heading —
-    # a typo here would make the check silently vacuous rather than loud.
+    # a typo here would make the check silently vacuous rather than loud. Standard
+    # mode's union also includes the CONDITIONAL headings (T-242 Frontend
+    # Architecture): a section required only when its sentinel matches is still a
+    # real heading a plan can carry, just not an unconditional one.
     assert set(demo_day_plan_linter._DEMO_DAY_PLAN_COVERAGE) <= set(
         DEMO_DAY_SECTION_CONTRACTS["plan"]
     )
-    assert set(standard_plan_linter._STANDARD_PLAN_COVERAGE) <= set(
-        SECTION_CONTRACTS["plan"]
-    )
+    standard_plan_headings = set(SECTION_CONTRACTS["plan"]) | {
+        heading for _, heading in _CONDITIONAL_SECTIONS.get("plan", [])
+    }
+    assert set(standard_plan_linter._STANDARD_PLAN_COVERAGE) <= standard_plan_headings
 
 
 def test_invariant_critic_gains_no_new_finding_vocabulary() -> None:

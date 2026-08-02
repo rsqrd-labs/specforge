@@ -234,8 +234,9 @@ def test_empty_file_tree_still_reported():
 def test_demo_day_spec_is_not_scored_on_sections_its_contract_forbids():
     """``user_flow_coverage`` is not asked for or weighted in Demo Day.
 
-    ``DEMO_DAY_SECTION_CONTRACTS["spec"]`` has no User Journeys / User Flow
-    Diagrams section — Demo Day specifies exactly ONE happy path (Success Demo) —
+    ``DEMO_DAY_SECTION_CONTRACTS["spec"]`` has no User Flows section (standard's
+    merged User Journeys/User Flow Diagrams) — Demo Day specifies exactly ONE
+    happy path (Success Demo) —
     so a 0.15-weighted user-flow-coverage score docked every Demo Day spec for
     obeying its own contract.
     """
@@ -402,11 +403,6 @@ def test_non_harness_stages_keep_the_judge_coverage_field():
 # ---------------------------------------------------------------------------
 
 
-_STANDARD_DOCUMENT_TARGET = (
-    "Length target: 8,000-30,000 characters for this document chunk."
-)
-
-
 def test_whole_document_chunks_get_a_single_call_length_target():
     """Every Demo Day whole-document chunk is sized for one 240s call."""
     for stage in ("spec", "plan", "tasks"):
@@ -416,10 +412,10 @@ def test_whole_document_chunks_get_a_single_call_length_target():
         assert chunk.whole_document is True
         target = sm._chunk_length_target(stage, chunk)
         assert "30,000" in target
-        assert target != _STANDARD_DOCUMENT_TARGET
-        # The floor is untouched: this trims the unreachable head of the range,
-        # it is not a depth reduction.
-        assert "8,000" in target
+        # Density initiative (2026-08-02): the floor was lowered from 8,000 to
+        # 3,500 as a deliberate density lever — a per-call prose-budget change,
+        # not the depth floors (_min_body_chars etc.), which are untouched.
+        assert "3,500" in target
 
 
 def test_standard_document_chunks_fit_one_provider_call():
@@ -431,11 +427,11 @@ def test_standard_document_chunks_fit_one_provider_call():
         for chunk in chunks:
             assert chunk.whole_document is False
             target = sm._chunk_length_target(stage, chunk)
-            assert target == _STANDARD_DOCUMENT_TARGET
             assert "30,000" in target
-            # The floor is untouched: this trims the unreachable head of the
-            # range, it is not a depth reduction.
-            assert "8,000" in target
+            # Density initiative (2026-08-02): the floor was lowered from
+            # 8,000 to 3,500 — a per-call prose-budget lever, not a depth-floor
+            # reduction (_min_body_chars etc. are untouched).
+            assert "3,500" in target
 
 
 def test_no_non_harness_chunk_advertises_a_ceiling_past_the_measured_band():

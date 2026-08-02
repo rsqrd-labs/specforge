@@ -13,6 +13,16 @@ from prompt_eval.graders.common import make_result
 _PLAN_PROMPT_PATH = (
     Path(__file__).resolve().parents[3] / "backend" / "prompts" / "plan.py"
 )
+# backend/prompts/style_denylist.py holds the filler/hedge-phrase denylist
+# (density initiative) and its own FILLER_DENYLIST_LAST_REVIEWED anchor. Read
+# as source text for the same reason as _PLAN_PROMPT_PATH above: this grader
+# carries no runtime dependency on the backend package.
+_STYLE_DENYLIST_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "backend"
+    / "prompts"
+    / "style_denylist.py"
+)
 _TECH_SAFETY_POLICY_PATH = (
     Path(__file__).resolve().parents[3]
     / "backend"
@@ -21,6 +31,13 @@ _TECH_SAFETY_POLICY_PATH = (
     / "tech_safety_policy.json"
 )
 _REVIEW_DATE_RE = re.compile(r'DENYLIST_LAST_REVIEWED\s*=\s*"(\d{4}-\d{2}-\d{2})"')
+_FILLER_REVIEW_DATE_RE = re.compile(
+    r'FILLER_DENYLIST_LAST_REVIEWED\s*=\s*"(\d{4}-\d{2}-\d{2})"'
+)
+_FILLER_PHRASES_BLOCK_RE = re.compile(
+    r"FILLER_PHRASES\s*:\s*tuple\[str,\s*\.\.\.\]\s*=\s*\((.*?)\n\)", re.DOTALL
+)
+_QUOTED_LITERAL_RE = re.compile(r'"([^"]+)"')
 # Directive #8 budget: the denylist must be re-reviewed within 12 months.
 _FRESHNESS_BUDGET_MONTHS = 12
 
@@ -44,6 +61,41 @@ def _read_denylist_review_date() -> datetime.date | None:
         return datetime.date.fromisoformat(match.group(1))
     except ValueError:
         return None
+
+
+@lru_cache(maxsize=1)
+def _read_filler_denylist_review_date() -> datetime.date | None:
+    """Parse FILLER_DENYLIST_LAST_REVIEWED out of style_denylist.py source."""
+    try:
+        src = _STYLE_DENYLIST_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = _FILLER_REVIEW_DATE_RE.search(src)
+    if match is None:
+        return None
+    try:
+        return datetime.date.fromisoformat(match.group(1))
+    except ValueError:
+        return None
+
+
+@lru_cache(maxsize=1)
+def _read_filler_phrases() -> tuple[str, ...]:
+    """Parse the FILLER_PHRASES tuple out of style_denylist.py source.
+
+    Same read-as-text approach as the review-date parsers above — no runtime
+    import of the backend package. Returns an empty tuple if the file or the
+    tuple literal cannot be found (fail-open: banned_phrase_hit_count falls
+    back to its pre-existing pattern list).
+    """
+    try:
+        src = _STYLE_DENYLIST_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return ()
+    block = _FILLER_PHRASES_BLOCK_RE.search(src)
+    if block is None:
+        return ()
+    return tuple(_QUOTED_LITERAL_RE.findall(block.group(1)))
 
 
 @lru_cache(maxsize=1)
@@ -88,24 +140,33 @@ def denylist_freshness(
     artifact_md: str,
     deps: dict[str, str],
 ):
-    """quality: the T-241 deprecation denylist was reviewed within 12 months.
+    """quality: both denylists (T-241 deprecated-tech, filler-phrase) are fresh.
 
-    Phase 19 directive #8 — the denylist goes stale on its own clock (Python
-    EOLs pass, gpt-4/gemini-1.x deprecate). This grader reads the single
-    DENYLIST_LAST_REVIEWED anchor from backend/prompts/plan.py (the closest
-    machine-readable proxy for "the denylist's most recent entry", since the
-    denylist itself is undated prose) and fails (score 0.0) when it is more
-    than 12 months old, forcing a periodic re-review. It is artifact-
+    Phase 19 directive #8 — a denylist goes stale on its own clock (Python
+    EOLs pass, gpt-4/gemini-1.x deprecate; filler vocabulary drifts too). This
+    grader reads DENYLIST_LAST_REVIEWED from backend/prompts/plan.py and
+    FILLER_DENYLIST_LAST_REVIEWED from backend/prompts/style_denylist.py (the
+    closest machine-readable proxy for each list's most recent entry, since
+    both denylists are undated prose/tuples) and fails (score 0.0) if either
+    is more than 12 months old, forcing a periodic re-review. It is artifact-
     independent, returning the same score on every stage call.
     """
+    today = datetime.date.today()
     reviewed = _read_denylist_review_date()
-    score, findings = _score_denylist_freshness(reviewed, datetime.date.today())
+    dep_score, dep_findings = _score_denylist_freshness(reviewed, today)
+    filler_reviewed = _read_filler_denylist_review_date()
+    filler_score, filler_findings = _score_denylist_freshness(filler_reviewed, today)
     return make_result(
         name="denylist_freshness",
         axis="quality",
-        score=score,
-        findings=findings,
-        metadata={"last_reviewed": reviewed.isoformat() if reviewed else "unknown"},
+        score=min(dep_score, filler_score),
+        findings=dep_findings + filler_findings,
+        metadata={
+            "last_reviewed": reviewed.isoformat() if reviewed else "unknown",
+            "filler_last_reviewed": (
+                filler_reviewed.isoformat() if filler_reviewed else "unknown"
+            ),
+        },
     )
 
 
@@ -156,7 +217,7 @@ def banned_phrase_hit_count(
     artifact_md: str,
     deps: dict[str, str],
 ):
-    """quality: low-specificity and placeholder phrases are absent."""
+    """quality: low-specificity, placeholder, and filler phrases are absent."""
 
     patterns = [
         r"\bTBD\b",
@@ -168,6 +229,12 @@ def banned_phrase_hit_count(
         r"\bplaceholder\b",
         r"\bpass\s*(?:#.*)?$",
     ]
+    # Density initiative: the filler/hedge-phrase denylist in
+    # backend/prompts/style_denylist.py, parsed as source text (no runtime
+    # dependency on the backend package — see _read_filler_phrases).
+    patterns.extend(
+        r"\b" + re.escape(phrase) + r"\b" for phrase in _read_filler_phrases()
+    )
     hits: list[str] = []
     for pattern in patterns:
         hits.extend(
@@ -339,34 +406,98 @@ def fmea_presence(stage_type: str, artifact_md: str, deps: dict[str, str]):
     )
 
 
-def artifact_depth_pct(stage_type: str, artifact_md: str, deps: dict[str, str]):
-    """quality: generated artifacts retain enough body depth to avoid truncation."""
+_DEPTH_ID_RE = re.compile(
+    r"\b(?:FR|NFR|SEC|AC|US|RISK|OQ)-\d{3}(?:\.\d+)?\b|\bADR-\d+\b"
+)
+_DEPTH_TASK_ID_RE = re.compile(r"\bT-\d{3}\b")
+# A data row: pipe-delimited, and not a markdown table separator (---|---).
+_DEPTH_TABLE_ROW_RE = re.compile(r"^\s*\|(?!\s*:?-+:?\s*\|).+\|\s*$", re.MULTILINE)
+_DEPTH_FILE_HEADING_RE = re.compile(r"^#{2,3}\s*File:\s*\S+", re.MULTILINE)
+_DEPTH_H2_RE = re.compile(r"^##\s+\S", re.MULTILINE)
 
-    minimum_lines = {
-        "spec": 34,
-        "plan": 120,
-        "harness": 77,
-        "tasks": 66,
-    }.get(stage_type, 20)
-    meaningful_lines = [
-        line
-        for line in artifact_md.splitlines()
-        if line.strip() and not line.strip().startswith("<!--")
-    ]
-    score = min(1.0, len(meaningful_lines) / minimum_lines)
+
+def _substance_units(artifact_md: str) -> dict[str, int]:
+    """Count substance signals independent of prose length or line count.
+
+    Density initiative (2026-08-02): the density prompt change makes total
+    line count shrink even as substance holds, so the old fixed-line-count
+    floor would fail dense, complete output for being short — precisely the
+    outcome the density change is going after. This mirrors the precedent
+    ``_manifest_section_issue`` already set in artifact_validator.py (grading
+    ``## File Tree`` by path count, not prose length): count things that
+    correlate with real decision content — distinct requirement/decision/task
+    IDs (FR/NFR/SEC/AC/US/RISK/OQ/ADR/T-NNN), markdown table data rows, and
+    ``### File:`` blocks.
+
+    ``h2_headings`` is reported for visibility but deliberately EXCLUDED from
+    the gated total: ``validate_sections``/``MissingSectionError`` already
+    guarantees every required heading is present as a separate, terminal
+    gate, so counting headings here double-dips on a check that exists
+    elsewhere and — because every stage's heading count alone (e.g. spec's 17)
+    sits close to or above these floors — would let an artifact that is
+    nothing but empty headings and the bare-minimum ID floor score 1.0,
+    defeating the point of a depth gate. See
+    ``test_artifact_depth_pct_rejects_a_degenerate_shell`` in
+    ``harness/tests/backend/`` for the regression this guards against.
+    """
+    ids = set(_DEPTH_ID_RE.findall(artifact_md)) | set(
+        _DEPTH_TASK_ID_RE.findall(artifact_md)
+    )
+    return {
+        "distinct_ids": len(ids),
+        "table_rows": len(_DEPTH_TABLE_ROW_RE.findall(artifact_md)),
+        "file_blocks": len(_DEPTH_FILE_HEADING_RE.findall(artifact_md)),
+        "h2_headings": len(_DEPTH_H2_RE.findall(artifact_md)),
+    }
+
+
+# Substance-unit floors — a degenerate-output guard, not a padding reward.
+# Gated total = distinct_ids + table_rows + file_blocks (h2_headings excluded,
+# see _substance_units' docstring). Set above the bare structural minimum
+# already enforced elsewhere (_SPEC_MIN_ID_FLOORS: FR>=5/NFR>=3/AC>=3 = 11
+# distinct ids; _MIN_TASK_BLOCKS=6 T-NNN ids) so an artifact that clears ONLY
+# those pre-existing floors and nothing else still fails this one — proven by
+# test_artifact_depth_pct_rejects_a_degenerate_shell. NOT tuned against
+# live-generated output under the new prompts — the golden workspace fixtures
+# need a live regeneration + human quality review pass before
+# baseline_scores.json is re-pinned (see docs/evals/PROMPT_CHANGE_REVIEW.md),
+# which is a separate, explicitly deferred step; treat these as a starting
+# point, not a validated calibration.
+_SUBSTANCE_FLOORS: dict[str, int] = {
+    "spec": 18,
+    "plan": 20,
+    "harness": 14,
+    "tasks": 14,
+}
+
+
+def artifact_depth_pct(stage_type: str, artifact_md: str, deps: dict[str, str]):
+    """quality: generated artifacts retain enough substance to avoid truncation.
+
+    Replaces the old fixed-line-count floor (a prose-volume proxy the density
+    initiative deliberately makes a worse and worse signal) with a
+    substance-token count: distinct FR/NFR/SEC/AC/US/RISK/OQ/ADR/T-NNN IDs,
+    markdown table data rows, and ``### File:`` blocks (heading count is
+    tracked but excluded from the gate — see ``_substance_units``). A
+    short-but-dense artifact that answers every ID in a table row instead of
+    a paragraph now scores the same as a verbose one that says the same thing
+    at 3x the length — which is the whole point of the density change.
+    """
+    floor = _SUBSTANCE_FLOORS.get(stage_type, 14)
+    units = _substance_units(artifact_md)
+    gated_total = units["distinct_ids"] + units["table_rows"] + units["file_blocks"]
+    score = min(1.0, gated_total / floor) if floor else 1.0
     findings = []
     if score < 1.0:
         findings.append(
-            f"{stage_type} artifact has {len(meaningful_lines)} meaningful lines; "
-            f"expected at least {minimum_lines}."
+            f"{stage_type} artifact has {gated_total} substance units "
+            f"(ids={units['distinct_ids']}, table_rows={units['table_rows']}, "
+            f"file_blocks={units['file_blocks']}); expected at least {floor}."
         )
     return make_result(
         name="artifact_depth_pct",
         axis="quality",
         score=score,
         findings=findings,
-        metadata={
-            "meaningful_lines": len(meaningful_lines),
-            "minimum_lines": minimum_lines,
-        },
+        metadata={"substance_units": gated_total, "minimum_units": floor, **units},
     )

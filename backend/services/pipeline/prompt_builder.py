@@ -66,6 +66,11 @@ _STAGE_KEEP_SECTIONS: dict[str, list[str]] = {
         "## API Design",
         "## Security Architecture",
         "## Data Model and Persistence",
+        # Tasks must be able to cite it (tasks.py's load-bearing Plan-refs
+        # list, "AI slop" frontend remediation) — a plan big enough to trigger
+        # this compression path must not starve the one section that carries
+        # the committed color/type/signature tokens.
+        "## Frontend Architecture",
     ],
     "harness": [
         "## Requirement-to-Test Matrix",
@@ -95,6 +100,9 @@ _DEMO_DAY_STAGE_KEEP_SECTIONS: dict[str, list[str]] = {
         # compression into the downstream harness/tasks prompts.
         "## External Integrations and Secrets",
         "## Security Architecture",
+        # Tasks must be able to cite it ("AI slop" frontend remediation) —
+        # same reasoning as the standard keep-list above.
+        "## Frontend Architecture",
     ],
     "harness": [
         "## Requirement-to-Test Matrix",

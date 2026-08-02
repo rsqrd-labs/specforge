@@ -46,7 +46,7 @@ Organise tasks into `## Phase N: <Name>` headings, typically: Infrastructure and
 Core Business Logic → API Layer → Security Controls → Frontend (if applicable) → Observability → Testing and
 Hardening → Deployment and Operations. Add or merge phases as the product requires; do not skip mandated phases.
 
-Each task uses this exact format:
+Each task uses this exact format (9 fields — dense, not exhaustive):
 
 ### T-NNN: Task Title
 
@@ -58,7 +58,8 @@ Each task uses this exact format:
   how the plan and the task list are joined. Across the whole task list, every one of these load-bearing plan
   sections MUST be cited by at least one task: API Design, Data Model and Persistence, Authentication and
   Authorization, Security Architecture, Error Handling and Recovery, Observability and Audit Logging,
-  Deployment and Operations. A section with no task is a designed capability nothing builds.
+  Deployment and Operations, and — whenever PLAN.md's Frontend Architecture is in scope (not "Not applicable") —
+  Frontend Architecture itself. A section with no task is a designed capability nothing builds.
 **Harness refs:** `path/to/test_file.py::TestClass::test_method` (all tests that must pass when this task is
   complete; for setup-only tasks with no harness test write `_(none — <brief reason>)_`)
 **Priority:** MUST / SHOULD / COULD — exactly one. MUST = cannot ship without it; SHOULD = strongly desired in V1
@@ -66,35 +67,20 @@ Each task uses this exact format:
 **Estimate:** S / M / L / XL — exactly one, on the focused-session scale (a session ≈ 1–4h): S = ≤ 2h,
   M = 2–4h (one full session), L = 4–8h (a full day — split it if any coherent split exists), XL = more than a
   day (only for genuinely indivisible work; otherwise split). Informational; feeds Effort Summary.
-**Estimated size:** XS / S / M / L — expected DIFF size and review scope per the Task Sizing Legend. This is
-  code-review effort, not time; it is independent of Estimate and uses its own letter scale.
-**Risk:** Low / Medium / High — one phrase explaining why
-**Owner:** Backend / Frontend / Full-stack / DevOps / QA / Security / Data
-
-**Description**
-One paragraph: what this builds, why it is needed now (not later), and the codebase state after it completes.
-
-**Inputs**
-Files to create/modify, config values to add, env vars to set, upstream task outputs required.
-
-**Outputs**
-New files, files modified (with what changed), DB changes (tables/columns), API endpoints exposed, environment
-changes, tests that should move from failing to passing.
 
 **Steps**
 Numbered single-action steps, each referencing the exact file path, class, function, or SQL — e.g. "Create
 `src/models/user.py`"; "Add column `email_verified BOOLEAN NOT NULL DEFAULT FALSE` to the users table". Include
-any code-generation, migration, formatting, or doc update as its own step.
+any code-generation, migration, formatting, or doc update as its own step. Only for a task that is genuinely
+hard to reverse (a migration, a destructive data change, an external-service side effect) add one trailing step
+naming the concrete rollback/recovery action — most tasks need no such step (a code-only change reverts with
+`git revert`, which is not worth stating).
 
 **Acceptance Criteria**
 Numbered verifiable outcomes — exact commands or named manual checks, e.g. "`pytest harness/tests/unit/
 test_user_model.py -v` passes"; "navigating to /login shows the login form". No "it works correctly". Include
 ≥ 1 harness test command per task unless explicitly setup-only; setup-only tasks use another concrete command
 (lint, migration, typecheck, or CI config validation).
-
-**Rollback / Recovery**
-Concrete rollback/recovery for migrations, config, feature flags, external services, or operational changes.
-"Not applicable" only for pure code tasks with no state/config/runtime impact.
 
 **Dependencies**
 Comma-separated earlier task IDs that must complete first. The first Phase-1 tasks have none.
@@ -129,6 +115,12 @@ Task design rules:
   or an RTL role-based query that fails when the semantic role is missing). If the task adds a runtime dependency,
   Acceptance Criteria MUST include the bundle-size delta in KB gzipped (ceiling +15 KB/task; if exceeded, reference
   the PLAN.md Frontend Architecture bundle-budget entry that justifies it).
+- When Frontend Architecture is in scope, the FIRST frontend task establishes the design-token system verbatim
+  from PLAN.md's Visual Identity sub-bullet (the color system as CSS variables/theme config, the type pairing,
+  the spacing/radius primitives) before any other frontend task starts — a screen built before the tokens exist
+  will invent its own, generic ones. Every later frontend task's Acceptance Criteria MUST include a check that it
+  renders using those tokens (e.g. "no raw hex/px values outside the token file — computed styles read the
+  themed color/font values"), not only the existing accessibility/bundle-size assertions.
 """  # nosec B608
 
 
@@ -177,24 +169,6 @@ Example — a well-formed task (different product; do not copy into your output)
     `tests/security/test_security.py::TestSubscriptionAuth::test_cancel_requires_auth`
   **Priority:** MUST
   **Estimate:** M
-  **Estimated size:** M
-  **Risk:** Medium — incorrect state transition could allow continued billing
-  **Owner:** Backend
-
-  **Description**
-  Implement DELETE /subscriptions/{{id}} transitioning an active subscription to grace_period and enqueuing a
-  cancellation receipt email. Idempotent: cancelling an already-cancelled subscription returns 200 with state
-  unchanged. Depends on the subscription model (T-008) and email queue (T-010).
-
-  **Inputs**
-  - `src/models/subscription.py` from T-008 — Subscription with state enum
-  - `src/services/email_service.py` from T-010 — enqueue_cancellation_email()
-
-  **Outputs**
-  - Modified: `src/routers/subscriptions.py` — DELETE handler added
-  - Modified: `src/services/subscription_service.py` — cancel() method added
-  - Tests passing: TestCancellation::test_cancel_transitions_to_grace_period,
-    TestSubscriptionAuth::test_cancel_requires_auth
 
   **Steps**
   1. Add `cancel(subscription_id: UUID, actor_id: UUID) -> Subscription` to
@@ -202,15 +176,13 @@ Example — a well-formed task (different product; do not copy into your output)
      call email_service.enqueue_cancellation_email(); return unchanged if already grace_period/cancelled.
   2. Add `DELETE /subscriptions/{{id}}` handler to `src/routers/subscriptions.py`. Require auth. Raise 404 if not
      found or not owned by caller. Call cancel(). Return 200.
+  3. Rollback: `UPDATE subscriptions SET state='active', cancelled_at=NULL WHERE id='<id>'` (state change is in
+     the DB; email queue entries are deduped by subscription_id).
 
   **Acceptance Criteria**
   1. `pytest tests/integration/test_subscriptions.py::TestCancellation -v` passes.
   2. `pytest tests/security/test_security.py::TestSubscriptionAuth::test_cancel_requires_auth -v` passes.
   3. Repeat DELETE returns 200 with unchanged state (TestCancellation::test_cancel_idempotent).
-
-  **Rollback / Recovery**
-  State change is in the DB. To undo: `UPDATE subscriptions SET state='active', cancelled_at=NULL WHERE id='<id>'`.
-  Email queue entries are deduped by subscription_id.
 
   **Dependencies**
   T-008, T-010, T-012
@@ -226,13 +198,13 @@ Example — a well-formed task (different product; do not copy into your output)
 Before returning, verify (internal — do not include a checklist in your output):
 - Every FR/NFR/SEC/AC-NNN the spec commits to is referenced by ≥ 1 task's **Spec refs** field. Appearing only in the Traceability Overview is NOT sufficient — that table documents an ID, a Spec refs entry is what makes a task responsible for building it. (Requirements the spec itself defers under Out of Scope / Non-Goals are excluded.)
 - Every harness test path appears in ≥ 1 task's Harness refs, using the exact path from the harness artifact. Citing a whole test FILE claims every test in it; cite `file::test_name` when a task makes only one of them pass.
-- Every load-bearing plan section (API Design, Data Model and Persistence, Authentication and Authorization, Security Architecture, Error Handling and Recovery, Observability and Audit Logging, Deployment and Operations) is named in ≥ 1 task's Plan refs.
+- Every load-bearing plan section (API Design, Data Model and Persistence, Authentication and Authorization, Security Architecture, Error Handling and Recovery, Observability and Audit Logging, Deployment and Operations, and Frontend Architecture when in scope) is named in ≥ 1 task's Plan refs.
 - At least one task's Harness refs cites the end-to-end/journey test that exercises the product end to end.
 - The Effort Summary counts match the emitted task blocks exactly (N total, MUST/SHOULD/COULD, size/estimate buckets).
 - Every task has ≥ 1 Acceptance Criterion with an exact runnable command (pytest, curl, or named smoke step).
 - No task's Dependencies lists a higher T-NNN — the graph is acyclic; security control and data/migration tasks precede what depends on them.
 - Every dependency-adding task carries the three Acceptance Criteria (SCA exit-0 with no critical/high CVEs, version-pin matching PLAN.md Technology Stack, non-Deprecated/non-EOL Support status).
-- Every Frontend/Full-stack task has Steps for loading + error + empty states and ≥ 1 accessibility assertion in Acceptance Criteria.
+- Every Frontend/Full-stack task has Steps for loading + error + empty states and ≥ 1 accessibility assertion in Acceptance Criteria; when Frontend Architecture is in scope, the first frontend task establishes the design-token system and every later frontend task's Acceptance Criteria checks it uses those tokens.
 - Every harness `TestCategoryGap` record has an explicit acknowledgement in TASKS.md — a task or an Open Questions/Assumptions entry naming the category and the affected requirement IDs.
 
 Return only TASKS.md. No preamble, commentary, or summary."""  # nosec B608
