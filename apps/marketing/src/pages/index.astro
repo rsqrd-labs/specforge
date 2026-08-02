@@ -5,6 +5,7 @@
 // Phase 1). The SPA Landing stays as the in-app fallback.
 import BaseLayout from "../layouts/BaseLayout.astro"
 import SiteFooter from "../components/SiteFooter.astro"
+import SquirrelMark from "../components/SquirrelMark.astro"
 import FaqSection from "../components/content/FaqSection.astro"
 import { SIGN_IN_URL, CONTENT_HUBS } from "../consts"
 import { siteJsonLd, faqPageSchema } from "../lib/seo"
@@ -95,7 +96,7 @@ const audiences = [
       <header class="landing-nav">
         <span class="brand-lockup" role="img" aria-label="Thought2Build">
           <span class="brand-logo brand-logo--default" aria-hidden="true">
-            <img class="brand-logo-image" src="/brand/squirrel-mark.png" alt="" />
+            <SquirrelMark class="brand-logo-image" />
           </span>
           <span class="brand-wordmark" aria-hidden="true">Thought2Build</span>
         </span>

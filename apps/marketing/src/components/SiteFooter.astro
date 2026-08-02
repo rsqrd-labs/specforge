@@ -4,6 +4,7 @@
 // internal-link graph is complete (Phase-6 reachability). Carries the
 // standardized entity sentence once, in body copy (not as a meta description).
 import { CONTENT_HUBS, SIGN_IN_URL, ENTITY_DESCRIPTION, SITE_NAME } from "../consts"
+import SquirrelMark from "./SquirrelMark.astro"
 
 const year = new Date().getFullYear()
 ---
@@ -12,7 +13,7 @@ const year = new Date().getFullYear()
   <div class="site-footer-top">
     <div class="site-footer-brand">
       <a href="/" class="site-footer-logo" aria-label="Thought2Build home">
-        <img src="/brand/squirrel-mark.png" alt="" width="32" height="32" />
+        <SquirrelMark width={32} height={32} />
         <strong>Thought2Build</strong>
       </a>
       <p>{ENTITY_DESCRIPTION}</p>

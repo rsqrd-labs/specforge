@@ -4,6 +4,7 @@
 // from every page (Phase-6 "no orphaned routes"). The homepage keeps its own
 // bespoke hero header, so this is used only on the content/hub chrome.
 import { CONTENT_HUBS, SIGN_IN_URL } from "../consts"
+import SquirrelMark from "./SquirrelMark.astro"
 
 interface Props {
   /** Path of the active hub, to mark the current nav item. */
@@ -15,7 +16,7 @@ const { active } = Astro.props
 
 <header class="site-header">
   <a href="/" class="site-header-brand" aria-label="Thought2Build home">
-    <img src="/brand/squirrel-mark.png" alt="" width="28" height="28" />
+    <SquirrelMark width={28} height={28} />
     <span>Thought2Build</span>
   </a>
   <nav class="site-header-nav" aria-label="Content">
