@@ -1783,46 +1783,74 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
     ``stage_retry_min_remaining_seconds``), so a too-ambitious target burns the
     whole deadline and delivers nothing.
 
-    Every non-harness target is therefore the SAME 30,000-character ceiling,
+    Every non-harness target is therefore the SAME 24,000-character ceiling,
     whether the chunk is a slice or the whole artifact. The earlier 80,000
-    figure was justified as a *slice* target — standard spec/plan/tasks are 3-4
-    chunks, so no single call was expected to fill it — but the string is
+    figure was justified as a *slice* target — standard spec/plan/tasks are
+    3-4 chunks, so no single call was expected to fill it — but the string is
     appended to the prompt of the call actually being made, and it advertises
-    that number for THAT call. What supplies total document length is the chunk
-    split, not a per-call ceiling no single call can reach inside the bound.
+    that number for THAT call. What supplies total document length is the
+    chunk split, not a per-call ceiling no single call can reach inside the
+    bound.
 
-    30,000 is derived from measurement, not from a target we would like to hit.
-    On 2026-07-30 (generation 65fe5f10) two parallel Opus 5 spec chunks were
-    both killed at exactly 180,000ms having produced 6,821 and 7,521 visible
-    output tokens: **~38 tok/s at effort=medium**, so 240s of the raised
-    ``stage_provider_call_timeout_seconds`` buys ~9K tokens ≈ 32,000 characters
-    at a dense 3.5 chars/token. 30,000 sits just inside that with margin for a
-    slower call. The successive 80,000 and 55,000 ceilings were both derived
-    from an assumed ~15-18K-token band that no one had ever measured, and both
-    were unreachable — the first by ~3x, the second by ~2x. Advertising a
-    ceiling the model cannot reach inside the bound is what runs the clock out.
+    24,000 is derived from measurement, with margin, not from a target we
+    would like to hit. On 2026-07-30 (generation 65fe5f10) two parallel Opus 5
+    spec chunks were both killed at exactly 180,000ms having produced 6,821
+    and 7,521 visible output tokens: **~38 tok/s at effort=medium**. A first
+    revision of this fix targeted ~32,000 characters (the full 240s of
+    ``stage_provider_call_timeout_seconds``, ~94% of the cap) — the prior
+    30,000 figure — but that is only ~6% margin against a single measurement:
+    any call landing even slightly under 38 tok/s (provider latency variance,
+    a denser prompt, more reasoning overhead) still blows the cap on chunk #1,
+    which is exactly the failure this fix exists to stop. 24,000 chars targets
+    ~180s of the 240s budget instead — **25% margin** — at the same 3.5
+    chars/token density. The successive 80,000 and 55,000 ceilings were both
+    derived from an assumed ~15-18K-token band that no one had ever measured
+    and were both unreachable inside the bound. Advertising a ceiling the
+    model cannot reach inside the bound is what runs the clock out.
+
+    The harness CONTRACT chunk (below) deliberately keeps a HIGHER ceiling,
+    30,000 (the same ~6%-margin figure the other chunks moved away from), not
+    24,000. It shares the same chunk-#1/240s exposure in principle, but two
+    things distinguish it: (1) there is no measured incident of a harness
+    contract chunk ever hitting the watchdog — 65fe5f10 was a spec chunk, and
+    (2) unlike spec/plan/tasks, this chunk is not prose the model can pad or
+    tighten at will. Its ``## Requirement-to-Test Matrix`` is enumeration —
+    one row per upstream FR/NFR/SEC/AC, hard-gated ("missing one ID fails the
+    HARNESS") — and that same matrix is what
+    ``artifact_validator.harness_coverage_ratio`` parses into the deterministic
+    coverage number driving the coverage chip, the CoveragePanel gap list, and
+    the paid patch. A large spec's matrix can legitimately need more room than
+    24,000 leaves; truncating it doesn't fail loud like a watchdog kill, it
+    silently drops rows and corrupts coverage%. 30,000 gives that headroom
+    while still being reachable (~225s of the 240s cap) rather than the prior
+    45,000, which needed ~338s and was unreachable by design regardless of
+    content shape.
 
     The lower bound of the target (below) is a density lever, deliberately
     distinct from the depth floors (``_min_body_chars``, the task/requirement-
     id minimums), which are untouched: those are advisory correctness floors
     on the FINAL artifact, while this is prompt guidance for one call's prose
-    budget. A standard spec is 3 chunks, so the document as a whole is still
-    budgeted well above any floor even at the lower per-chunk target.
+    budget. A standard spec is 3 chunks, and harness's own floor is 60-90
+    chars, so the document as a whole is still budgeted well above any floor
+    even at the lower per-chunk target.
 
-    The two branches stay separate because ``whole_document`` chunks carry the
-    ENTIRE artifact in one call (Demo Day's ``demo-full``; see
-    ``_demo_day_chunk_specs_for_stage``, which keeps every stage single-pass on
-    purpose to avoid cross-chunk FR/AC/T-NNN drift) and so get the extra
-    substance instruction. That branch is keyed on ``chunk.whole_document`` — a
-    structural property — rather than the ``"demo-full"`` key string, for the
-    same reason ``_is_harness_files_chunk`` is: the two modes name their chunks
-    differently, and key-string matching is exactly what silently excluded Demo
-    Day from the harness Files budget.
+    The two non-harness branches stay separate because ``whole_document``
+    chunks carry the ENTIRE artifact in one call (Demo Day's ``demo-full``;
+    see ``_demo_day_chunk_specs_for_stage``, which keeps every stage
+    single-pass on purpose to avoid cross-chunk FR/AC/T-NNN drift) and so get
+    the extra substance instruction. That branch is keyed on
+    ``chunk.whole_document`` — a structural property — rather than the
+    ``"demo-full"`` key string, for the same reason ``_is_harness_files_chunk``
+    is: the two modes name their chunks differently, and key-string matching
+    is exactly what silently excluded Demo Day from the harness Files budget.
 
-    The harness is deliberately exempt: its Files chunk emits runnable code
-    whose length is set by the promised file list rather than by prose depth,
-    and it has its own budget (49,152 tokens) and its own 180,000-character
-    bound.
+    The harness Files chunk is exempt from this reasoning entirely: it emits
+    runnable code whose length is set by the promised file list rather than by
+    prose depth, and it has its own budget (49,152 tokens) and its own
+    180,000-character bound. The harness CONTRACT chunk (chunk #1, both
+    standard and Demo Day) is in scope but at its own, higher ceiling — see
+    above — because it is enumeration-shaped, not prose-shaped like every
+    other chunk #1.
     """
     if _is_harness_files_chunk(stage_type, chunk):
         return (
@@ -1830,17 +1858,23 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
             "the complete chunk below 180,000 characters."
         )
     if stage_type == "harness":
-        return "Length target: 3,000-45,000 characters for this contract chunk."
+        return (
+            "Length target: 3,000-30,000 characters for this contract chunk. "
+            "The Requirement-to-Test Matrix and File Tree are enumeration, not "
+            "prose — never drop a requirement row or a promised file to fit "
+            "the target; trim the Overview/Coverage Plan prose first if space "
+            "is tight."
+        )
     if chunk.whole_document:
         return (
-            "Length target: 3,500-30,000 characters for this complete document. "
+            "Length target: 3,500-24,000 characters for this complete document. "
             "Every required section must be substantive and dense — spend the "
             "budget on concrete IDs, decisions, and assertions, never on "
             "preamble, restated headings, or filler. Shorter and denser beats "
             "longer and padded; do not pad toward the upper bound."
         )
     return (
-        "Length target: 3,500-30,000 characters for this document chunk. "
+        "Length target: 3,500-24,000 characters for this document chunk. "
         "Shorter and denser beats longer and padded; do not pad toward the "
         "upper bound — every sentence must earn its place (see Professional "
         "output rules)."

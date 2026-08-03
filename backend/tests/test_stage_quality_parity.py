@@ -397,9 +397,10 @@ def test_non_harness_stages_keep_the_judge_coverage_field():
 # THAT call, i.e. ~20K output tokens, past the ~15-18K dense-chunk band that
 # fits at effort=medium. Timing out is strictly worse than finishing short: the
 # retry lands on the mid tier with less time left than the first attempt had.
-# Both shapes therefore carry the same 30,000-character ceiling; the whole
-# artifact's length comes from the chunk split, not from a per-call ceiling no
-# single call can reach inside the bound.
+# Both shapes therefore carry the same 24,000-character ceiling (25% margin
+# under the 240s provider-call cap, down from the ~6%-margin 30,000 figure);
+# the whole artifact's length comes from the chunk split, not from a per-call
+# ceiling no single call can reach inside the bound.
 # ---------------------------------------------------------------------------
 
 
@@ -411,7 +412,7 @@ def test_whole_document_chunks_get_a_single_call_length_target():
         chunk = chunks[0]
         assert chunk.whole_document is True
         target = sm._chunk_length_target(stage, chunk)
-        assert "30,000" in target
+        assert "24,000" in target
         # Density initiative (2026-08-02): the floor was lowered from 8,000 to
         # 3,500 as a deliberate density lever — a per-call prose-budget change,
         # not the depth floors (_min_body_chars etc.), which are untouched.
@@ -427,7 +428,7 @@ def test_standard_document_chunks_fit_one_provider_call():
         for chunk in chunks:
             assert chunk.whole_document is False
             target = sm._chunk_length_target(stage, chunk)
-            assert "30,000" in target
+            assert "24,000" in target
             # Density initiative (2026-08-02): the floor was lowered from
             # 8,000 to 3,500 — a per-call prose-budget lever, not a depth-floor
             # reduction (_min_body_chars etc. are untouched).
@@ -442,8 +443,9 @@ def test_no_non_harness_chunk_advertises_a_ceiling_past_the_measured_band():
         for stage in ("spec", "plan", "tasks"):
             for chunk in sm._chunk_specs_for_stage(stage, mode):
                 target = sm._chunk_length_target(stage, chunk)
-                assert "30,000" in target, (mode, stage, chunk.key, target)
+                assert "24,000" in target, (mode, stage, chunk.key, target)
                 assert "80,000" not in target, (mode, stage, chunk.key, target)
+                assert "30,000" not in target, (mode, stage, chunk.key, target)
 
 
 def test_harness_length_targets_are_not_affected_by_the_whole_document_rule():
@@ -464,6 +466,45 @@ def test_harness_length_targets_are_not_affected_by_the_whole_document_rule():
             "harness", files
         )
         assert "contract chunk" in sm._chunk_length_target("harness", contract)
+        # The matrix/tree are enumeration, not a prose budget to trim.
+        assert "never drop a requirement row" in sm._chunk_length_target(
+            "harness", contract
+        )
+
+
+def test_every_chunk_one_ceiling_stays_at_or_below_a_reachable_figure():
+    """The regression guard the harness contract chunk should have caught the
+    first time: when the spec/plan/tasks ceiling was tightened from 80,000 to
+    30,000 to fit inside the 240s provider-call cap, the harness contract chunk
+    (also always chunk #1, same watchdog, same cap) was left at 45,000 —
+    unreachable by design (~338s of output at measured throughput). This test
+    walks every chunk-1-shaped target across both stage sets and both modes
+    and pins each to a ceiling that is actually reachable inside the 240s cap.
+
+    The harness contract chunk deliberately keeps a HIGHER (less-margin)
+    reachable ceiling than spec/plan/tasks — 30,000 vs 24,000 — because unlike
+    them it is enumeration-shaped (Requirement-to-Test Matrix, File Tree)
+    rather than prose the model can freely tighten, and there is no measured
+    incident of this specific chunk overrunning the watchdog. Both figures
+    must stay reachable; neither may drift back toward the unreachable 45,000/
+    80,000 band a future edit might reintroduce.
+    """
+    non_harness_ceiling = "24,000"
+    harness_ceiling = "30,000"
+    for mode in ("standard", "demo_day"):
+        for stage in ("spec", "plan", "tasks"):
+            for chunk in sm._chunk_specs_for_stage(stage, mode):
+                target = sm._chunk_length_target(stage, chunk)
+                assert non_harness_ceiling in target, (mode, stage, chunk.key, target)
+                assert "45,000" not in target, (mode, stage, chunk.key, target)
+        contract = next(
+            c
+            for c in sm._chunk_specs_for_stage("harness", mode)
+            if c.required_heading != "## Files"
+        )
+        target = sm._chunk_length_target("harness", contract)
+        assert harness_ceiling in target, (mode, "harness", contract.key, target)
+        assert "45,000" not in target, (mode, "harness", contract.key, target)
 
 
 def test_length_target_keys_on_structure_not_the_demo_full_key_string():
@@ -475,7 +516,7 @@ def test_length_target_keys_on_structure_not_the_demo_full_key_string():
         "Generate the complete artifact.",
         whole_document=True,
     )
-    assert "30,000" in sm._chunk_length_target("spec", renamed)
+    assert "24,000" in sm._chunk_length_target("spec", renamed)
 
 
 def test_demo_day_single_call_chunks_skip_the_anthropic_cache_write():

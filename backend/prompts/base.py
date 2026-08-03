@@ -80,7 +80,14 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # Questions) when the product is user-facing; grounds PLAN.md's Visual
     # Identity decision. No section added/removed, so SECTION_CONTRACTS is
     # unchanged.
-    "spec": f"{ASDD_PROMPT_VERSION}:spec-v8",
+    # spec-v9: chunk-1 refund fix — the per-chunk length target (whole-document
+    # and slice branches, stage_manager.py's _chunk_length_target) drops
+    # 30,000 -> 24,000 characters. 30,000 was only ~6% margin under the 240s
+    # provider-call cap at measured Opus-5 throughput; a call landing under the
+    # single measured 38 tok/s still overran the watchdog on chunk #1, which
+    # zeroes out resumability and refunds the credit outright. No section or
+    # depth-floor change.
+    "spec": f"{ASDD_PROMPT_VERSION}:spec-v9",
     # plan-v5: finding #7 — the hard-denylist sentence is now generated from
     # tech_safety_policy.json (render_hard_denylist_prose()) instead of
     # hand-duplicated, changing plan.py's own prompt text specifically.
@@ -107,13 +114,29 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # or satisfied by naming a library's default theme. Still the same
     # heading and still sentinel-gated/conditional (T-242 unchanged), so
     # SECTION_CONTRACTS["plan"] itself is unchanged.
-    "plan": f"{ASDD_PROMPT_VERSION}:plan-v7",
+    # plan-v8: chunk-1 refund fix — same 30,000 -> 24,000 length-target drop as
+    # spec-v9, same reasoning (25% margin under the 240s provider-call cap
+    # instead of ~6%).
+    "plan": f"{ASDD_PROMPT_VERSION}:plan-v8",
     # harness-v5: density initiative (2026-08-02) — tightened the two prose
     # sections only (Harness Overview, Coverage Plan): one line/row per
     # category instead of a paragraph, no restated-heading preambles. No
     # section-count change; RTM/File Tree/Files and their length targets in
     # stage_manager.py are untouched (file-count/test-code driven, not prose).
-    "harness": f"{ASDD_PROMPT_VERSION}:harness-v5",
+    # harness-v6: chunk-1 refund fix — the CONTRACT chunk's length target
+    # (always chunk #1) drops 45,000 -> 30,000 characters. 45,000 needed ~338s
+    # against the 240s provider-call cap — unreachable by design, not
+    # marginal, and this chunk was never covered by the spec/plan/tasks
+    # 80,000 -> 30,000 fix that preceded it. 30,000 (~225s, ~6% margin), not
+    # the 24,000 spec/plan/tasks got, because there is no measured incident of
+    # this chunk timing out and its content (Requirement-to-Test Matrix, File
+    # Tree) is enumeration keyed to upstream spec size, not prose depth the
+    # model can pad or tighten at will — squeezing it risks silently dropping
+    # a requirement row instead of a loud watchdog kill. Added an explicit
+    # "never drop a row/file to fit the target" instruction for the same
+    # reason. The Files chunk (chunk #2, its own 49,152-token /
+    # 180,000-char budget) is untouched.
+    "harness": f"{ASDD_PROMPT_VERSION}:harness-v6",
     # tasks-v5: finding #8 — tasks.py now instructs acknowledgement of any
     # harness TestCategoryGap record (a task or Open Questions/Assumptions
     # entry naming the deferred category), closing the gap where known-
@@ -149,7 +172,9 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # standard_plan_linter.py's _STANDARD_PLAN_COVERAGE gains the matching
     # entry (still un-enforced pending the golden-corpus gate, same as the
     # other six load-bearing sections were when C4 first shipped).
-    "tasks": f"{ASDD_PROMPT_VERSION}:tasks-v9",
+    # tasks-v10: chunk-1 refund fix — same 30,000 -> 24,000 length-target drop
+    # as spec-v9/plan-v8.
+    "tasks": f"{ASDD_PROMPT_VERSION}:tasks-v10",
 }
 
 # Demo Day mode (docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md). Separate version
@@ -174,7 +199,11 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # Plan has something to ground its new Frontend Architecture Visual
     # Identity in instead of inventing or deferring it. No new heading, so
     # DEMO_DAY_SECTION_CONTRACTS["spec"] is unchanged.
-    "spec": f"{DEMO_DAY_PROMPT_VERSION}:spec-v3",
+    # spec-v4: chunk-1 refund fix — Demo Day's spec is single-chunk
+    # whole_document=True ("demo-full"), so it hits the same
+    # _chunk_length_target whole-document branch as standard's spec-v9;
+    # 30,000 -> 24,000 characters, same 25%-margin reasoning.
+    "spec": f"{DEMO_DAY_PROMPT_VERSION}:spec-v4",
     # plan-v3: demo-readiness gaps — adds the mandatory ## External Integrations
     # and Secrets section (per-service REAL/MOCKED stance, env-var credential
     # source, on-stage failure fallback) and folds four demo-day stages into
@@ -194,8 +223,17 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # _DEMO_DAY_PLAN_COVERAGE and _PLAN_COVERAGE_NONE_ESCAPES gain the
     # matching entries (still un-enforced pending the golden-corpus gate,
     # same as the other four C6 sections).
-    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v4",
-    "harness": f"{DEMO_DAY_PROMPT_VERSION}:harness-v2",
+    # plan-v5: chunk-1 refund fix — same whole_document 30,000 -> 24,000 drop
+    # as spec-v4, same reasoning.
+    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v5",
+    # harness-v3: chunk-1 refund fix — Demo Day's contract chunk
+    # ("demo-harness-contract") hits the same harness branch of
+    # _chunk_length_target as standard's harness-v6; 45,000 -> 30,000
+    # characters (not 24,000 — see the harness-v6 comment above: no measured
+    # timeout on this chunk, and its RTM/File Tree content is enumeration, not
+    # prose, so it keeps more headroom). The Files chunk ("demo-harness-files")
+    # is untouched.
+    "harness": f"{DEMO_DAY_PROMPT_VERSION}:harness-v3",
     # tasks-v3: the C6 plan_coverage join — `Plan refs` now names PLAN.md
     # sections and enumerates the four load-bearing ones (seed dataset, demo
     # surface, external integrations, auth stance) that a task must cite, and
@@ -207,7 +245,9 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # design-token system) joins the enumerated load-bearing Plan-refs list
     # (unless the plan wrote "Not applicable"), and the first frontend-
     # touching task must set up those tokens before any screen is built.
-    "tasks": f"{DEMO_DAY_PROMPT_VERSION}:tasks-v4",
+    # tasks-v5: chunk-1 refund fix — same whole_document 30,000 -> 24,000 drop
+    # as spec-v4/plan-v5, same reasoning.
+    "tasks": f"{DEMO_DAY_PROMPT_VERSION}:tasks-v5",
 }
 
 
