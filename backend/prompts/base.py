@@ -70,7 +70,13 @@ logger = structlog.get_logger(__name__)
 # with no per-stage-only exception. Cache-busting every stage's Langfuse
 # prompt-cache entry for a harness-only content change is the known, accepted
 # cost of satisfying that gate rather than special-casing it.
-ASDD_PROMPT_VERSION = "asdd-v2.7.0"
+# v2.8.0 — Demo Day restricted-environment + tiered time-budget support
+# (DEMO_DAY_PROMPT_VERSION v2.3.0 below). Standard-mode prompt content is
+# byte-identical; bumped only because .github/workflows/prompt-eval.yml's
+# "Check ASDD_PROMPT_VERSION bump" gate fails closed on any diff under
+# backend/prompts/ regardless of which mode it touches (same rationale as
+# v2.7.0 above).
+ASDD_PROMPT_VERSION = "asdd-v2.8.0"
 STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # spec-v5: audit M8 — the clarification Q&A block is now fenced with
     # wrap_untrusted_content instead of rendering user-typed answers raw in
