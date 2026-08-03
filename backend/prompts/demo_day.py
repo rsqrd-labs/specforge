@@ -23,11 +23,122 @@ from prompts.base import (
     wrap_untrusted_content,
 )
 
-# Shared Demo Day directive block. Encodes the two distinct claims (kept apart),
-# the ruthless-scope / walking-skeleton / green-after-every-task protocol, the
-# zero-provisioning bias (open decision §11.1, confirmed), and the parse-stable
-# identifier contract every stage must honour.
-DEMO_DAY_DIRECTIVE = """
+# Time-budget tiers (Fix 1). `sprint` is the untouched default: unset or any
+# value at/under 6h renders byte-identical text to the original ~5h-only
+# directive (the regression pin every existing workspace relies on). Bigger
+# budgets deepen the SAME one happy path (more edge cases, more tasks, richer
+# NFR/security) rather than adding features — see the tier-text dict below —
+# and deliberately do NOT change any per-call character/token ceiling
+# (`_chunk_length_target`/`_chunk_output_budget` in stage_manager.py are
+# untouched by this file). That ceiling was tuned to a 25% margin against the
+# 240s provider-call watchdog (commit 1118c6d); widening it per-tier would
+# reintroduce the exact chunk-1 timeout/refund bug that commit fixed.
+_SPRINT_MAX_MINUTES = 360  # 6h
+_EXTENDED_MAX_MINUTES = 720  # 12h
+# Mirrors demo_day_plan_linter.DEMO_DAY_DEFAULT_BUDGET_MINUTES (a separate
+# constant in a different layer — pinned equal by test_demo_day_phase1.py so
+# the two cannot silently drift apart).
+_DEFAULT_BUDGET_MINUTES = 300
+
+
+def _resolved_budget_minutes(time_budget_minutes: int | None) -> int:
+    return (
+        time_budget_minutes
+        if time_budget_minutes and time_budget_minutes > 0
+        else _DEFAULT_BUDGET_MINUTES
+    )
+
+
+def _budget_hours(time_budget_minutes: int | None) -> int:
+    return max(1, round(_resolved_budget_minutes(time_budget_minutes) / 60))
+
+
+def _time_budget_tier(time_budget_minutes: int | None) -> str:
+    minutes = _resolved_budget_minutes(time_budget_minutes)
+    if minutes <= _SPRINT_MAX_MINUTES:
+        return "sprint"
+    if minutes <= _EXTENDED_MAX_MINUTES:
+        return "extended"
+    return "full_day"
+
+
+# The second half of directive point 2, tier-specific. `sprint`'s text is
+# byte-identical to the original single-tier wording.
+_BUDGET_BULLET_TIER_TEXT = {
+    "sprint": (
+        "Their real job is to force scope DOWN to where the package is small "
+        "enough to be fully verified."
+    ),
+    "extended": (
+        "At this larger budget the SAME one happy path goes deeper — more edge "
+        "cases, richer NFR/security coverage, more tasks — packed into the SAME "
+        "per-call length budget as the 5-hour case through density (terser task "
+        "blocks, no restated context), never through longer prose. Their real "
+        "job is still to force scope down to what is small enough to be fully "
+        "verified, just measured against a bigger number."
+    ),
+    "full_day": (
+        "At this largest budget the build is still ONE cohesive happy path, "
+        "never multiple features, pushed to its most robust form: thorough "
+        "edge-case/error-state handling, deeper NFR/security depth, and at most "
+        "a couple of secondary flows that still serve the one product story. "
+        "This still fits the SAME per-call length budget as the 5-hour case — "
+        "more tasks and AC's, each terser, never a longer document. Their real "
+        "job is still to force scope down to what is small enough to be fully "
+        "verified, just measured against a bigger number."
+    ),
+}
+
+# Fix 2: the default, unrestricted zero-provisioning *preference* — unchanged
+# text, byte-identical to the original directive when restricted_environment
+# is False (the regression pin).
+_ZERO_PROVISIONING_CLAUSE = """- Zero-provisioning bias. Prefer stacks that need no external provisioning to run the
+  end-to-end test (SQLite / in-process / externals mocked at the boundary) so the test
+  is environment-independent and the guarantee survives the handoff. Only when the idea
+  genuinely needs an external service, document the single exact setup step in the
+  plan's Environment and Bootstrap section.""".strip()
+
+# The hard-constraint form, used when restricted_environment=True (a hackathon
+# venue that disallows installing Docker/admin software). Leads with an
+# explicit, standalone, unmissable sentence naming Docker before generalizing
+# to VMs/sudo/system packages, so a model skimming the directive can't miss
+# it — advisor review flagged that "Docker/containers/VMs" buried mid-list is
+# too easy to skim past.
+_RESTRICTED_ENVIRONMENT_CLAUSE = """- Locked-down environment. Docker is NOT available in this environment — do not use
+  Docker, docker-compose, a Dockerfile, or any container runtime anywhere in this
+  package, including as an optional/alternate setup path. More broadly: no VMs, no
+  sudo/admin installs, no new system packages. Dependencies only via the language's
+  user-space package manager (pip/uv, npm/pnpm, cargo, go get). Persistence only via
+  SQLite/file-based storage. If the idea genuinely needs infrastructure unavailable in
+  this environment, substitute an in-process/file-based equivalent and document the
+  substitution in Assumptions — never fall back to Docker or assume root access.""".strip()
+
+
+def _demo_day_directive(
+    time_budget_minutes: int | None = None,
+    restricted_environment: bool = False,
+) -> str:
+    """Shared Demo Day directive block. Encodes the two distinct claims (kept
+
+    apart), the ruthless-scope / walking-skeleton / green-after-every-task
+    protocol, the zero-provisioning bias (or, when ``restricted_environment``
+    is set, a hard no-Docker/no-admin-install constraint — §11.1 confirmed,
+    hardened for locked-down hackathon environments), and the parse-stable
+    identifier contract every stage must honour.
+
+    Both parameters default to the original single-tier behavior, so any
+    caller that doesn't pass them renders byte-identical text to before this
+    function existed (the regression pin).
+    """
+    hours = _budget_hours(time_budget_minutes)
+    tier = _time_budget_tier(time_budget_minutes)
+    budget_clause = _BUDGET_BULLET_TIER_TEXT[tier]
+    provisioning_clause = (
+        _RESTRICTED_ENVIRONMENT_CLAUSE
+        if restricted_environment
+        else _ZERO_PROVISIONING_CLAUSE
+    )
+    return f"""
 Demo Day mode — what you are producing:
 The user will hand this Spec/Plan/Harness/Tasks package to their own coding agent
 (Claude Code or Codex), implement the tasks one at a time, and arrive at a WORKING
@@ -39,9 +150,8 @@ prototype they can demo. Two distinct promises — keep them separate, never con
    internally consistent: every task maps to a test, every Acceptance Criterion maps
    to a test, the task order is acyclic, and at least one unmockable end-to-end smoke
    test exists and is green from the first slice.
-2. The ~5-hour budget (advisory only): per-task minute estimates and their sum are
-   calibration, never a certified property. Their real job is to force scope DOWN to
-   where the package is small enough to be fully verified.
+2. The ~{hours}-hour budget (advisory only): per-task minute estimates and their sum are
+   calibration, never a certified property. {budget_clause}
 
 Operating principles for every Demo Day artifact:
 - Narrow the SCOPE ruthlessly, but never the DETAIL. "Demo Day" means ONE happy path,
@@ -60,11 +170,7 @@ Operating principles for every Demo Day artifact:
 - Walking skeleton first. The thinnest end-to-end slice runs and is green before any
   feature depth is added; every later task keeps the app runnable and the smoke test
   green.
-- Zero-provisioning bias. Prefer stacks that need no external provisioning to run the
-  end-to-end test (SQLite / in-process / externals mocked at the boundary) so the test
-  is environment-independent and the guarantee survives the handoff. Only when the idea
-  genuinely needs an external service, document the single exact setup step in the
-  plan's Environment and Bootstrap section.
+{provisioning_clause}
 - Anti-gimmick honesty. The rubric sections (AI Usage, Security Posture, Scalability
   Story) answer the standard demo-day questions truthfully and concretely: name the
   credible cheap-now choice (with the specific model/library/control) AND the honest
@@ -85,6 +191,12 @@ Parse-stable identifier contract (a downstream verifier joins on these EXACT tok
   section with a stable file path, and the final task's `Harness refs:` cite that exact
   path.
 """.strip()
+
+
+# Default rendering (sprint tier, unrestricted) — kept as a module constant
+# for backward compatibility with call sites that reference the assembled
+# directive text directly rather than the function.
+DEMO_DAY_DIRECTIVE = _demo_day_directive()
 
 # Deliberately a sibling of base.PROFESSIONAL_OUTPUT_RULES, NOT that block plus
 # an addendum (the audit's "merge into one base + addendum" hygiene suggestion
@@ -115,20 +227,26 @@ Demo Day output discipline:
 """.strip()
 
 
-def _demo_day_system_prompt(role_and_structure: str) -> str:
+def _demo_day_system_prompt(
+    role_and_structure: str,
+    time_budget_minutes: int | None = None,
+    restricted_environment: bool = False,
+) -> str:
+    directive = _demo_day_directive(time_budget_minutes, restricted_environment)
     return f"""{ASDD_METHODOLOGY_OVERVIEW}
 
 {SECURITY_AND_PRIVACY_RULES}
 
 {DEMO_DAY_OUTPUT_RULES}
 
-{DEMO_DAY_DIRECTIVE}
+{directive}
 
 {role_and_structure}"""
 
 
-_SPEC_ROLE = """Role: You are Thought2Build's Demo Day spec architect. Produce a SPEC.md that defines
-the single working prototype the user will build and demo in ~5 hours, plus the three
+def _spec_role(hours: int = 5) -> str:
+    return f"""Role: You are Thought2Build's Demo Day spec architect. Produce a SPEC.md that defines
+the single working prototype the user will build and demo in ~{hours} hours, plus the three
 rubric sections judges ask about. Narrow the scope to one happy path, but make that path
 unambiguous: name concrete behaviours, inputs, and observable outcomes. Stay
 implementation-neutral on HOW (no API design, schema, or file paths — those belong in
@@ -172,8 +290,26 @@ Required SPEC.md structure (every section mandatory, in this order):
   with a concrete one-line mitigation or decision owner — not generic project risks."""
 
 
-_PLAN_ROLE = """Role: You are Thought2Build's Demo Day architect. Turn the Demo Day SPEC into an
-implementation-ready PLAN.md a coding agent can build in ~5 hours WITHOUT guessing. The
+_SPEC_ROLE = _spec_role()
+
+
+def _plan_role(hours: int = 5, restricted_environment: bool = False) -> str:
+    tech_stack_note = (
+        " This build targets a locked-down environment (no Docker, no admin/sudo "
+        "installs) — every layer's version must be installable and runnable via the "
+        "language's own user-space package manager alone."
+        if restricted_environment
+        else ""
+    )
+    env_bootstrap_note = (
+        " This build targets a locked-down environment: every command here MUST be "
+        "runnable without Docker, sudo, or any admin/system-level install step — "
+        "Docker is NOT available."
+        if restricted_environment
+        else ""
+    )
+    return f"""Role: You are Thought2Build's Demo Day architect. Turn the Demo Day SPEC into an
+implementation-ready PLAN.md a coding agent can build in ~{hours} hours WITHOUT guessing. The
 plan is narrow (one happy path) but must be deep: every interface, schema, file, and
 command the build needs is specified here, concretely. If a task would have to invent a
 name, a type, a path, or a shape, the plan has under-specified it. Freeze the interfaces
@@ -186,7 +322,7 @@ Required PLAN.md structure (every section mandatory, in this order):
   depth. Include a concrete component/data-flow sketch and name the driving requirements.
 - ## Technology Stack — a table with PINNED exact versions; one line of agent-affinity
   rationale per layer; prefer zero-provisioning choices (e.g. SQLite, in-process) so the
-  e2e test needs no external service. No "latest" — give the version string.
+  e2e test needs no external service. No "latest" — give the version string.{tech_stack_note}
 - ## Requirement Traceability Matrix — a table mapping every `FR-NNN`/`AC-NNN` to its
   concrete design response and the named harness test that will verify it. A missing
   upstream ID is a defect.
@@ -214,7 +350,7 @@ Required PLAN.md structure (every section mandatory, in this order):
   required, document the single setup step here with the exact command/value. State the
   DEMO SURFACE on one line: either `local` (the exact command that serves the demo and the
   URL/port it opens on) or ONE one-click deploy target (the exact deploy command and the
-  resulting URL). One place the demo runs — no multi-environment promotion, no IaC.
+  resulting URL). One place the demo runs — no multi-environment promotion, no IaC.{env_bootstrap_note}
 - ## Architecture Decision Records — RUBRIC narrative: 3–5 ADRs, each naming the decision,
   the cheap-now choice, the credible alternative rejected and why, and how it
   scales/secures (the demo-day answer). Concrete, not platitudes.
@@ -244,7 +380,18 @@ Required PLAN.md structure (every section mandatory, in this order):
   screen."""
 
 
-_HARNESS_ROLE = """Role: You are Thought2Build's Demo Day test architect. Produce an executable HARNESS that
+_PLAN_ROLE = _plan_role()
+
+
+def _harness_role(restricted_environment: bool = False) -> str:
+    harness_overview_note = (
+        " This build targets a locked-down environment: the run/setup command(s) here "
+        "MUST NOT invoke Docker, docker-compose, a Dockerfile, podman, sudo, or any "
+        "admin/system-level install step — Docker is NOT available."
+        if restricted_environment
+        else ""
+    )
+    return f"""Role: You are Thought2Build's Demo Day test architect. Produce an executable HARNESS that
 is the FROZEN contract store and the test oracle. The end-to-end smoke test is the
 guarantee-bearing test — it must be unmockable, exercise the Success Demo journey, and be
 green from the first slice. Every `FR-NNN`/`AC-NNN` gets a named test; tests are
@@ -255,7 +402,7 @@ test a coding agent cannot run as written is worse than no test.
 Required HARNESS structure (every section mandatory, in this order):
 - ## Harness Overview — strategy, target stack, the exact command(s) to run the suite,
   and the deterministic setup (zero-provisioning where possible). Be runnable: the reader
-  copies the command and the suite executes.
+  copies the command and the suite executes.{harness_overview_note}
 - ## Frozen Interface Contracts — the single source of truth all tasks point at: the
   interface shapes from the plan, restated concretely as the contract tests assert them
   (exact signatures, paths, request/response fields, types).
@@ -274,7 +421,26 @@ Required HARNESS structure (every section mandatory, in this order):
   elided bodies, no omitted files — if it is in the File Tree, its full content is here."""
 
 
-_TASKS_ROLE = """Role: You are Thought2Build's Demo Day engineering lead. Produce a TASKS.md a coding agent
+_HARNESS_ROLE = _harness_role()
+
+
+_TASK_COUNT_HINT_BY_TIER = {
+    "sprint": "",
+    "extended": (
+        " At this budget, aim for roughly 8-12 tasks — each still small and atomic; more "
+        "tasks, not longer ones."
+    ),
+    "full_day": (
+        " At this budget, aim for roughly 12-16 tasks (a deliberate ceiling — this stays "
+        "ONE cohesive path, never multiple features, and each task stays small and atomic "
+        "so this document's per-call length budget is unaffected)."
+    ),
+}
+
+
+def _tasks_role(hours: int = 5, tier: str = "sprint") -> str:
+    task_count_hint = _TASK_COUNT_HINT_BY_TIER[tier]
+    return f"""Role: You are Thought2Build's Demo Day engineering lead. Produce a TASKS.md a coding agent
 executes one task at a time to reach a working prototype: walking skeleton first, the app
 runnable and the end-to-end smoke test GREEN after every task. Tasks are atomic,
 topologically ordered, and small — but each task's Steps must be concrete enough to
@@ -284,8 +450,8 @@ coding agent could misinterpret is under-specified. Preserve every upstream
 `FR-NNN`/`AC-NNN`, plan contract, and harness test path verbatim.
 
 Required TASKS.md structure (every section mandatory, in this order):
-- ## Effort Summary — include the line `Estimated build time: ~Xh (target ≤ 5h)` where X
-  is the sum of the per-task `Estimated minutes` divided by 60. Note it is advisory.
+- ## Effort Summary — include the line `Estimated build time: ~Xh (target ≤ {hours}h)` where X
+  is the sum of the per-task `Estimated minutes` divided by 60. Note it is advisory.{task_count_hint}
 - ## Build Order — the ordered list of `T-NNN` ids: the walking skeleton first, then the
   vertical slices; state that the app is green after each.
 - ## Traceability Overview — table: each `FR-NNN`/`AC-NNN` → harness test → the task(s)
@@ -308,7 +474,7 @@ Required TASKS.md structure (every section mandatory, in this order):
   tasks with no test use `_(none — <brief reason>)_`
 **Priority:** MUST / SHOULD / COULD
 **Estimate:** S / M / L
-**Estimated minutes:** <integer> (advisory; the sum feeds the ~5h budget)
+**Estimated minutes:** <integer> (advisory; the sum feeds the ~{hours}h budget)
 **Precondition:** earlier `T-NNN` ids that must exist first, or `none`
 
 **Steps**
@@ -337,12 +503,7 @@ Task rules:
   ad hoc values."""
 
 
-_STAGE_ROLES: dict[str, str] = {
-    "spec": _SPEC_ROLE,
-    "plan": _PLAN_ROLE,
-    "harness": _HARNESS_ROLE,
-    "tasks": _TASKS_ROLE,
-}
+_TASKS_ROLE = _tasks_role()
 
 # Remote-prompt names mirror the standard ones with a `.demo_day` qualifier so a
 # Langfuse override can target a Demo Day variant independently; the local
@@ -356,9 +517,54 @@ _REMOTE_PROMPT_NAMES: dict[str, str] = {
 }
 
 
-async def get_system_prompt(stage_type: str) -> str:
-    role = _STAGE_ROLES[stage_type]
-    fallback = _demo_day_system_prompt(role)
+def _role_for(
+    stage_type: str,
+    time_budget_minutes: int | None,
+    restricted_environment: bool,
+) -> str:
+    """Tier/environment-aware role text for one of the four Demo Day stages.
+
+    Defaults (``time_budget_minutes=None``, ``restricted_environment=False``)
+    reproduce the original single-tier ``_SPEC_ROLE``/``_PLAN_ROLE``/
+    ``_HARNESS_ROLE``/``_TASKS_ROLE`` constants exactly (the regression pin —
+    each is itself computed by calling its role function with these same
+    defaults, so the two can never drift).
+
+    spec/plan/tasks vary by tier (the hour horizon, the tasks task-count hint);
+    plan/harness vary by restricted_environment (the point each artifact actually
+    writes setup/run commands — plan's Technology Stack/Environment and Bootstrap,
+    harness's Harness Overview). The harness role never mentions the hour budget,
+    so `hours`/tier has no effect on it, but restricted_environment does.
+
+    There is no dict-based fallback here on purpose: every caller passes one of
+    the four known stage types, and a dead fallback branch is exactly what let
+    the heading-contract tests grade a stale snapshot (`_STAGE_ROLES`, removed)
+    instead of this live dispatch — see docs/evals/PROMPT_CHANGE_REVIEW.md's
+    note on keeping contract tests bound to the code path generation actually
+    runs.
+    """
+    hours = _budget_hours(time_budget_minutes)
+    tier = _time_budget_tier(time_budget_minutes)
+    if stage_type == "spec":
+        return _spec_role(hours)
+    if stage_type == "plan":
+        return _plan_role(hours, restricted_environment)
+    if stage_type == "tasks":
+        return _tasks_role(hours, tier)
+    if stage_type == "harness":
+        return _harness_role(restricted_environment)
+    raise ValueError(f"unknown Demo Day stage_type: {stage_type!r}")
+
+
+async def get_system_prompt(
+    stage_type: str,
+    time_budget_minutes: int | None = None,
+    restricted_environment: bool = False,
+) -> str:
+    role = _role_for(stage_type, time_budget_minutes, restricted_environment)
+    fallback = _demo_day_system_prompt(
+        role, time_budget_minutes, restricted_environment
+    )
     return await load_prompt(_REMOTE_PROMPT_NAMES[stage_type], fallback)
 
 
@@ -371,13 +577,17 @@ async def get_system_prompt(stage_type: str) -> str:
 # still pending its live golden-corpus gate, so these prompts must not drift
 # until that lands. Presence of the sentence in every builder is CI-enforced by
 # tests/test_prompt_fragment_contracts.py.
-def _spec_user_prompt(dependencies: dict[str, str]) -> str:
+def _spec_user_prompt(
+    dependencies: dict[str, str],
+    hours: int = 5,
+    restricted_environment: bool = False,  # noqa: ARG001 — uniform signature, unused here
+) -> str:
     problem_statement = dependencies.get("problem_statement", "")
     wrapped_problem = wrap_untrusted_content("problem_statement", problem_statement)
     research_block = render_research_block(dependencies.get("research_context", ""))
     return f"""Produce a lean Demo Day SPEC.md for the problem statement below.
 
-Ruthlessly scope to ONE working happy path buildable in ~5 hours; push everything else to
+Ruthlessly scope to ONE working happy path buildable in ~{hours} hours; push everything else to
 ## Out of Scope. Use `FR-NNN` and `AC-NNN` identifiers; every `AC-NNN` lives in the
 ## Acceptance Criteria section and references ≥1 `FR-NNN`.
 
@@ -402,9 +612,21 @@ Before returning, verify (internal — do not include in output):
 Return only SPEC.md. No preamble, commentary, or summary."""
 
 
-def _plan_user_prompt(dependencies: dict[str, str]) -> str:
+def _plan_user_prompt(
+    dependencies: dict[str, str],
+    hours: int = 5,  # noqa: ARG001 — uniform signature, unused here
+    restricted_environment: bool = False,
+) -> str:
     wrapped_spec = wrap_untrusted_content("spec_content", dependencies.get("spec", ""))
     research_block = render_research_block(dependencies.get("research_context", ""))
+    restricted_check = (
+        "\n- No Docker/docker-compose/Dockerfile/podman/sudo/system-package-install "
+        "commands appear anywhere in ## Technology Stack or ## Environment and "
+        "Bootstrap — this build targets a locked-down environment with no admin "
+        "rights and no container runtime."
+        if restricted_environment
+        else ""
+    )
     return f"""Produce a lean, implementation-ready Demo Day PLAN.md from the spec below.
 
 Freeze the interfaces in ## Interface Contracts (the seams every task points at). Bias to
@@ -437,15 +659,26 @@ Before returning, verify (internal — do not include in output):
 - If the build is browser-facing, ## Frontend Architecture names a specific non-monochrome
   hex palette, a type pairing, and a signature element — not an Open Question and not an
   unmodified component-library default theme; otherwise it states "Not applicable because
-  <reason>" in one line.
+  <reason>" in one line.{restricted_check}
 
 Return only PLAN.md. No preamble, commentary, or summary."""
 
 
-def _harness_user_prompt(dependencies: dict[str, str]) -> str:
+def _harness_user_prompt(
+    dependencies: dict[str, str],
+    hours: int = 5,  # noqa: ARG001 — uniform signature, unused here
+    restricted_environment: bool = False,
+) -> str:
     wrapped_spec = wrap_untrusted_content("spec_content", dependencies.get("spec", ""))
     wrapped_plan = wrap_untrusted_content("plan_content", dependencies.get("plan", ""))
     research_block = render_research_block(dependencies.get("research_context", ""))
+    restricted_check = (
+        "\n- ## Harness Overview's run/setup command(s) invoke no Docker/docker-compose/"
+        "Dockerfile/podman/sudo/system-package-install commands — this build targets a "
+        "locked-down environment with no admin rights and no container runtime."
+        if restricted_environment
+        else ""
+    )
     return f"""Produce an executable Demo Day HARNESS from the spec and plan below.
 
 The ## End-to-End Smoke Test is the guarantee-bearing test — name its stable file path and
@@ -468,18 +701,28 @@ Before returning, verify (internal — do not include in output):
   names exists as a `### File:` block.
 - Every File Tree path has a matching `### File:` block whose code block is the FULL,
   runnable content — real imports and assertions, no stubs, no `pass`, no `TODO`, no
-  elided bodies.
+  elided bodies.{restricted_check}
 
 Return only the HARNESS artifact. No preamble, commentary, or summary."""
 
 
-def _tasks_user_prompt(dependencies: dict[str, str]) -> str:
+def _tasks_user_prompt(
+    dependencies: dict[str, str],
+    hours: int = 5,
+    restricted_environment: bool = False,
+) -> str:
     wrapped_spec = wrap_untrusted_content("spec_content", dependencies.get("spec", ""))
     wrapped_plan = wrap_untrusted_content("plan_content", dependencies.get("plan", ""))
     wrapped_harness = wrap_untrusted_content(
         "harness_content", dependencies.get("harness", "")
     )
     research_block = render_research_block(dependencies.get("research_context", ""))
+    restricted_check = (
+        "\n- No task's Steps or Acceptance Criteria invoke Docker/docker-compose/sudo/"
+        "system-package-install commands — this build targets a locked-down environment."
+        if restricted_environment
+        else ""
+    )
     return f"""Produce a Demo Day TASKS.md from the spec, plan, and harness below.
 
 Walking skeleton first: T-001 stands up the thinnest end-to-end slice and makes the
@@ -505,10 +748,10 @@ Before returning, verify (internal — do not include in output):
   without re-deriving the design; no "implement X" hand-waves.
 - `Precondition:` lists only earlier `T-NNN` ids (the order is acyclic).
 - Every `AC-NNN` is referenced by ≥1 task; the final task cites the e2e smoke test path.
-- The Effort Summary states `Estimated build time: ~Xh (target ≤ 5h)`.
+- The Effort Summary states `Estimated build time: ~Xh (target ≤ {hours}h)`.
 - If the plan's Frontend Architecture is in scope, ≥1 task cites it in `Plan refs`, the first
   frontend task sets up its design tokens before any screen is built, and later frontend
-  tasks' Acceptance Criteria check those tokens are actually used.
+  tasks' Acceptance Criteria check those tokens are actually used.{restricted_check}
 
 Return only TASKS.md. No preamble, commentary, or summary."""
 
@@ -521,5 +764,11 @@ _STAGE_USER_PROMPTS = {
 }
 
 
-def build_user_prompt(stage_type: str, dependencies: dict[str, str]) -> str:
-    return _STAGE_USER_PROMPTS[stage_type](dependencies)
+def build_user_prompt(
+    stage_type: str,
+    dependencies: dict[str, str],
+    time_budget_minutes: int | None = None,
+    restricted_environment: bool = False,
+) -> str:
+    hours = _budget_hours(time_budget_minutes)
+    return _STAGE_USER_PROMPTS[stage_type](dependencies, hours, restricted_environment)

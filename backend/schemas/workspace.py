@@ -46,6 +46,10 @@ class WorkspaceCreate(BaseModel):
         gt=0,
         le=_TIME_BUDGET_MAX_MINUTES,
     )
+    # Locked-down build environment (e.g. a hackathon venue that disallows
+    # installing Docker/admin software). Demo-Day-specific, like
+    # time_budget_minutes.
+    restricted_environment: bool = False
 
     # Unknown fields are ignored for old-client compatibility. The validator
     # below observes and removes only the retired LLM fields before validation,
@@ -76,8 +80,10 @@ class WorkspaceCreate(BaseModel):
                 )
         else:
             # The agent-instruction target applies to both workspace modes.
-            # Only the construction time budget remains Demo-Day-specific.
+            # Only the construction time budget and environment constraint
+            # remain Demo-Day-specific.
             self.time_budget_minutes = None
+            self.restricted_environment = False
         return self
 
 
@@ -211,6 +217,7 @@ class WorkspaceResponse(BaseModel):
     mode: WorkspaceMode = "standard"
     target_agent: TargetAgent | None = None
     time_budget_minutes: int | None = None
+    restricted_environment: bool = False
     # The persisted construction verdict (Demo Day mode, plan §7.2). NULL for a
     # standard workspace and until the verifier first runs; the shape is
     # ``ConstructionVerdict.to_dict()``. Passed through as an opaque dict — the

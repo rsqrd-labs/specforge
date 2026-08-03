@@ -129,6 +129,16 @@ class Workspace(Base):
     # the construction verifier falls back to 300 (5h) when NULL. Never certified
     # — it exists to force scope down, not as a guarantee (plan §2.2).
     time_budget_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Locked-down build environment (e.g. a hackathon venue that disallows
+    # installing Docker/admin software). Demo-Day-gated, create-time-only, like
+    # `time_budget_minutes`. Default False so every existing/standard workspace
+    # is unaffected (the §4 byte-identical regression-pin contract).
+    restricted_environment: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
     # The persisted construction verdict (plan §7.2 / §11.3). The verifier is
     # workspace-level — it spans all four stage versions — so its verdict lives on
     # the workspace row as nullable JSONB rather than per-stage. NULL until the

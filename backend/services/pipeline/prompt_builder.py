@@ -290,8 +290,16 @@ async def build_prompt(
         )
 
     if mode == "demo_day":
-        system_prompt = await demo_day_prompts.get_system_prompt(stage_type)
-        user_prompt = demo_day_prompts.build_user_prompt(stage_type, deps)
+        time_budget_minutes = getattr(workspace, "time_budget_minutes", None)
+        restricted_environment = bool(
+            getattr(workspace, "restricted_environment", False)
+        )
+        system_prompt = await demo_day_prompts.get_system_prompt(
+            stage_type, time_budget_minutes, restricted_environment
+        )
+        user_prompt = demo_day_prompts.build_user_prompt(
+            stage_type, deps, time_budget_minutes, restricted_environment
+        )
     else:
         system_prompt = await module.get_system_prompt()
         user_prompt = module.build_user_prompt(deps)

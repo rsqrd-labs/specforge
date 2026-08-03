@@ -12,6 +12,7 @@ The two load-bearing consistency tests (advisor + plan §7.1.1):
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -36,14 +37,22 @@ _STAGES = ["spec", "plan", "harness", "tasks"]
 
 
 @pytest.mark.parametrize("stage", _STAGES)
-def test_demo_day_prompt_mandates_every_contract_heading(stage: str) -> None:
-    prompt = dd._demo_day_system_prompt(dd._STAGE_ROLES[stage])
+@pytest.mark.parametrize("restricted_environment", [False, True])
+def test_demo_day_prompt_mandates_every_contract_heading(
+    stage: str, restricted_environment: bool
+) -> None:
+    """Bound to `_role_for` — the live dispatch every generation call goes
+    through — not a static snapshot, so a future `_role_for` regression (a
+    dropped branch, a broken restricted_environment note that clobbers a
+    heading) is actually caught here rather than graded against stale text."""
+    role = dd._role_for(stage, None, restricted_environment)
+    prompt = dd._demo_day_system_prompt(role, None, restricted_environment)
     for heading in DEMO_DAY_SECTION_CONTRACTS[stage]:
         assert heading in prompt, f"{stage} Demo Day prompt is missing {heading!r}"
 
 
 def test_demo_day_prompt_mandates_parse_stable_task_tokens() -> None:
-    prompt = dd._demo_day_system_prompt(dd._STAGE_ROLES["tasks"])
+    prompt = dd._demo_day_system_prompt(dd._role_for("tasks", None, False))
     for token in (
         "### T-NNN:",
         "**Estimated minutes:**",
@@ -55,7 +64,7 @@ def test_demo_day_prompt_mandates_parse_stable_task_tokens() -> None:
 
 
 def test_demo_day_harness_prompt_names_the_e2e_and_matrix() -> None:
-    prompt = dd._demo_day_system_prompt(dd._STAGE_ROLES["harness"])
+    prompt = dd._demo_day_system_prompt(dd._role_for("harness", None, False))
     assert "## End-to-End Smoke Test" in prompt
     assert "## Requirement-to-Test Matrix" in prompt
 
@@ -76,14 +85,14 @@ def test_demo_day_user_prompts_cover_all_stages() -> None:
 
 
 def test_demo_day_plan_prompt_mandates_external_integrations_contract() -> None:
-    prompt = dd._demo_day_system_prompt(dd._STAGE_ROLES["plan"])
+    prompt = dd._demo_day_system_prompt(dd._role_for("plan", None, False))
     assert "## External Integrations and Secrets" in prompt
     for token in ("REAL", "MOCKED", "env var NAME", "on-stage failure plan"):
         assert token in prompt, f"plan prompt missing integrations token {token!r}"
 
 
 def test_demo_day_plan_prompt_mandates_the_four_folded_stages() -> None:
-    prompt = dd._demo_day_system_prompt(dd._STAGE_ROLES["plan"])
+    prompt = dd._demo_day_system_prompt(dd._role_for("plan", None, False))
     # Deployment surface (Environment and Bootstrap), seed data (Data Model),
     # auth stance (Security Architecture), demo-crash fallbacks (Risks).
     for token in ("DEMO SURFACE", "SEED DATASET", "AUTH STANCE", "DEMO-VISIBLE"):
@@ -100,10 +109,10 @@ def test_demo_day_plan_user_prompt_verifies_the_new_contract() -> None:
 def test_demo_day_plan_prompt_version_is_bumped() -> None:
     from prompts.base import stage_prompt_version
 
-    assert stage_prompt_version("plan", "demo_day").endswith(":plan-v5")
+    assert stage_prompt_version("plan", "demo_day").endswith(":plan-v6")
     # §4 regression pin — the standard plan version is untouched.
     assert stage_prompt_version("plan") == stage_prompt_version("plan", "standard")
-    assert ":plan-v5" not in stage_prompt_version("plan")
+    assert ":plan-v6" not in stage_prompt_version("plan")
 
 
 def test_demo_day_keep_list_carries_integrations_downstream() -> None:
@@ -295,3 +304,189 @@ async def test_build_prompt_standard_workspace_unchanged(
     # Standard spec prompt has the standard heading, not the Demo Day one.
     assert "## Product Goals" in system_prompt
     assert "## Demo Day Scope" not in system_prompt
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 — time-budget tiers. `sprint` (unset/<=6h) must render byte-identical
+# to the original single-tier text (the regression pin); bigger budgets deepen
+# the SAME one happy path, never widen the per-call character ceiling.
+# ---------------------------------------------------------------------------
+
+
+def test_sprint_tier_is_byte_identical_to_the_original_single_tier_text() -> None:
+    assert dd._time_budget_tier(None) == "sprint"
+    assert dd._budget_hours(None) == 5
+    assert dd._spec_role(5) == dd._SPEC_ROLE
+    assert dd._plan_role(5, False) == dd._PLAN_ROLE
+    assert dd._harness_role(False) == dd._HARNESS_ROLE
+    assert dd._tasks_role(5, "sprint") == dd._TASKS_ROLE
+    assert dd._demo_day_directive() == dd.DEMO_DAY_DIRECTIVE
+    assert dd._demo_day_directive(None, False) == dd.DEMO_DAY_DIRECTIVE
+    assert dd._demo_day_directive(300, False) == dd.DEMO_DAY_DIRECTIVE
+    for stage in _STAGES:
+        assert dd.build_user_prompt(
+            stage, {"problem_statement": "x", "spec": "s", "plan": "p", "harness": "h"}
+        ) == dd.build_user_prompt(
+            stage,
+            {"problem_statement": "x", "spec": "s", "plan": "p", "harness": "h"},
+            None,
+            False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("minutes", "expected_tier", "expected_hours"),
+    [
+        (480, "extended", 8),
+        (720, "extended", 12),
+        (721, "full_day", 12),
+        (1440, "full_day", 24),
+    ],
+)
+def test_time_budget_tier_boundaries(
+    minutes: int, expected_tier: str, expected_hours: int
+) -> None:
+    assert dd._time_budget_tier(minutes) == expected_tier
+    assert dd._budget_hours(minutes) == expected_hours
+
+
+def test_bigger_budget_tiers_never_widen_the_per_call_length_ceiling() -> None:
+    """The advisor-flagged risk: telling the model to write MORE must never
+    raise the character target above the 240s-call-cap-tuned 24,000 ceiling."""
+    ceiling_re = re.compile(r"([\d,]{2,7})\s*characters")
+    for minutes in (None, 480, 1440):
+        directive = dd._demo_day_directive(minutes, False)
+        role = dd._plan_role(dd._budget_hours(minutes), False)
+        for text in (directive, role):
+            for match in ceiling_re.findall(text):
+                value = int(match.replace(",", ""))
+                assert value <= 24_000, f"{minutes=} advertises {value} characters"
+
+
+def test_extended_and_full_day_tiers_deepen_scope_not_features() -> None:
+    extended = dd._demo_day_directive(480, False)
+    full_day = dd._demo_day_directive(1440, False)
+    assert "~8-hour budget" in extended
+    assert "~24-hour budget" in full_day
+    assert "never multiple features" in full_day
+    assert "SAME per-call length budget" in extended
+    assert "SAME per-call length budget" in full_day
+    tasks_full_day = dd._tasks_role(24, "full_day")
+    assert "12-16 tasks" in tasks_full_day
+
+
+@pytest.mark.asyncio
+async def test_time_budget_flows_from_prompt_builder_into_the_rendered_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.pipeline import prompt_builder
+
+    monkeypatch.setattr(
+        "services.pipeline.prompt_builder.settings.problem_statement_compression",
+        False,
+    )
+    workspace = SimpleNamespace(
+        id="00000000-0000-0000-0000-000000000003",
+        problem_statement="Build a tiny URL shortener prototype for a hackathon demo.",
+        provider="anthropic",
+        model="claude-haiku-4-5",
+        mode="demo_day",
+        clarification_qa=None,
+        time_budget_minutes=1440,
+        restricted_environment=False,
+    )
+    system_prompt, user_prompt, _ = await prompt_builder.build_prompt(
+        "spec", workspace, db=None, redis_client=None
+    )
+    assert "~24-hour budget" in system_prompt
+    assert "~24 hours" in user_prompt
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — restricted_environment ("no Docker"). Default False must render
+# byte-identical text to before the flag existed; True must lead with an
+# explicit, standalone "Docker is NOT available" sentence.
+# ---------------------------------------------------------------------------
+
+
+def test_unrestricted_directive_is_byte_identical_to_the_original() -> None:
+    assert dd._demo_day_directive(None, False) == dd.DEMO_DAY_DIRECTIVE
+    assert "Docker is NOT available" not in dd.DEMO_DAY_DIRECTIVE
+    assert dd._plan_role(5, False) == dd._PLAN_ROLE
+    assert "Docker is NOT available" not in dd._PLAN_ROLE
+    assert dd._harness_role(False) == dd._HARNESS_ROLE
+    assert "Docker is NOT available" not in dd._HARNESS_ROLE
+
+
+def test_restricted_directive_names_docker_explicitly_and_unmissably() -> None:
+    directive = dd._demo_day_directive(None, True)
+    assert "Docker is NOT available in this environment" in directive
+    assert "do not use" in directive
+    assert "docker-compose" in directive
+    assert "Dockerfile" in directive
+    plan_role = dd._plan_role(5, True)
+    assert "Docker is NOT available" in plan_role
+    harness_role = dd._harness_role(True)
+    assert "Docker is NOT available" in harness_role
+    assert "executes. This build targets a locked-down environment" in harness_role
+
+
+@pytest.mark.asyncio
+async def test_restricted_environment_reaches_the_harness_system_and_user_prompt() -> (
+    None
+):
+    """`prompt_builder` dispatches every stage through the same
+    `get_system_prompt`/`build_user_prompt` pair regardless of stage_type, so
+    this exercises the exact call harness generation makes without needing the
+    Redis-backed upstream-dependency fetch a full `prompt_builder.build_prompt`
+    call for "harness" would require."""
+    system_prompt = await dd.get_system_prompt("harness", None, True)
+    assert "Docker is NOT available" in system_prompt
+
+    user_prompt = dd.build_user_prompt(
+        "harness", {"spec": "s", "plan": "p"}, None, True
+    )
+    assert "Docker/docker-compose" in user_prompt
+
+    unrestricted_user_prompt = dd.build_user_prompt(
+        "harness", {"spec": "s", "plan": "p"}, None, False
+    )
+    assert "Docker/docker-compose" not in unrestricted_user_prompt
+
+
+@pytest.mark.asyncio
+async def test_restricted_environment_flows_from_prompt_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.pipeline import prompt_builder
+
+    monkeypatch.setattr(
+        "services.pipeline.prompt_builder.settings.problem_statement_compression",
+        False,
+    )
+    workspace = SimpleNamespace(
+        id="00000000-0000-0000-0000-000000000004",
+        problem_statement="Build a tiny URL shortener prototype for a hackathon demo.",
+        provider="anthropic",
+        model="claude-haiku-4-5",
+        mode="demo_day",
+        clarification_qa=None,
+        time_budget_minutes=None,
+        restricted_environment=True,
+    )
+    system_prompt, _, _ = await prompt_builder.build_prompt(
+        "spec", workspace, db=None, redis_client=None
+    )
+    assert "Docker is NOT available" in system_prompt
+
+    # A second call for the SAME stage with restricted_environment=False must
+    # not be served the restricted variant from `load_prompt`'s cache — this is
+    # the cache-key bug found during implementation (base.py `load_prompt` used
+    # to key purely on the remote prompt name).
+    workspace_unrestricted = SimpleNamespace(
+        **{**vars(workspace), "restricted_environment": False}
+    )
+    system_prompt_2, _, _ = await prompt_builder.build_prompt(
+        "spec", workspace_unrestricted, db=None, redis_client=None
+    )
+    assert "Docker is NOT available" not in system_prompt_2

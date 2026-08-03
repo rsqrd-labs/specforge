@@ -3555,6 +3555,11 @@ export interface components {
             name: string;
             /** Problem Statement */
             problem_statement: string;
+            /**
+             * Restricted Environment
+             * @default false
+             */
+            restricted_environment: boolean;
             /** Target Agent */
             target_agent?: ("claude_code" | "codex" | "both") | null;
             /** Template Slug */
@@ -3633,6 +3638,11 @@ export interface components {
             public_share_enabled: boolean;
             /** Public Share Slug */
             public_share_slug?: string | null;
+            /**
+             * Restricted Environment
+             * @default false
+             */
+            restricted_environment: boolean;
             /** Stages */
             stages?: components["schemas"]["StageResponse"][];
             /**
