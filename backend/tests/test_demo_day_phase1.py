@@ -100,10 +100,10 @@ def test_demo_day_plan_user_prompt_verifies_the_new_contract() -> None:
 def test_demo_day_plan_prompt_version_is_bumped() -> None:
     from prompts.base import stage_prompt_version
 
-    assert stage_prompt_version("plan", "demo_day").endswith(":plan-v4")
+    assert stage_prompt_version("plan", "demo_day").endswith(":plan-v5")
     # §4 regression pin — the standard plan version is untouched.
     assert stage_prompt_version("plan") == stage_prompt_version("plan", "standard")
-    assert ":plan-v4" not in stage_prompt_version("plan")
+    assert ":plan-v5" not in stage_prompt_version("plan")
 
 
 def test_demo_day_keep_list_carries_integrations_downstream() -> None:
