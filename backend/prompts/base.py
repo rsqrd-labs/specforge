@@ -59,7 +59,18 @@ logger = structlog.get_logger(__name__)
 # requirement) — so ASDD_PROMPT_VERSION itself is unchanged and harness keeps
 # its prompt cache; only spec/plan/tasks bump below. Requires a golden-corpus
 # run before being considered eval-verified, per docs/evals/PROMPT_CHANGE_REVIEW.md.
-ASDD_PROMPT_VERSION = "asdd-v2.6.0"
+# v2.7.0 — chunk-1 refund fix, harness leg (harness-v6/harness-v3 below). The
+# content change here is per-stage only (the harness contract chunk's length
+# target moves 45,000 -> 30,000, same class of edit as spec-v9/plan-v8/
+# tasks-v10's 30,000 -> 24,000, and by the shared-infrastructure exception
+# above would normally bump only STAGE_PROMPT_VERSIONS["harness"], not this
+# constant). Bumped anyway because .github/workflows/prompt-eval.yml's
+# "Check ASDD_PROMPT_VERSION bump" step gates on THIS constant specifically —
+# it fails closed on any diff under backend/prompts/ that doesn't move it,
+# with no per-stage-only exception. Cache-busting every stage's Langfuse
+# prompt-cache entry for a harness-only content change is the known, accepted
+# cost of satisfying that gate rather than special-casing it.
+ASDD_PROMPT_VERSION = "asdd-v2.7.0"
 STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # spec-v5: audit M8 — the clarification Q&A block is now fenced with
     # wrap_untrusted_content instead of rendering user-typed answers raw in
