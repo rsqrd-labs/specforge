@@ -86,7 +86,17 @@ logger = structlog.get_logger(__name__)
 # promised file" cannot be made feasible by a length target while the list it
 # refers to is unbounded. Standard spec/plan/tasks prompt content is
 # byte-identical; bumped for the same fail-closed gate as v2.7.0/v2.8.0.
-ASDD_PROMPT_VERSION = "asdd-v2.9.0"
+# v2.10.0 — rubric-coverage remediation for Demo Day spec/plan only (DEMO_DAY_
+# PROMPT_VERSION v2.5.0 below): a concept-differentiator clause in Overview, a
+# grounded-claims ("no invented capabilities") instruction in AI Usage and
+# Architecture Decision Records, a responsiveness/latency ask in Scalability
+# and Performance, and named vulnerability-class guidance in Security
+# Architecture. Standard-mode prompt content is byte-identical; bumped only
+# because .github/workflows/prompt-eval.yml's "Check ASDD_PROMPT_VERSION bump"
+# gate fails closed on any diff under backend/prompts/ regardless of mode
+# (same rationale as v2.7.0/v2.8.0/v2.9.0 above). No section added/removed, so
+# DEMO_DAY_SECTION_CONTRACTS is unchanged.
+ASDD_PROMPT_VERSION = "asdd-v2.10.0"
 STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # spec-v5: audit M8 — the clarification Q&A block is now fenced with
     # wrap_untrusted_content instead of rendering user-typed answers raw in
@@ -251,7 +261,19 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
 # the upper bound" — so a model obeying its own lower bound tripped
 # shallow_required_section on multiple sections. The harness contract chunk also
 # picks up the 15,000 target and the 6-file File Tree cap (see harness-v5).
-DEMO_DAY_PROMPT_VERSION = "demo-day-v2.4.0"
+# v2.5.0 — rubric-coverage remediation (spec-v7/plan-v8 below). Closes two
+# genuine gaps (latency/responsiveness engineering had zero coverage; no
+# grounded-claims/anti-fabrication instruction existed anywhere) and two
+# partial ones (Security Architecture never named a concrete vulnerability
+# class; the wow-factor ask only covered visual/brand identity, never the
+# product concept). Deliberately role-local (spec's AI Usage/Overview, plan's
+# ADRs/Scalability and Performance/Security Architecture), not placed in the
+# shared DEMO_DAY_DIRECTIVE, so harness/tasks prompt bytes are untouched and
+# their own per-stage suffixes don't move. No new heading, no new critic
+# finding kind (reuses ShallowSection) — see docs/evals/PROMPT_CHANGE_REVIEW.md
+# for the review-gate note that Demo Day isn't covered by the golden-corpus
+# runner, so this relies on the unit test suite instead.
+DEMO_DAY_PROMPT_VERSION = "demo-day-v2.5.0"
 DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # spec-v3: "AI slop" frontend remediation — Overview gains one clause
     # naming the brand personality/emotional register (as a named contrast,
@@ -266,7 +288,12 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # spec-v5: the ~5-hour role-text mention becomes tier-aware
     # (`_spec_role(hours)`); sprint's default render is byte-identical.
     # spec-v6: whole-document length FLOOR 3,500 -> 6,000 (see v2.4.0 above).
-    "spec": f"{DEMO_DAY_PROMPT_VERSION}:spec-v6",
+    # spec-v7: rubric-coverage remediation (v2.5.0 above) — Overview gains a
+    # concept-differentiator clause (applies unconditionally, not just
+    # browser-facing builds); AI Usage gains a latency-relevant-choice ask
+    # plus a grounded-claims instruction. No new heading, so
+    # DEMO_DAY_SECTION_CONTRACTS["spec"] is unchanged.
+    "spec": f"{DEMO_DAY_PROMPT_VERSION}:spec-v7",
     # plan-v3: demo-readiness gaps — adds the mandatory ## External Integrations
     # and Secrets section (per-service REAL/MOCKED stance, env-var credential
     # source, on-stage failure fallback) and folds four demo-day stages into
@@ -297,7 +324,14 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # fix exists for — 13 required sections in one chunk against the highest
     # depth floor in either mode (180 chars) is the only contract whose prompted
     # floor did not leave room for its own advisory floors.
-    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v7",
+    # plan-v8: rubric-coverage remediation (v2.5.0 above) — Architecture
+    # Decision Records gains a grounded-claims instruction; Scalability and
+    # Performance gains a responsiveness/latency ask alongside its existing
+    # scale ask; Security Architecture now names the concrete vulnerability
+    # class (SQL injection, XSS) each validation point defends against
+    # instead of a bare "input is validated" claim. No new heading, so
+    # DEMO_DAY_SECTION_CONTRACTS["plan"] is unchanged.
+    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v8",
     # harness-v3: chunk-1 refund fix — Demo Day's contract chunk
     # ("demo-harness-contract") hits the same harness branch of
     # _chunk_length_target as standard's harness-v6; 45,000 -> 30,000

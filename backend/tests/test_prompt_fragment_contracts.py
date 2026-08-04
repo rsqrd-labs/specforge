@@ -192,3 +192,56 @@ def test_output_rules_divergence_is_the_documented_one() -> None:
         DEMO_DAY_OUTPUT_RULES,
         re.IGNORECASE,
     )
+
+
+# --- Demo Day rubric-coverage remediation (ASDD v2.10.0 / DEMO_DAY v2.5.0) ---
+#
+# Pins that the four rubric gaps closed in this change (latency engineering,
+# grounded-claims/anti-fabrication, named vulnerability classes, product-
+# concept wow factor) actually landed in the rendered prompt text and stay
+# there — semantic markers, not byte pins, so a future reword keeps passing
+# as long as the ask survives.
+
+
+def test_demo_day_spec_asks_for_latency_and_grounded_claims() -> None:
+    assert re.search(
+        r"latency-relevant choice", demo_day._SPEC_ROLE, re.IGNORECASE
+    ), "Demo Day spec's AI Usage bullet lost the latency-awareness ask"
+    assert re.search(
+        r"never invent a model capability", demo_day._SPEC_ROLE, re.IGNORECASE
+    ), "Demo Day spec's AI Usage bullet lost the grounded-claims instruction"
+
+
+def test_demo_day_spec_asks_for_a_concept_differentiator() -> None:
+    assert re.search(
+        r"non-generic\s+against\s+the\s+obvious\s+version",
+        demo_day._SPEC_ROLE,
+        re.IGNORECASE,
+    ), "Demo Day spec's Overview bullet lost the concept-differentiator ask"
+
+
+def test_demo_day_plan_asks_for_latency_and_vulnerability_classes() -> None:
+    assert re.search(
+        r"streaming vs\. blocking for perceived latency", demo_day._PLAN_ROLE
+    ), "Demo Day plan's Scalability and Performance bullet lost the latency ask"
+    assert re.search(
+        r"sql injection", demo_day._PLAN_ROLE, re.IGNORECASE
+    ), "Demo Day plan's Security Architecture bullet lost vulnerability-class naming"
+    assert re.search(
+        r"xss", demo_day._PLAN_ROLE, re.IGNORECASE
+    ), "Demo Day plan's Security Architecture bullet lost vulnerability-class naming"
+
+
+def test_demo_day_plan_asks_for_grounded_adr_claims() -> None:
+    assert re.search(
+        r"not an invented one", demo_day._PLAN_ROLE, re.IGNORECASE
+    ), "Demo Day plan's ADR bullet lost the grounded-claims instruction"
+
+
+def test_demo_day_critic_focus_covers_the_remediated_gaps() -> None:
+    spec_focus = critic._demo_day_per_stage_focus("spec")
+    plan_focus = critic._demo_day_per_stage_focus("plan")
+    assert re.search(r"concept-differentiator", spec_focus, re.IGNORECASE)
+    assert re.search(r"grounded", spec_focus, re.IGNORECASE)
+    assert re.search(r"responsiveness", plan_focus, re.IGNORECASE)
+    assert re.search(r"vulnerability class", plan_focus, re.IGNORECASE)
