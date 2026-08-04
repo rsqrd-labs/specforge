@@ -38,7 +38,22 @@ from services.pipeline.stage_manager import (
 )
 
 
-def _matrix_harness(cell: str, *, file_hashes: str = "###", matrix_hashes: str = "##"):
+def _matrix_harness(
+    cell: str,
+    *,
+    file_hashes: str = "###",
+    matrix_hashes: str = "##",
+    tag: str = "FR-001",
+):
+    """A one-row-matrix harness whose single emitted file is tagged *tag*.
+
+    ``tag`` exists because coverage is now established by EITHER a matrix row
+    mapping a requirement to an emitted file OR a ``# Tests: <id>`` tag inside an
+    emitted file body (``covered_requirement_ids``) — the second path is how the
+    paid gap patch, which writes tagged files and no matrix row, registers at all.
+    A test that wants FR-001 to read as a GENUINE gap must therefore not leave an
+    emitted file claiming to test it; those pass ``tag="FR-900"``.
+    """
     return f"""{matrix_hashes} Requirement-to-Test Matrix
 
 | Source ID | Behaviour | Test file | Type | Status |
@@ -49,9 +64,9 @@ def _matrix_harness(cell: str, *, file_hashes: str = "###", matrix_hashes: str =
 
 {file_hashes} File: tests/unit/test_auth.py
 ```python
-# Tests: FR-001
+# Tests: {tag}
 def test_login_ok():
-    assert False, "not implemented: FR-001"
+    assert False, "not implemented: {tag}"
 ```
 """
 
@@ -120,13 +135,15 @@ class TestUncoveredRequirementsHardening:
 
     def test_genuine_gap_is_still_reported(self) -> None:
         assert uncovered_requirements(
-            _matrix_harness("`tests/unit/test_missing.py`")
+            _matrix_harness("`tests/unit/test_missing.py`", tag="FR-900")
         ) == ["FR-001"]
 
     def test_section_body_trap_matrix_at_h3_is_not_silently_disabled(self) -> None:
         # `### Requirement-to-Test Matrix` passes the substring section gate; the
         # body reader must still find it or detection silently returns [].
-        harness = _matrix_harness("`tests/unit/test_missing.py`", matrix_hashes="###")
+        harness = _matrix_harness(
+            "`tests/unit/test_missing.py`", matrix_hashes="###", tag="FR-900"
+        )
         assert uncovered_requirements(harness) == ["FR-001"]
 
     def test_no_matrix_returns_empty(self) -> None:
@@ -332,7 +349,7 @@ def test_present():
 
 class TestPatchMergeCompleteness:
     def test_round_trip_clears_the_gap(self) -> None:
-        existing = _matrix_harness("`tests/unit/test_missing.py`")
+        existing = _matrix_harness("`tests/unit/test_missing.py`", tag="FR-900")
         assert uncovered_requirements(existing) == ["FR-001"]
         patch = """### File: tests/unit/test_missing.py
 ```python
@@ -610,7 +627,9 @@ def test_x(): assert False
     def test_h4_matrix_heading_still_parses(self) -> None:
         # Fable #10: `#### Requirement-to-Test Matrix` passes the substring section
         # gate; the body extractor must find it too (not silently disable).
-        harness = _matrix_harness("`tests/unit/test_missing.py`", matrix_hashes="####")
+        harness = _matrix_harness(
+            "`tests/unit/test_missing.py`", matrix_hashes="####", tag="FR-900"
+        )
         assert uncovered_requirements(harness) == ["FR-001"]
 
     def test_bare_matrix_filename_surfaces_a_genuine_hole(self) -> None:

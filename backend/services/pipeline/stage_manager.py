@@ -524,12 +524,17 @@ _BACKGROUND_VERIFIER_TASKS = BoundedTaskRegistry(
 )
 
 
-def _eval_to_dict(result: EvalResult, harness_content: str = "") -> dict:
+def _eval_to_dict(
+    result: EvalResult, harness_content: str = "", spec_content: str = ""
+) -> dict:
     # ``harness_content`` is the harness stage's own content (empty for other
     # stages). It lets the inline SSE eval payload carry the deterministic
     # deferred-coverage reqs so CoveragePanel can light its free-patch button the
     # moment generation finishes — matching the GET-eval response shape rather
-    # than waiting for the post-`done` refetch.
+    # than waiting for the post-`done` refetch. ``spec_content`` supplies the
+    # upstream requirement set so the gap list is scoped to the same denominator
+    # as the coverage percentage (and a requirement the matrix never mentioned
+    # still counts as a gap).
     return {
         "id": str(result.id),
         "stage_version_id": str(result.stage_version_id),
@@ -539,7 +544,7 @@ def _eval_to_dict(result: EvalResult, harness_content: str = "") -> dict:
         "clarity": result.clarity,
         "coverage_percent": result.coverage_percent,
         "uncovered_reqs": result.uncovered_reqs,
-        "deferred_reqs": extract_deferred_reqs(harness_content),
+        "deferred_reqs": extract_deferred_reqs(harness_content, spec_content),
         "tasks_without_ref": result.tasks_without_ref,
         "flagged": result.flagged,
         "created_at": result.created_at.isoformat(),
@@ -1484,6 +1489,20 @@ class ArtifactChunkSpec:
 
 
 @dataclass(frozen=True)
+class RewriteCounts:
+    """What the deterministic self-heals changed, for metrics and logs.
+
+    The rewrites run inside the assembly step (before the completeness pass), so
+    the counters they feed are emitted by the caller from this record rather than
+    by re-running the rewrites downstream — one application, one increment.
+    """
+
+    file_blocks_removed: int = 0
+    sections_removed: int = 0
+    effort_reconciled: bool = False
+
+
+@dataclass(frozen=True)
 class GeneratedArtifact:
     content: str
     content_generation_id: str | None
@@ -1492,6 +1511,47 @@ class GeneratedArtifact:
     # attached as non-blocking advisory suggestions at persist time and NEVER
     # refund (issue: quality-gate refund bleed).
     depth_findings: list[CompletenessIssue] = field(default_factory=list)
+    rewrites: RewriteCounts = field(default_factory=RewriteCounts)
+
+
+def apply_deterministic_rewrites(
+    stage_type: str, content: str, mode: str
+) -> tuple[str, RewriteCounts]:
+    """Every zero-LLM self-heal, applied at ONE point before any gate reads the text.
+
+    Order matters and is the historical one: unwrap a whole-document code fence,
+    drop duplicate ``### File:`` blocks, drop duplicate contract sections (first
+    wins), then reconcile the TASKS Effort Summary against the surviving task
+    blocks.
+
+    These used to run AFTER ``validate_artifact_completeness``, so the depth
+    advisories attached to a version described bytes the user never received:
+    two parallel plan chunks emitting ``## Data Model and Persistence`` (a stub
+    first, the full body second) were graded on the stub that dedupe then kept,
+    and ``validate_sections`` — which did run post-dedupe — saw different text
+    from the completeness pass. Both gates now read the artifact that is
+    actually persisted.
+
+    Idempotent: every step is a no-op on already-rewritten content, so a second
+    application (a caller that has not been migrated) cannot double-count.
+    """
+    rewritten = _strip_code_fence(content)
+    file_blocks_removed = 0
+    if stage_type == "harness":
+        rewritten, file_blocks_removed = dedupe_file_blocks(rewritten)
+    rewritten, sections_removed = dedupe_contract_sections(stage_type, rewritten, mode)
+    effort_reconciled = False
+    if stage_type == "tasks":
+        rewritten, effort_reconciled = reconcile_effort_summary(rewritten)
+    # Canonical trailing whitespace so a second application is byte-identical to
+    # the first (the dedupe steps can leave a trailing blank line that
+    # `_strip_code_fence` would then remove on a re-run).
+    rewritten = rewritten.strip()
+    return rewritten, RewriteCounts(
+        file_blocks_removed=file_blocks_removed,
+        sections_removed=sections_removed,
+        effort_reconciled=effort_reconciled,
+    )
 
 
 def _split_completeness_or_raise(
@@ -2857,6 +2917,10 @@ class StageManager:
                 ],
                 partial_content=artifact[:500_000],
             )
+        # The deterministic self-heals run BEFORE the completeness pass so every
+        # gate — and every advisory attached to the version — describes the bytes
+        # the user actually receives (see ``apply_deterministic_rewrites``).
+        artifact, rewrites = apply_deterministic_rewrites(stage_type, artifact, mode)
         advisory_issues: list[CompletenessIssue] = []
         try:
             await validate_artifact_completeness_async(stage_type, artifact, deps, mode)
@@ -2869,6 +2933,7 @@ class StageManager:
             content=artifact,
             content_generation_id=content_generation_id,
             depth_findings=advisory_issues,
+            rewrites=rewrites,
         )
 
     async def _generate_chunk_once(
@@ -4359,62 +4424,43 @@ class StageManager:
                 )
                 return
 
-            accumulated = _strip_code_fence(accumulated)
-
-            # Self-heal a duplicated harness: a cheap-tier model (or a chunk
-            # merge) can emit the entire ## Files section twice, doubling the
-            # artifact (observed: 122 KB that was an exact double of 61 KB).
-            # Deterministically drop duplicate `### File:` blocks before any gate
-            # or persistence — no LLM, no repair, no credit. Single chokepoint
-            # for both the chunked and non-chunked paths.
-            if stage.type == "harness":
-                accumulated, _deduped_blocks = dedupe_file_blocks(accumulated)
-                if _deduped_blocks:
-                    PIPELINE_HARNESS_FILE_DEDUP.labels(provider=route.provider).inc(
-                        _deduped_blocks
-                    )
-                    logger.warning(
-                        "stage_manager.harness_file_dedup stage_id=%s "
-                        "removed_blocks=%s provider=%s",
-                        stage.id,
-                        _deduped_blocks,
-                        route.provider,
-                    )
-
-            # Prompt-quality audit H1 backstop: drop duplicate contract-section
-            # bodies (first wins) before any gate or persistence. Parallel chunk
-            # waves have no cross-visibility, so a chunk-scope violation emits
-            # the same mandatory section twice with conflicting bodies — and the
-            # substring section gate passes both silently. Same chokepoint and
-            # semantics as the harness file-block self-heal above: zero-LLM,
-            # deterministic, no credit.
-            accumulated, _deduped_sections = dedupe_contract_sections(
-                stage.type, accumulated, mode
-            )
-            if _deduped_sections:
+            # The deterministic self-heals (whole-document fence unwrap, harness
+            # `### File:` de-duplication, contract-section de-duplication, TASKS
+            # Effort Summary reconciliation) already ran inside
+            # `_generate_durable_artifact`, immediately after assembly and BEFORE
+            # `validate_artifact_completeness` — so the depth advisories attached
+            # to this version describe the bytes the user receives, not a
+            # pre-dedupe draft. Only the telemetry is emitted here, from the
+            # counts that application returned: one rewrite, one increment.
+            rewrites = generated.rewrites
+            if rewrites.file_blocks_removed:
+                PIPELINE_HARNESS_FILE_DEDUP.labels(provider=route.provider).inc(
+                    rewrites.file_blocks_removed
+                )
+                logger.warning(
+                    "stage_manager.harness_file_dedup stage_id=%s "
+                    "removed_blocks=%s provider=%s",
+                    stage.id,
+                    rewrites.file_blocks_removed,
+                    route.provider,
+                )
+            if rewrites.sections_removed:
                 PIPELINE_SECTION_DEDUP.labels(
                     stage_type=stage.type, provider=route.provider
-                ).inc(_deduped_sections)
+                ).inc(rewrites.sections_removed)
                 logger.warning(
                     "stage_manager.section_dedup stage_id=%s stage_type=%s "
                     "removed_sections=%s provider=%s",
                     stage.id,
                     stage.type,
-                    _deduped_sections,
+                    rewrites.sections_removed,
                     route.provider,
                 )
-
-            # Prompt-quality audit M6: the tasks Effort Summary is emitted by the
-            # overview chunk before any task block exists, so its Tasks:/Sizes:
-            # counts are a forecast. Reconcile them against the actually-emitted
-            # task blocks deterministically; judgment lines are left untouched.
-            if stage.type == "tasks":
-                accumulated, _effort_reconciled = reconcile_effort_summary(accumulated)
-                if _effort_reconciled:
-                    logger.info(
-                        "stage_manager.effort_summary_reconciled stage_id=%s",
-                        stage.id,
-                    )
+            if rewrites.effort_reconciled:
+                logger.info(
+                    "stage_manager.effort_summary_reconciled stage_id=%s",
+                    stage.id,
+                )
 
             # Streaming is done; the deterministic gates (security validation,
             # technology safety, section presence) run next (issue #21 Phase 2c).
@@ -6423,7 +6469,13 @@ class StageManager:
                     harness_content=None,
                 )
                 eval_event = json.dumps(
-                    {"eval": _eval_to_dict(structural_eval, harness_content=merged)}
+                    {
+                        "eval": _eval_to_dict(
+                            structural_eval,
+                            harness_content=merged,
+                            spec_content=eval_context,
+                        )
+                    }
                 )
             except Exception:
                 logger.warning(

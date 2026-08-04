@@ -188,6 +188,99 @@ def test_smoke():
     av.validate_artifact_completeness("harness", harness, {}, "demo_day")
 
 
+def test_a_bodyless_file_heading_is_never_counted_as_emitted_in_either_mode():
+    """A ``### File:`` heading with NO code under it is a gap, not a file.
+
+    "Emitted" used to mean the heading matched ``_FILE_HEADING_RE`` — headings
+    only — so a harness that listed every promised test file as a bare heading
+    with zero code passed every gate and reported 100% coverage. The block-aware
+    check existed but lived in ``_harness_issues``, i.e. the ``else`` branch of
+    ``validate_artifact_completeness``, so Demo Day — the guarantee-bearing mode
+    — ran no file-body check at all. Both modes now read one body-aware index.
+    """
+    harness = _harness(
+        """
+### File: tests/test_login.py
+
+### File: tests/test_pay.py
+""",
+        tree="tests/test_login.py\ntests/test_pay.py",
+        matrix=(
+            "| Req | Test |\n| --- | --- |\n"
+            "| FR-001 | `tests/test_login.py` |\n"
+            "| FR-002 | `tests/test_pay.py` |\n"
+        ),
+    )
+    # The headings exist, so a heading-only index reported "nothing missing".
+    assert av.missing_harness_files(harness)[0] == [
+        "tests/test_login.py",
+        "tests/test_pay.py",
+    ]
+    ids = av.upstream_requirement_ids("FR-001 a. FR-002 b.")
+    assert av.harness_coverage_ratio(harness, upstream_ids=ids) == (0, 2)
+
+    for mode in ("standard", "demo_day"):
+        with pytest.raises(av.IncompleteArtifactError) as exc:
+            av.validate_artifact_completeness("harness", harness, {}, mode)
+        codes = {i.code for i in exc.value.issues}
+        assert "harness_file_tree_missing_block" in codes, mode
+
+
+def test_standard_mode_names_every_bodyless_file_individually():
+    """Standard mode keeps its per-file ``incomplete_harness_file_block``, and it
+    is computed from the shared index rather than a second fence regex — so a
+    file with a line of prose between its heading and its fence is no longer
+    reported as having no block at all."""
+    harness = _harness(
+        """
+### File: tests/test_login.py
+
+This file verifies the login flow.
+
+```python
+def test_login():
+    assert True
+```
+
+### File: tests/test_pay.py
+""",
+        tree="tests/test_login.py\ntests/test_pay.py",
+        matrix=(
+            "| Req | Test |\n| --- | --- |\n"
+            "| FR-001 | `tests/test_login.py` |\n"
+            "| FR-002 | `tests/test_pay.py` |\n"
+        ),
+    )
+    with pytest.raises(av.IncompleteArtifactError) as exc:
+        av.validate_artifact_completeness("harness", harness, {}, "standard")
+    bodyless = [
+        i.reference
+        for i in exc.value.issues
+        if i.code == "incomplete_harness_file_block"
+    ]
+    assert bodyless == ["tests/test_pay.py"]
+
+
+def test_a_tilde_fenced_file_is_emitted():
+    """CommonMark allows ``~~~`` fences. Reading one as bodyless would
+    manufacture a coverage gap on a correct harness."""
+    harness = _harness(
+        """
+### File: tests/test_login.py
+~~~python
+def test_login():
+    assert True
+~~~
+""",
+        tree="tests/test_login.py",
+        matrix="| Req | Test |\n| --- | --- |\n| FR-001 | `tests/test_login.py` |\n",
+    )
+    assert av.missing_harness_files(harness)[0] == []
+    assert av.harness_coverage_ratio(
+        harness, upstream_ids=av.upstream_requirement_ids("FR-001 a.")
+    ) == (1, 1)
+
+
 def test_standard_mode_harness_checks_are_unchanged():
     """The standard triad still fires; this fix added to Demo Day only."""
     harness = _harness(
@@ -217,13 +310,155 @@ def test_complete_file_tree_is_never_reported_as_shallow():
     assert len(av._normalise_body_for_depth(tree_body)) < av._min_body_chars(
         "harness", "demo_day"
     ), "fixture must be shorter than the prose floor or this test proves nothing"
-    assert av._manifest_section_issue("## File Tree", tree_body) is None
+    assert (
+        av._structural_section_issue("## File Tree", tree_body, "harness", "demo_day")
+        is None
+    )
 
 
 def test_empty_file_tree_still_reported():
-    issue = av._manifest_section_issue("## File Tree", "To be determined.")
+    issue = av._structural_section_issue(
+        "## File Tree", "To be determined.", "harness", "demo_day"
+    )
     assert issue is not None
     assert issue.code == "shallow_required_section"
+
+
+_CANONICAL_SIZING_LEGEND = (
+    "| Size | Effort |\n"
+    "|------|--------|\n"
+    "| S | < 2h |\n"
+    "| M | 2-6h |\n"
+    "| L | 6-16h |"
+)
+
+
+def test_canonical_task_sizing_legend_is_never_reported_as_shallow():
+    """A 3-row size lookup normalises to 33 chars against a 50-char floor.
+
+    Same defect class as the File Tree above: a fixed-format lookup table graded
+    as prose. Adding a "Meaning" column pushes it to 124 normalised chars, so the
+    advisory fired on the TIGHTER, more correct artifact.
+    """
+    assert len(
+        av._normalise_body_for_depth(_CANONICAL_SIZING_LEGEND)
+    ) < av._min_body_chars(
+        "tasks", "standard"
+    ), "fixture must be shorter than the prose floor or this test proves nothing"
+    assert (
+        av._structural_section_issue(
+            "## Task Sizing Legend", _CANONICAL_SIZING_LEGEND, "tasks", "standard"
+        )
+        is None
+    )
+
+
+def test_a_bullet_rendered_sizing_legend_also_passes():
+    """The legend is equally correct as a list; the grader measures rows, not
+    the delimiter used to draw them."""
+    body = "- S: under 2 hours\n- M: 2-6 hours\n- L: 6-16 hours"
+    assert (
+        av._structural_section_issue("## Task Sizing Legend", body, "tasks", "standard")
+        is None
+    )
+
+
+def test_a_one_row_sizing_legend_is_still_reported():
+    """The grader must not become an escape hatch: too few rows AND too little
+    prose is still a shallow section."""
+    issue = av._structural_section_issue(
+        "## Task Sizing Legend",
+        "| Size | Effort |\n|---|---|\n| S | 2h |",
+        "tasks",
+        "standard",
+    )
+    assert issue is not None and issue.code == "shallow_required_section"
+
+
+def test_small_dependency_graph_is_never_reported_as_shallow():
+    body = "```mermaid\ngraph TD\n  T-001 --> T-002\n  T-002 --> T-003\n```"
+    assert (
+        av._structural_section_issue("## Dependency Graph", body, "tasks", "standard")
+        is None
+    )
+
+
+def test_dependency_graph_with_no_tasks_falls_back_to_the_prose_floor():
+    issue = av._structural_section_issue(
+        "## Dependency Graph", "```mermaid\ngraph TD\n```", "tasks", "standard"
+    )
+    assert issue is not None and issue.code == "shallow_required_section"
+
+
+# ---------------------------------------------------------------------------
+# 3b. The gates read the bytes we actually ship (deterministic rewrites first).
+# ---------------------------------------------------------------------------
+
+
+def _tasks_with_forecast_summary(claimed: int, blocks: int) -> str:
+    body = (
+        "## Effort Summary\n"
+        f"Tasks: {claimed} total - {claimed} MUST - 0 SHOULD - 0 COULD\n"
+        "Sizes: 1xS - 0xM - 0xL\n"
+    )
+    for n in range(1, blocks + 1):
+        body += (
+            f"\n### T-{n:03d}: Do thing {n}\n\n"
+            "**Spec refs:** FR-001\n\n**Priority:** MUST\n\n**Estimate:** S\n"
+        )
+    return body
+
+
+def test_advisories_describe_the_post_rewrite_artifact():
+    """The deterministic self-heals must run BEFORE the completeness pass.
+
+    The TASKS Effort Summary is written by the overview chunk before any task
+    block exists, so its counts are a forecast that ``reconcile_effort_summary``
+    corrects at assembly. Grading the artifact first meant the pipeline silently
+    fixed the mismatch and then still attached an
+    ``effort_summary_task_count_mismatch`` advisory about it — an advisory
+    describing bytes the user never receives.
+    """
+    raw = _tasks_with_forecast_summary(claimed=12, blocks=7)
+
+    with pytest.raises(av.IncompleteArtifactError) as exc:
+        av.validate_artifact_completeness("tasks", raw, {})
+    assert "effort_summary_task_count_mismatch" in {i.code for i in exc.value.issues}
+
+    rewritten, counts = sm.apply_deterministic_rewrites("tasks", raw, "standard")
+    assert counts.effort_reconciled is True
+    try:
+        av.validate_artifact_completeness("tasks", rewritten, {})
+    except av.IncompleteArtifactError as exc:
+        assert "effort_summary_task_count_mismatch" not in {i.code for i in exc.issues}
+
+
+def test_deterministic_rewrites_are_idempotent():
+    """A second application must be a no-op, so a caller that has not been
+    migrated can never double-count the dedup metrics."""
+    harness = _harness(
+        """
+### File: tests/test_login.py
+```python
+def test_login():
+    assert True
+```
+
+### File: tests/test_login.py
+```python
+def test_login():
+    assert True
+```
+""",
+        tree="tests/test_login.py",
+        matrix="| Req | Test |\n| --- | --- |\n| FR-001 | `tests/test_login.py` |\n",
+    )
+    once, first = sm.apply_deterministic_rewrites("harness", harness, "standard")
+    assert first.file_blocks_removed == 1
+    twice, second = sm.apply_deterministic_rewrites("harness", once, "standard")
+    assert twice == once
+    assert second.file_blocks_removed == 0
+    assert second.sections_removed == 0
 
 
 # ---------------------------------------------------------------------------
@@ -323,25 +558,109 @@ def test_login():
     )
 
 
+# The upstream SPEC is the coverage DENOMINATOR: a requirement the harness's
+# matrix never mentioned is a gap, not an absence of evidence. Two requirements
+# here, matching the two matrix rows, so the parity assertions below stay exact.
+_COVERAGE_SPEC = "FR-001 login must work. FR-002 payment must work."
+
+
 def test_coverage_is_computed_from_the_artifact_not_the_judge():
-    assert av.harness_coverage_ratio(_coverage_harness(emit_pay=True)) == (2, 2)
-    assert av.harness_coverage_ratio(_coverage_harness(emit_pay=False)) == (1, 2)
-    assert oe._deterministic_coverage_percent(_coverage_harness(emit_pay=False)) == 50
-    assert oe._deterministic_coverage_percent(_coverage_harness(emit_pay=True)) == 100
+    ids = av.upstream_requirement_ids(_COVERAGE_SPEC)
+    assert av.harness_coverage_ratio(
+        _coverage_harness(emit_pay=True), upstream_ids=ids
+    ) == (2, 2)
+    assert av.harness_coverage_ratio(
+        _coverage_harness(emit_pay=False), upstream_ids=ids
+    ) == (1, 2)
+    assert (
+        oe._deterministic_coverage_percent(
+            _coverage_harness(emit_pay=False), _COVERAGE_SPEC
+        )
+        == 50
+    )
+    assert (
+        oe._deterministic_coverage_percent(
+            _coverage_harness(emit_pay=True), _COVERAGE_SPEC
+        )
+        == 100
+    )
+
+
+def test_coverage_denominator_is_the_spec_not_the_surviving_matrix_rows():
+    """A budget-truncated matrix must not read as 100%.
+
+    The contract chunk drops rows when it runs out of output budget; with a
+    matrix-derived denominator the numerator and denominator shrank together, so
+    a harness covering 1 of 3 spec requirements reported FULL coverage with an
+    empty gap list and a paid patch that had nothing to patch.
+    """
+    spec = "FR-001 a. FR-002 b. NFR-001 c."
+    harness = _harness(
+        """
+### File: tests/test_login.py
+```python
+def test_login():
+    assert True
+```
+""",
+        tree="tests/test_login.py",
+        matrix="| Req | Test |\n| --- | --- |\n| FR-001 | `tests/test_login.py` |\n",
+    )
+    ids = av.upstream_requirement_ids(spec)
+    assert av.harness_coverage_ratio(harness, upstream_ids=ids) == (1, 3)
+    assert av.uncovered_requirements(harness, upstream_ids=ids) == ["FR-002", "NFR-001"]
+
+
+def test_a_tagged_patch_file_counts_even_without_a_matrix_row():
+    """The paid gap patch writes `# Tests: <id>`-tagged FILES and no matrix row.
+
+    A matrix-only coverage computation could never register the coverage the user
+    just paid for, so the chip would sit unchanged after a successful patch.
+    """
+    spec = "FR-001 a. FR-002 b."
+    harness = _harness(
+        """
+### File: tests/test_login.py
+```python
+def test_login():
+    assert True
+```
+
+### File: tests/test_pay_patch.py
+```python
+# Tests: FR-002
+def test_pay():
+    assert True
+```
+""",
+        tree="tests/test_login.py",
+        matrix="| Req | Test |\n| --- | --- |\n| FR-001 | `tests/test_login.py` |\n",
+    )
+    ids = av.upstream_requirement_ids(spec)
+    assert av.harness_coverage_ratio(harness, upstream_ids=ids) == (2, 2)
+    assert av.uncovered_requirements(harness, upstream_ids=ids) == []
 
 
 def test_coverage_and_the_gap_list_can_never_disagree():
     """The chip, the CoveragePanel and the paid patch are three views of one
     computation — a 100% chip beside a populated gap list is now impossible."""
     partial = _coverage_harness(emit_pay=False)
-    covered, total = av.harness_coverage_ratio(partial)
-    assert total - covered == len(av.uncovered_requirements(partial))
+    ids = av.upstream_requirement_ids(_COVERAGE_SPEC)
+    covered, total = av.harness_coverage_ratio(partial, upstream_ids=ids)
+    assert total - covered == len(av.uncovered_requirements(partial, upstream_ids=ids))
 
 
-def test_unparseable_matrix_reads_as_unknown_not_zero_percent():
-    """A harness with no parseable matrix must render NO chip, not 0% coverage —
-    the difference between "no data" and a false alarm."""
+def test_no_spec_requirements_reads_as_unknown_not_zero_percent():
+    """No upstream requirement set means NO chip, not 0% coverage — the
+    difference between "no data" and a false alarm.
+
+    There is deliberately no fallback to identifiers scraped from the harness
+    itself: a budget-truncated harness drops those requirements from its whole
+    body, not just from its matrix, so such a fallback would reproduce the exact
+    100%-on-a-half-emitted-harness lie this denominator exists to kill.
+    """
     assert oe._deterministic_coverage_percent("## Harness Overview\nnothing") is None
+    assert oe._deterministic_coverage_percent(_coverage_harness(emit_pay=False)) is None
     assert av.harness_coverage_ratio("") == (0, 0)
 
 
@@ -361,7 +680,7 @@ def test_judge_coverage_never_reaches_the_stored_value_or_the_score():
         data,
         "standard",
         coverage_override=oe._deterministic_coverage_percent(
-            _coverage_harness(emit_pay=False)
+            _coverage_harness(emit_pay=False), _COVERAGE_SPEC
         ),
         use_coverage_override=True,
     )

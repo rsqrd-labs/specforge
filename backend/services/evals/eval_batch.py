@@ -273,6 +273,11 @@ async def _finish_from_item(db: Any, row: LLMBatchJob, item: Any) -> str:
             generation_provider=row.context.get("generation_provider"),
             generation_model=row.context.get("generation_model"),
             mode=row.context.get("mode") or "standard",
+            # The harness coverage denominator is the upstream SPEC's
+            # requirement set, so the batch completion path must replay it too
+            # (it is already persisted in the checkpoint context for the
+            # synchronous fallback below).
+            spec_content=row.context.get("spec_content") or "",
         )
         if result is not None:
             return "succeeded"

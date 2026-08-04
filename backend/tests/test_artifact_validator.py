@@ -11,6 +11,7 @@ from services.pipeline.artifact_validator import (
     SECTION_CONTRACTS,
     IncompleteArtifactError,
     MissingSectionError,
+    _task_harness_ref_issues,
     chunk_completion_sentinel,
     dedupe_file_blocks,
     strip_completion_sentinel,
@@ -564,6 +565,63 @@ def test_validate_artifact_completeness_rejects_missing_task_harness_ref() -> No
     assert any(
         issue.code == "task_harness_ref_not_found" for issue in excinfo.value.issues
     )
+
+
+def test_a_backticked_test_COMMAND_is_not_a_phantom_missing_ref() -> None:
+    """``pytest path::test -q`` in an acceptance criterion names a test that
+    exists; matching the whole command verbatim always failed, so every task
+    written that way manufactured a false gap."""
+    harness = _harness_with_test("tests/test_projects.py", "test_create_project")
+    artifact = (
+        "**Acceptance Criteria**\n"
+        "1. `pytest tests/test_projects.py::test_create_project -q` passes.\n"
+    )
+    assert _task_harness_ref_issues(artifact, {"harness": harness}) == []
+
+
+def test_task_harness_ref_check_reads_a_typescript_harness() -> None:
+    """The check used to key on Python ``def test_``, so a Vitest/Go/RSpec
+    harness parsed as ZERO refs and the check silently disabled itself — the
+    stage that most needs traceability enforcement got none."""
+    harness = (
+        "## Harness Overview\nDetailed harness strategy.\n\n"
+        "## Requirement-to-Test Matrix\n"
+        "| FR-001 | tests/test_projects.ts | creates a project |\n\n"
+        "## Coverage Plan\nDetailed coverage.\n\n"
+        "## File Tree\n```text\ntests/test_projects.ts\n```\n\n"
+        "## Files\n### File: tests/test_projects.ts\n"
+        "```ts\n// Tests: FR-001\n"
+        "it('creates a project', () => { expect(1).toBe(2); });\n```\n"
+    )
+    artifact = "**Harness refs:** `tests/test_projects.ts::test_missing_project`"
+    issues = _task_harness_ref_issues(artifact, {"harness": harness})
+    assert [i.code for i in issues] == ["task_harness_ref_not_found"]
+
+    # ...and a ref that DOES exist in that same TS harness is not a gap.
+    assert (
+        _task_harness_ref_issues(
+            "**Harness refs:** `tests/test_projects.ts::test_create_project`",
+            {"harness": harness.replace("creates a project", "test_create_project")},
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "`tests/test_projects.py :: test_create_project`",
+        "`./tests/test_projects.py::test_create_project`",
+        "`harness/Tests/Test_Projects.py::test_create_project`",
+    ],
+)
+def test_task_harness_ref_check_tolerates_path_spelling(ref: str) -> None:
+    """Spacing around ``::``, a ``./`` prefix and casing are normalisation
+    differences, not missing tests. The retired matcher skipped
+    ``_normalise_harness_ref`` and turned each of them into a false gap."""
+    harness = _harness_with_test("tests/test_projects.py", "test_create_project")
+    artifact = f"**Harness refs:** {ref}"
+    assert _task_harness_ref_issues(artifact, {"harness": harness}) == []
 
 
 def test_validate_artifact_completeness_rejects_effort_summary_mismatch() -> None:

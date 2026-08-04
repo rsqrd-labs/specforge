@@ -175,6 +175,26 @@ async def _load_stage(stage_id: UUID, db: AsyncSession, user_id: UUID) -> Stage:
     return stage
 
 
+async def _upstream_spec_content(stage: Stage, db: AsyncSession) -> str:
+    """The workspace's SPEC body — the denominator for harness coverage.
+
+    ``uncovered_requirements`` / ``harness_coverage_ratio`` are scoped to the
+    upstream FR/NFR/SEC set so a requirement the harness's Requirement-to-Test
+    Matrix never mentioned still reads as a gap (a budget-truncated matrix used
+    to shrink the denominator alongside the numerator and report 100%). Returns
+    "" for a non-harness stage or a workspace with no spec yet, which degrades
+    the gap list to the matrix-scoped answer rather than inventing one.
+    """
+    if stage.type != "harness":
+        return ""
+    row = await db.execute(
+        select(Stage.content).where(
+            Stage.workspace_id == stage.workspace_id, Stage.type == "spec"
+        )
+    )
+    return row.scalar_one_or_none() or ""
+
+
 async def _refresh_stale_task_findings(
     stage: Stage,
     eval_result: EvalResult,
@@ -481,7 +501,9 @@ async def regenerate_stage_for_gaps(
     # This is also robust to a missing/empty eval — the harness content alone
     # decides — and extract_deferred_reqs filters non-id tokens so the patch is
     # never asked to invent tests for bogus "requirements".
-    uncovered_reqs = extract_deferred_reqs(stage.content or "")
+    uncovered_reqs = extract_deferred_reqs(
+        stage.content or "", await _upstream_spec_content(stage, db)
+    )
     if not uncovered_reqs:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -708,6 +730,7 @@ async def get_eval(
     if eval_result is None:
         raise HTTPException(status_code=404, detail="No eval result found")
     await _refresh_stale_task_findings(stage, eval_result, db)
+    spec_content = await _upstream_spec_content(stage, db)
     return {
         "id": str(eval_result.id),
         "stage_version_id": str(eval_result.stage_version_id),
@@ -722,7 +745,7 @@ async def get_eval(
         # harness patch — surfaced here so CoveragePanel can light the button
         # even when the LLM-derived uncovered_reqs is empty. Only harness content
         # carries these records; other stages yield an empty list.
-        "deferred_reqs": extract_deferred_reqs(stage.content or ""),
+        "deferred_reqs": extract_deferred_reqs(stage.content or "", spec_content),
         "tasks_without_ref": eval_result.tasks_without_ref,
         "flagged": eval_result.flagged,
         "created_at": eval_result.created_at.isoformat(),
@@ -820,6 +843,7 @@ async def revalidate_tasks(
         "uncovered_reqs": eval_result.uncovered_reqs,
         # Tasks content carries no TestCategoryGap records, so this is empty here;
         # included only to keep the eval response shape uniform across endpoints.
+        # (No spec denominator: this endpoint is tasks-only.)
         "deferred_reqs": extract_deferred_reqs(stage.content or ""),
         "tasks_without_ref": eval_result.tasks_without_ref,
         "flagged": eval_result.flagged,
