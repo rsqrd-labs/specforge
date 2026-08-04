@@ -89,10 +89,17 @@ async def derive_coverage_summaries(
         seen.add(workspace_id)
         pct_int = max(0, min(100, int(pct)))
         # `percent` is authoritative and is now DETERMINISTIC: since the coverage
-        # rework it is `harness_coverage_ratio` (matrix requirements whose mapped
-        # test file was actually emitted), not the eval judge's estimate — the
-        # judge only ever saw ~20K chars of a 60–120KB harness, so its number was
-        # the least reliable figure we displayed.
+        # rework it is `harness_coverage_ratio` — the share of the upstream
+        # SPEC's FR/NFR/SEC identifiers that the harness demonstrably tests (a
+        # Requirement-to-Test Matrix row, or a `# Tests:` tag, pointing at a file
+        # actually emitted WITH a code body) — not the eval judge's estimate,
+        # which only ever saw ~20K chars of a 60–120KB harness.
+        #
+        # The denominator is the SPEC, deliberately not the harness's own matrix:
+        # a budget-truncated matrix loses rows, so a matrix-derived denominator
+        # shrank with the numerator and reported 100% on a harness covering 12 of
+        # 20 requirements. Rows with no upstream requirement data store NULL
+        # (filtered out below) and render no chip — "unknown", never 0%.
         #
         # `tests`/`covered`/`total` are NOT counts. This is a batch query over
         # EvalResult by design (one round-trip for N workspaces — HF-1/T-198), and

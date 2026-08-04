@@ -254,12 +254,14 @@ PLAN.md), never on WHAT (every behaviour the build must exhibit is pinned here).
 
 Required SPEC.md structure (every section mandatory, in this order):
 - ## Overview — a short paragraph naming the prototype, the single capability it demos,
-  and the concrete artifact the user shows judges (the screen, output, or transaction). If
-  the demo is browser-facing, end with one clause naming the intended brand personality and
-  emotional register as a contrast against a plausible alternative (e.g. "confident fintech,
-  not playful consumer") — a specific pairing grounded in this product's domain, never a
-  placeholder like "modern and clean". This grounds PLAN.md's Visual Identity decision; do
-  not defer it to Open Questions.
+  and the concrete artifact the user shows judges (the screen, output, or transaction). Name
+  the specific mechanism or angle that makes this idea non-generic against the obvious
+  version of the same feature — the thing judges remember as the concept, not just how it
+  looks. If the demo is browser-facing, end with one clause naming the intended brand
+  personality and emotional register as a contrast against a plausible alternative (e.g.
+  "confident fintech, not playful consumer") — a specific pairing grounded in this product's
+  domain, never a placeholder like "modern and clean". This grounds PLAN.md's Visual
+  Identity decision; do not defer it to Open Questions.
 - ## Target User and Core Problem — the specific user and the one problem this build
   solves, with a concrete example of the situation today and why it is painful.
 - ## Demo Day Scope — the single happy path that WILL be built, as a concrete numbered
@@ -279,7 +281,10 @@ Required SPEC.md structure (every section mandatory, in this order):
   each step so the demo is unmistakably "working", not "it ran".
 - ## AI Usage — RUBRIC: exactly how (or whether) AI is used in the product, honestly and
   specifically. If AI is core, name the model, the prompt's job, the inputs/outputs, and
-  the fallback when it fails; if it is not used, say so plainly. No gimmicks.
+  the fallback when it fails; if it is not used, say so plainly. No gimmicks. If AI sits on
+  a user-facing path, name the latency-relevant choice too (streaming vs. blocking, cached
+  vs. live, a smaller/faster model picked for interactivity) — and ground every claim here
+  in the problem statement or dependable general knowledge; never invent a model capability.
 - ## Security Posture — RUBRIC: the minimum credible posture for a demo — name the actual
   controls (where auth is enforced, which inputs are validated and how, how secrets are
   held) AND a short, specific "what we'd add for production" list.
@@ -353,14 +358,21 @@ Required PLAN.md structure (every section mandatory, in this order):
   resulting URL). One place the demo runs — no multi-environment promotion, no IaC.{env_bootstrap_note}
 - ## Architecture Decision Records — RUBRIC narrative: 3–5 ADRs, each naming the decision,
   the cheap-now choice, the credible alternative rejected and why, and how it
-  scales/secures (the demo-day answer). Concrete, not platitudes.
+  scales/secures (the demo-day answer). Concrete, not platitudes. Each choice must name a
+  real, current capability of the tool/library cited, not an invented one — if genuinely
+  uncertain, say so rather than asserting false precision.
 - ## Scalability and Performance — the credible scaling path for each cheap-now choice:
-  the specific bottleneck, the rough limit it holds to, and the concrete next move.
+  the specific bottleneck, the rough limit it holds to, and the concrete next move; and the
+  responsiveness dimension where it applies — streaming vs. blocking for perceived latency,
+  caching for repeated/expensive calls, and (when AI is in the loop) the
+  model-size-for-interactivity tradeoff.
 - ## Security Architecture — the minimum credible posture and the exact enforcement
-  points (which layer authenticates, where input is validated, how secrets are loaded).
-  State the AUTH STANCE as exactly one of: real (name the mechanism), mocked (name the
-  hardcoded identity and why real auth is not demo-critical), or none (why). Mocked is a
-  legitimate Demo Day choice — pick it deliberately, never by default.
+  points (which layer authenticates, where input is validated and against which concrete
+  vulnerability class — e.g. SQL injection via parameterized queries/ORM when a database is
+  touched, XSS via output encoding/CSP when rendering user-supplied content — how secrets
+  are loaded). State the AUTH STANCE as exactly one of: real (name the mechanism), mocked
+  (name the hardcoded identity and why real auth is not demo-critical), or none (why).
+  Mocked is a legitimate Demo Day choice — pick it deliberately, never by default.
 - ## Frontend Architecture — omit only if the build is not browser-facing, in which case
   write one line "Not applicable because <reason>". Otherwise the FROZEN visual identity
   a coding agent implements without inventing anything: a named, non-monochrome color
@@ -606,6 +618,9 @@ Before returning, verify (internal — do not include in output):
   cites ≥1 FR.
 - The three rubric sections (AI Usage, Security Posture, Scalability Story) are honest and
   specific (named controls/choices, not adjectives).
+- Overview names the specific mechanism/angle that makes this idea non-generic, not just a
+  visual description; if AI is on a user-facing path, AI Usage names the latency-relevant
+  choice too.
 - If the demo is browser-facing, Overview names a specific brand personality/emotional
   register as a contrast (not a generic placeholder, not an Open Question).
 
@@ -655,7 +670,11 @@ Before returning, verify (internal — do not include in output):
   value), and — for each REAL call — a timeout and the on-stage fallback; or the single
   "None — <reason>" line if nothing external is called.
 - ## Security Architecture names exactly one auth stance (real / mocked / none) with its
-  reason; ## Risks and Mitigations covers each demo-visible failure with its fallback.
+  reason, and names the concrete vulnerability class each validation point defends against
+  (not just "input is validated"); ## Risks and Mitigations covers each demo-visible
+  failure with its fallback.
+- ## Scalability and Performance addresses responsiveness (streaming/caching/model-size)
+  where the product has an interactive user-facing path, not only scale/throughput.
 - If the build is browser-facing, ## Frontend Architecture names a specific non-monochrome
   hex palette, a type pairing, and a signature element — not an Open Question and not an
   unmodified component-library default theme; otherwise it states "Not applicable because

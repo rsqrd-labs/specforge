@@ -33,6 +33,7 @@ from services.pipeline.artifact_validator import (
     harness_coverage_ratio,
     harness_test_index,
     ref_matches_harness,
+    upstream_requirement_ids,
 )
 from services.text_compaction import compact_text
 
@@ -574,15 +575,20 @@ def _extract_dropped_categories(harness_content: str) -> set[str]:
     }
 
 
-def extract_deferred_reqs(harness_content: str) -> list[str]:
+def extract_deferred_reqs(harness_content: str, spec_content: str = "") -> list[str]:
     """Requirement IDs with a genuine coverage hole — the honest gap set.
 
-    Delegates to :func:`artifact_validator.uncovered_requirements`, which reads
-    the Requirement-to-Test Matrix and reports only requirements whose every
-    mapped test file is absent from the ``## Files`` section. This is the single
-    source of truth consumed by both the GET-eval response (to surface a coverage
-    gap to the user) and the ``regenerate-gaps`` endpoint (to actually patch
-    them), so the surfaced set and the patched set never diverge.
+    Delegates to :func:`artifact_validator.uncovered_requirements`. With
+    *spec_content* the answer is scoped to the upstream FR/NFR/SEC set, so a
+    requirement the harness's matrix never mentioned at all is a gap rather than
+    an absence of evidence — the same denominator
+    :func:`_deterministic_coverage_percent` uses, which is what keeps the
+    coverage chip and this gap list from contradicting each other. Without it,
+    the answer stays scoped to what the matrix itself claims.
+
+    This is the single source of truth consumed by both the GET-eval response (to
+    surface a coverage gap to the user) and the ``regenerate-gaps`` endpoint (to
+    actually patch them), so the surfaced set and the patched set never diverge.
 
     It replaces the previous ``TestCategoryGap reqs=`` scrape, which reported
     *category-depth* trims as per-requirement gaps and so listed requirements
@@ -596,9 +602,12 @@ def extract_deferred_reqs(harness_content: str) -> list[str]:
     # imports nothing from evals, but evals → pipeline is the established edge).
     from services.pipeline.artifact_validator import (  # noqa: PLC0415
         uncovered_requirements,
+        upstream_requirement_ids,
     )
 
-    return uncovered_requirements(harness_content)
+    return uncovered_requirements(
+        harness_content, upstream_ids=upstream_requirement_ids(spec_content)
+    )
 
 
 def _ref_in_dropped_category(ref: str, dropped_categories: set[str]) -> bool:
@@ -1509,6 +1518,7 @@ async def run_eval(
         generation_provider=generation_provider,
         generation_model=generation_model,
         mode=mode,
+        spec_content=spec_content,
     )
 
 
@@ -1549,6 +1559,7 @@ async def persist_eval_from_raw(
     generation_provider: str | None = None,
     generation_model: str | None = None,
     mode: str = "standard",
+    spec_content: str = "",
 ) -> EvalResult | None:
     """Parse a judge response and persist the EvalResult, or return None.
 
@@ -1576,10 +1587,13 @@ async def persist_eval_from_raw(
         generation_provider=generation_provider,
         generation_model=generation_model,
         mode=mode,
+        spec_content=spec_content,
     )
 
 
-def _deterministic_coverage_percent(harness_content: str) -> int | None:
+def _deterministic_coverage_percent(
+    harness_content: str, spec_content: str = ""
+) -> int | None:
     """Requirement coverage for a harness, computed from the artifact itself.
 
     Replaces the judge's ``coverage_percent`` on the harness stage. The judge
@@ -1591,10 +1605,17 @@ def _deterministic_coverage_percent(harness_content: str) -> int | None:
     headline percentage (and weighting it 0.20 in the harness score) meant the
     one figure users read was the least trustworthy signal we produced.
 
-    ``None`` when the matrix names no test files — an unparseable matrix must
-    read as "no coverage data" and render nothing, never as 0%.
+    The denominator is the upstream SPEC's FR/NFR/SEC set, never the harness's
+    own Requirement-to-Test Matrix: a budget-truncated matrix loses rows, and a
+    matrix-derived denominator shrinks with the numerator, so a harness covering
+    12 of 20 requirements reported 100%.
+
+    ``None`` when no spec requirements are available — coverage must then read as
+    "no data" and render nothing, never as 0%.
     """
-    covered, total = harness_coverage_ratio(harness_content)
+    covered, total = harness_coverage_ratio(
+        harness_content, upstream_ids=upstream_requirement_ids(spec_content)
+    )
     if total <= 0:
         return None
     return round(100 * covered / total)
@@ -1612,6 +1633,7 @@ async def _persist_eval_data(
     generation_provider: str | None = None,
     generation_model: str | None = None,
     mode: str = "standard",
+    spec_content: str = "",
 ) -> EvalResult:
     is_harness = stage_type == "harness"
     normalised = _normalise_eval_payload(
@@ -1619,7 +1641,9 @@ async def _persist_eval_data(
         data,
         mode,
         coverage_override=(
-            _deterministic_coverage_percent(content) if is_harness else None
+            _deterministic_coverage_percent(content, spec_content)
+            if is_harness
+            else None
         ),
         use_coverage_override=is_harness,
     )

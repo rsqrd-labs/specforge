@@ -17,9 +17,13 @@ export function CoveragePanel({
 }: CoveragePanelProps) {
   if (stage.type !== "harness") return null
 
-  // Coverage gaps on the HARNESS screen are derived ONLY from deferred_reqs — the
-  // deterministic matrix→file integrity set (requirement IDs whose every mapped
-  // test file is genuinely absent from the harness). The eval judge's
+  // Coverage gaps on the HARNESS screen are derived ONLY from deferred_reqs —
+  // the deterministic set of SPEC requirement IDs with no emitted test file
+  // (`uncovered_requirements`, scoped to the upstream FR/NFR/SEC set). That
+  // scope matters: a requirement the harness's matrix never mentioned is a gap,
+  // not an absence of evidence, and it is the same denominator the coverage
+  // percentage uses — so the chip and this list cannot contradict each other.
+  // The eval judge's
   // `uncovered_reqs` is intentionally NOT shown here: the judge scores a harness
   // compacted to ~20K chars, so on a normal 60–120KB harness it reports reqs
   // whose tests it simply could not see — a flood of phantom "missing coverage"
@@ -39,8 +43,10 @@ export function CoveragePanel({
         <div>
           <div className="ws-panel-title">Missing Test Coverage</div>
           <p>
-            The test matrix maps these requirements to a test file that was not
-            generated in the harness. Patch coverage to fill in the missing tests.
+            These requirements have no test file in the harness — either the
+            test matrix maps them to a file that was never generated, or the
+            matrix does not cover them at all. Patch coverage to fill in the
+            missing tests.
           </p>
         </div>
         <span className="ws-panel-chip warning">

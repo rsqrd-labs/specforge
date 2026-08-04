@@ -524,12 +524,17 @@ _BACKGROUND_VERIFIER_TASKS = BoundedTaskRegistry(
 )
 
 
-def _eval_to_dict(result: EvalResult, harness_content: str = "") -> dict:
+def _eval_to_dict(
+    result: EvalResult, harness_content: str = "", spec_content: str = ""
+) -> dict:
     # ``harness_content`` is the harness stage's own content (empty for other
     # stages). It lets the inline SSE eval payload carry the deterministic
     # deferred-coverage reqs so CoveragePanel can light its free-patch button the
     # moment generation finishes — matching the GET-eval response shape rather
-    # than waiting for the post-`done` refetch.
+    # than waiting for the post-`done` refetch. ``spec_content`` supplies the
+    # upstream requirement set so the gap list is scoped to the same denominator
+    # as the coverage percentage (and a requirement the matrix never mentioned
+    # still counts as a gap).
     return {
         "id": str(result.id),
         "stage_version_id": str(result.stage_version_id),
@@ -539,7 +544,7 @@ def _eval_to_dict(result: EvalResult, harness_content: str = "") -> dict:
         "clarity": result.clarity,
         "coverage_percent": result.coverage_percent,
         "uncovered_reqs": result.uncovered_reqs,
-        "deferred_reqs": extract_deferred_reqs(harness_content),
+        "deferred_reqs": extract_deferred_reqs(harness_content, spec_content),
         "tasks_without_ref": result.tasks_without_ref,
         "flagged": result.flagged,
         "created_at": result.created_at.isoformat(),
@@ -1484,6 +1489,20 @@ class ArtifactChunkSpec:
 
 
 @dataclass(frozen=True)
+class RewriteCounts:
+    """What the deterministic self-heals changed, for metrics and logs.
+
+    The rewrites run inside the assembly step (before the completeness pass), so
+    the counters they feed are emitted by the caller from this record rather than
+    by re-running the rewrites downstream — one application, one increment.
+    """
+
+    file_blocks_removed: int = 0
+    sections_removed: int = 0
+    effort_reconciled: bool = False
+
+
+@dataclass(frozen=True)
 class GeneratedArtifact:
     content: str
     content_generation_id: str | None
@@ -1492,6 +1511,47 @@ class GeneratedArtifact:
     # attached as non-blocking advisory suggestions at persist time and NEVER
     # refund (issue: quality-gate refund bleed).
     depth_findings: list[CompletenessIssue] = field(default_factory=list)
+    rewrites: RewriteCounts = field(default_factory=RewriteCounts)
+
+
+def apply_deterministic_rewrites(
+    stage_type: str, content: str, mode: str
+) -> tuple[str, RewriteCounts]:
+    """Every zero-LLM self-heal, applied at ONE point before any gate reads the text.
+
+    Order matters and is the historical one: unwrap a whole-document code fence,
+    drop duplicate ``### File:`` blocks, drop duplicate contract sections (first
+    wins), then reconcile the TASKS Effort Summary against the surviving task
+    blocks.
+
+    These used to run AFTER ``validate_artifact_completeness``, so the depth
+    advisories attached to a version described bytes the user never received:
+    two parallel plan chunks emitting ``## Data Model and Persistence`` (a stub
+    first, the full body second) were graded on the stub that dedupe then kept,
+    and ``validate_sections`` — which did run post-dedupe — saw different text
+    from the completeness pass. Both gates now read the artifact that is
+    actually persisted.
+
+    Idempotent: every step is a no-op on already-rewritten content, so a second
+    application (a caller that has not been migrated) cannot double-count.
+    """
+    rewritten = _strip_code_fence(content)
+    file_blocks_removed = 0
+    if stage_type == "harness":
+        rewritten, file_blocks_removed = dedupe_file_blocks(rewritten)
+    rewritten, sections_removed = dedupe_contract_sections(stage_type, rewritten, mode)
+    effort_reconciled = False
+    if stage_type == "tasks":
+        rewritten, effort_reconciled = reconcile_effort_summary(rewritten)
+    # Canonical trailing whitespace so a second application is byte-identical to
+    # the first (the dedupe steps can leave a trailing blank line that
+    # `_strip_code_fence` would then remove on a re-run).
+    rewritten = rewritten.strip()
+    return rewritten, RewriteCounts(
+        file_blocks_removed=file_blocks_removed,
+        sections_removed=sections_removed,
+        effort_reconciled=effort_reconciled,
+    )
 
 
 def _split_completeness_or_raise(
@@ -1640,6 +1700,28 @@ def _merge_harness_patch(existing: str, patch: str, *, source: str = "patch") ->
     return existing.rstrip() + "\n\n" + "\n\n".join(new_sections)
 
 
+# How many files the harness contract chunk may promise in its File Tree.
+#
+# The Files chunk emits every promised file in exactly ONE provider call, capped
+# by ``stage_provider_call_timeout_seconds`` (240s). At the measured ~145 chars/s
+# that call is budgeted at 22,000 characters (see ``_chunk_length_target``), so
+# 10 files leaves ~2,200 characters each — lean but genuinely runnable — and 6
+# leaves ~3,600 for a Demo Day package. Without a cap on the PROMISE, no length
+# target can make the Files chunk feasible: "emit every promised file" is
+# unbounded, so the model either overruns the watchdog (partial discarded, whole
+# deadline burned) or silently drops files.
+#
+# Consolidating tests per requirement group rather than one file per requirement
+# is the intended shape and is what the prompt asks for.
+# How many uncovered requirements one paid harness patch may be asked to fill.
+# Same physics as the Files chunk: one provider call under the 240s watchdog cap,
+# at ~2,200 characters per runnable test file. See `generate_harness_patch`.
+_MAX_PATCH_REQUIREMENTS_PER_CALL = 8
+
+_MAX_HARNESS_FILES = 10
+_MAX_DEMO_DAY_HARNESS_FILES = 6
+
+
 def _demo_day_chunk_specs_for_stage(stage_type: str) -> list[ArtifactChunkSpec]:
     """Chunking for Demo Day mode (single-pass per stage; harness split for files).
 
@@ -1665,7 +1747,12 @@ def _demo_day_chunk_specs_for_stage(stage_type: str) -> list[ArtifactChunkSpec]:
                     "Overview, Frozen Interface Contracts, Requirement-to-Test "
                     "Matrix, End-to-End Smoke Test, File Tree. The File Tree must "
                     "name every test, fixture, and schema file the Files section "
-                    "will contain, including the end-to-end smoke test file."
+                    "will contain, including the end-to-end smoke test file, and "
+                    f"must name AT MOST {_MAX_DEMO_DAY_HARNESS_FILES} files: "
+                    "group related tests into one file per requirement group "
+                    "rather than emitting one file per requirement. The next "
+                    "chunk must emit every file you name here, in a single pass, "
+                    "so a longer list means thinner files, not more coverage."
                 ),
             ),
             ArtifactChunkSpec(
@@ -1762,12 +1849,23 @@ def _is_harness_files_chunk(stage_type: str, chunk: ArtifactChunkSpec) -> bool:
 def _chunk_output_budget(
     stage_type: str, chunk: ArtifactChunkSpec, route: LLMRoute
 ) -> int:
-    """Return the fixed first-attempt ceiling for a generation chunk."""
-    if stage_type == "harness":
-        requested = 49_152 if _is_harness_files_chunk(stage_type, chunk) else 24_576
-    else:
-        requested = 32_768
-    return min(requested, model_max_output_tokens(route.provider, route.model))
+    """Return the fixed first-attempt ceiling for a generation chunk.
+
+    ONE number for every chunk. The per-chunk budgets (49,152 for the harness
+    Files chunk, 24,576 for the rest of the harness, 32,768 elsewhere) implied a
+    size ordering that wall-clock does not honour: a chunk is exactly one
+    provider call, bounded by ``stage_provider_call_timeout_seconds`` (240s), and
+    at the measured ~38 visible tok/s that call cannot emit more than ~9,120
+    tokens on the platform primary whatever the budget says. So the budget was
+    never the binding constraint on Anthropic, and the divergence between the
+    three values has already caused one production bug (the Demo Day Files chunk
+    silently getting half the budget — see ``_is_harness_files_chunk``).
+
+    It still matters on the faster fallback providers and as the trigger for the
+    ``provider_stopped_by_limit`` doubling repair, so it stays generous — well
+    above every length target — and is clamped to the model's catalog ceiling.
+    """
+    return min(32_768, model_max_output_tokens(route.provider, route.model))
 
 
 def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
@@ -1808,31 +1906,46 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
     and were both unreachable inside the bound. Advertising a ceiling the
     model cannot reach inside the bound is what runs the clock out.
 
-    The harness CONTRACT chunk (below) deliberately keeps a HIGHER ceiling,
-    30,000 (the same ~6%-margin figure the other chunks moved away from), not
-    24,000. It shares the same chunk-#1/240s exposure in principle, but two
-    things distinguish it: (1) there is no measured incident of a harness
-    contract chunk ever hitting the watchdog — 65fe5f10 was a spec chunk, and
-    (2) unlike spec/plan/tasks, this chunk is not prose the model can pad or
-    tighten at will. Its ``## Requirement-to-Test Matrix`` is enumeration —
-    one row per upstream FR/NFR/SEC/AC, hard-gated ("missing one ID fails the
-    HARNESS") — and that same matrix is what
-    ``artifact_validator.harness_coverage_ratio`` parses into the deterministic
-    coverage number driving the coverage chip, the CoveragePanel gap list, and
-    the paid patch. A large spec's matrix can legitimately need more room than
-    24,000 leaves; truncating it doesn't fail loud like a watchdog kill, it
-    silently drops rows and corrupts coverage%. 30,000 gives that headroom
-    while still being reachable (~225s of the 240s cap) rather than the prior
-    45,000, which needed ~338s and was unreachable by design regardless of
-    content shape.
+    **The harness is no longer exempt, and its two chunks are budgeted to fit
+    the run together.** The harness is two STRICTLY SEQUENTIAL chunks drawing on
+    ONE run-scoped budget of 270 provider-seconds
+    (``GenerationControl.provider_seconds_remaining``), and nothing allocated it
+    between them. The Files chunk advertised "below 180,000 characters" — ~5x
+    what 240s buys — on the reasoning that its length is set by the promised
+    file list rather than by prose depth; but the watchdog kills on WALL CLOCK,
+    and the shape of the output is irrelevant to it. Meanwhile the contract
+    chunk's 30,000 could legitimately consume ~207s, leaving the chunk that
+    carries every runnable test file ~63s. The two targets now add up:
 
-    The lower bound of the target (below) is a density lever, deliberately
-    distinct from the depth floors (``_min_body_chars``, the task/requirement-
-    id minimums), which are untouched: those are advisory correctness floors
-    on the FINAL artifact, while this is prompt guidance for one call's prose
-    budget. A standard spec is 3 chunks, and harness's own floor is 60-90
-    chars, so the document as a whole is still budgeted well above any floor
-    even at the lower per-chunk target.
+        contract  3,000-15,000 chars  ~103s
+        files     below 22,000 chars  ~152s
+                                      ~255s of the 270s available
+
+    at the measured ~145 chars/s. The contract chunk does not need the old
+    headroom once the File Tree is bounded (below): its matrix is one row per
+    upstream identifier, and a 40-requirement matrix is ~3,200 characters.
+
+    **The promise is bounded too, which is the actual root cause.** "Emit every
+    promised runnable file" is unbounded because the File Tree was unbounded, so
+    no length target could make the Files chunk feasible on its own. The
+    contract chunk is now capped at ``_MAX_HARNESS_FILES`` /
+    ``_MAX_DEMO_DAY_HARNESS_FILES`` files, sized so ~22,000 characters leaves
+    each file genuinely runnable, and the Files chunk is told to shrink file
+    bodies rather than drop a file — dropping one is a loud gap now
+    (``missing_harness_files`` is body-aware in both modes), not a silent one.
+
+    The lower bound of the target is a density lever, deliberately distinct from
+    the depth floors (``_min_body_chars``, the task/requirement-id minimums),
+    which are untouched: those are advisory correctness floors on the FINAL
+    artifact, while this is prompt guidance for one call's prose budget. The
+    ``whole_document`` lower bound is **6,000**, not 3,500: a Demo Day plan is 13
+    required sections in ONE chunk against a 180-char depth floor, which needs
+    ~4,715 raw characters at the measured normalisation keep-rates (tables 69%,
+    mermaid 54%) — a ~0.3% margin against the 3,500 the same string advertised,
+    so a model obeying its own lower bound tripped ``shallow_required_section``
+    on multiple sections. ``test_chunk_floors_clear_the_depth_floors`` asserts
+    this relation for every (stage, mode) pair so the next density initiative
+    cannot silently re-create it.
 
     The two non-harness branches stay separate because ``whole_document``
     chunks carry the ENTIRE artifact in one call (Demo Day's ``demo-full``;
@@ -1843,23 +1956,18 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
     ``"demo-full"`` key string, for the same reason ``_is_harness_files_chunk``
     is: the two modes name their chunks differently, and key-string matching
     is exactly what silently excluded Demo Day from the harness Files budget.
-
-    The harness Files chunk is exempt from this reasoning entirely: it emits
-    runnable code whose length is set by the promised file list rather than by
-    prose depth, and it has its own budget (49,152 tokens) and its own
-    180,000-character bound. The harness CONTRACT chunk (chunk #1, both
-    standard and Demo Day) is in scope but at its own, higher ceiling — see
-    above — because it is enumeration-shaped, not prose-shaped like every
-    other chunk #1.
     """
     if _is_harness_files_chunk(stage_type, chunk):
         return (
-            "Length target: include every promised runnable file, while keeping "
-            "the complete chunk below 180,000 characters."
+            "Length target: keep the complete chunk below 22,000 characters. "
+            "Emit EVERY file named in the File Tree — never drop one to fit the "
+            "target. If space is tight, make each file leaner (fewer cases per "
+            "file, tighter fixtures) while keeping every file runnable: a "
+            "missing file is a coverage hole, a shorter file is not."
         )
     if stage_type == "harness":
         return (
-            "Length target: 3,000-30,000 characters for this contract chunk. "
+            "Length target: 3,000-15,000 characters for this contract chunk. "
             "The Requirement-to-Test Matrix and File Tree are enumeration, not "
             "prose — never drop a requirement row or a promised file to fit "
             "the target; trim the Overview/Coverage Plan prose first if space "
@@ -1867,7 +1975,7 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
         )
     if chunk.whole_document:
         return (
-            "Length target: 3,500-24,000 characters for this complete document. "
+            "Length target: 6,000-24,000 characters for this complete document. "
             "Every required section must be substantive and dense — spend the "
             "budget on concrete IDs, decisions, and assertions, never on "
             "preamble, restated headings, or filler. Shorter and denser beats "
@@ -2112,7 +2220,13 @@ def _chunk_specs_for_stage(
                     ],
                     extra=(
                         "The file tree must name every test, fixture, factory, "
-                        "and schema file that the Files section will contain."
+                        "and schema file that the Files section will contain, "
+                        f"and must name AT MOST {_MAX_HARNESS_FILES} files: "
+                        "group related tests into one file per requirement "
+                        "group rather than emitting one file per requirement. "
+                        "The next chunk must emit every file you name here, in "
+                        "a single pass, so a longer list means thinner files, "
+                        "not more coverage."
                     ),
                 ),
             ),
@@ -2857,6 +2971,10 @@ class StageManager:
                 ],
                 partial_content=artifact[:500_000],
             )
+        # The deterministic self-heals run BEFORE the completeness pass so every
+        # gate — and every advisory attached to the version — describes the bytes
+        # the user actually receives (see ``apply_deterministic_rewrites``).
+        artifact, rewrites = apply_deterministic_rewrites(stage_type, artifact, mode)
         advisory_issues: list[CompletenessIssue] = []
         try:
             await validate_artifact_completeness_async(stage_type, artifact, deps, mode)
@@ -2869,6 +2987,7 @@ class StageManager:
             content=artifact,
             content_generation_id=content_generation_id,
             depth_findings=advisory_issues,
+            rewrites=rewrites,
         )
 
     async def _generate_chunk_once(
@@ -4359,62 +4478,43 @@ class StageManager:
                 )
                 return
 
-            accumulated = _strip_code_fence(accumulated)
-
-            # Self-heal a duplicated harness: a cheap-tier model (or a chunk
-            # merge) can emit the entire ## Files section twice, doubling the
-            # artifact (observed: 122 KB that was an exact double of 61 KB).
-            # Deterministically drop duplicate `### File:` blocks before any gate
-            # or persistence — no LLM, no repair, no credit. Single chokepoint
-            # for both the chunked and non-chunked paths.
-            if stage.type == "harness":
-                accumulated, _deduped_blocks = dedupe_file_blocks(accumulated)
-                if _deduped_blocks:
-                    PIPELINE_HARNESS_FILE_DEDUP.labels(provider=route.provider).inc(
-                        _deduped_blocks
-                    )
-                    logger.warning(
-                        "stage_manager.harness_file_dedup stage_id=%s "
-                        "removed_blocks=%s provider=%s",
-                        stage.id,
-                        _deduped_blocks,
-                        route.provider,
-                    )
-
-            # Prompt-quality audit H1 backstop: drop duplicate contract-section
-            # bodies (first wins) before any gate or persistence. Parallel chunk
-            # waves have no cross-visibility, so a chunk-scope violation emits
-            # the same mandatory section twice with conflicting bodies — and the
-            # substring section gate passes both silently. Same chokepoint and
-            # semantics as the harness file-block self-heal above: zero-LLM,
-            # deterministic, no credit.
-            accumulated, _deduped_sections = dedupe_contract_sections(
-                stage.type, accumulated, mode
-            )
-            if _deduped_sections:
+            # The deterministic self-heals (whole-document fence unwrap, harness
+            # `### File:` de-duplication, contract-section de-duplication, TASKS
+            # Effort Summary reconciliation) already ran inside
+            # `_generate_durable_artifact`, immediately after assembly and BEFORE
+            # `validate_artifact_completeness` — so the depth advisories attached
+            # to this version describe the bytes the user receives, not a
+            # pre-dedupe draft. Only the telemetry is emitted here, from the
+            # counts that application returned: one rewrite, one increment.
+            rewrites = generated.rewrites
+            if rewrites.file_blocks_removed:
+                PIPELINE_HARNESS_FILE_DEDUP.labels(provider=route.provider).inc(
+                    rewrites.file_blocks_removed
+                )
+                logger.warning(
+                    "stage_manager.harness_file_dedup stage_id=%s "
+                    "removed_blocks=%s provider=%s",
+                    stage.id,
+                    rewrites.file_blocks_removed,
+                    route.provider,
+                )
+            if rewrites.sections_removed:
                 PIPELINE_SECTION_DEDUP.labels(
                     stage_type=stage.type, provider=route.provider
-                ).inc(_deduped_sections)
+                ).inc(rewrites.sections_removed)
                 logger.warning(
                     "stage_manager.section_dedup stage_id=%s stage_type=%s "
                     "removed_sections=%s provider=%s",
                     stage.id,
                     stage.type,
-                    _deduped_sections,
+                    rewrites.sections_removed,
                     route.provider,
                 )
-
-            # Prompt-quality audit M6: the tasks Effort Summary is emitted by the
-            # overview chunk before any task block exists, so its Tasks:/Sizes:
-            # counts are a forecast. Reconcile them against the actually-emitted
-            # task blocks deterministically; judgment lines are left untouched.
-            if stage.type == "tasks":
-                accumulated, _effort_reconciled = reconcile_effort_summary(accumulated)
-                if _effort_reconciled:
-                    logger.info(
-                        "stage_manager.effort_summary_reconciled stage_id=%s",
-                        stage.id,
-                    )
+            if rewrites.effort_reconciled:
+                logger.info(
+                    "stage_manager.effort_summary_reconciled stage_id=%s",
+                    stage.id,
+                )
 
             # Streaming is done; the deterministic gates (security validation,
             # technology safety, section presence) run next (issue #21 Phase 2c).
@@ -6275,7 +6375,18 @@ class StageManager:
         workspace_id = workspace.id
         patch_mode = _workspace_mode(workspace)
         system_prompt = await get_patch_system_prompt()
-        user_prompt = build_patch_user_prompt(baseline_content, uncovered_reqs)
+        # One patch is ONE provider call, bounded by the same 240s watchdog hard
+        # cap as a generation chunk — so the number of files it can be asked for
+        # is bounded too. The gap list is now scoped to the upstream SPEC's
+        # requirement set (`uncovered_requirements`), which on a harness with a
+        # truncated matrix can legitimately run to a dozen-plus entries; handing
+        # all of them to one call is the same "unbounded promise" defect the
+        # harness Files chunk had. The endpoint is repeatable and the panel
+        # recomputes the remaining gaps after each merge, so patching in batches
+        # is the correct shape — and a batch that fits is strictly better than a
+        # self-truncated one the user still pays for.
+        batch_reqs = uncovered_reqs[:_MAX_PATCH_REQUIREMENTS_PER_CALL]
+        user_prompt = build_patch_user_prompt(baseline_content, batch_reqs)
 
         route = _resolve_preflight_route(
             lambda: _route_for_stage_generation("harness", workspace)
@@ -6423,7 +6534,13 @@ class StageManager:
                     harness_content=None,
                 )
                 eval_event = json.dumps(
-                    {"eval": _eval_to_dict(structural_eval, harness_content=merged)}
+                    {
+                        "eval": _eval_to_dict(
+                            structural_eval,
+                            harness_content=merged,
+                            spec_content=eval_context,
+                        )
+                    }
                 )
             except Exception:
                 logger.warning(

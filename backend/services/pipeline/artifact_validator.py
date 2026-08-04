@@ -11,6 +11,7 @@ surface.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 # Required section headings per stage.  Order is the order they appear in the
@@ -201,10 +202,12 @@ _AC_ID_RE = re.compile(r"\bAC-\d{3}\b")
 _TASK_HEADER_RE = re.compile(r"^###\s+T-\d{3}:", re.MULTILINE)
 _TASK_DEP_RE = re.compile(r"\bT-(\d{3})\b")
 _TASK_FIELD_RE = re.compile(r"^\*\*(?P<field>[^*]+):\*\*\s*(?P<value>.*)$")
-_FILE_BLOCK_RE = re.compile(
-    r"^#{2,3}\s+File:\s+(.+?)\s*\n+```[^\n]*\n.*?\n```",
-    re.MULTILINE | re.DOTALL,
-)
+# NOTE: the old ``_FILE_BLOCK_RE`` ("heading immediately followed by a complete
+# fenced block") is deliberately gone. "Was this promised file actually emitted"
+# now has exactly ONE implementation — ``harness_test_index(...).files_with_body``
+# via :func:`_emitted_file_index` — because the second, weaker definition was
+# reachable only from ``_harness_issues`` (standard mode) and left Demo Day with
+# no file-body check at all.
 _INCOMPLETE_TRAILING_RE = re.compile(r"(:|,\s*|\|\s*)$")
 
 
@@ -544,25 +547,102 @@ def _is_not_applicable_body(body: str) -> bool:
     return bool(_NOT_APPLICABLE_RE.match(body))
 
 
-# Sections whose contract is a MANIFEST — a list of file paths — not prose.
-# Grading them with the prose depth floor is category-wrong and fires a
-# guaranteed false `shallow_required_section` on small-but-complete packages: a
-# correct 3-file Demo Day tree normalises to ~71 characters against a 90-char
-# floor, so EVERY lean harness was told its File Tree "does not contain
-# substantive content" while listing exactly the files it was asked to list.
-# Substance here is the number of paths named, which is also the only property
-# any downstream consumer (`missing_harness_files`, the Files-chunk checklist)
-# actually reads from the section.
-_MANIFEST_SECTIONS: frozenset[str] = frozenset({"## File Tree"})
+# Sections whose contract is a FIXED FORMAT — a manifest of paths, a lookup
+# table, a dependency graph — not prose. Grading them with the prose depth floor
+# is category-wrong and fires a guaranteed false `shallow_required_section` on
+# exactly the artifacts that are RIGHT, because the correct rendering of each is
+# short by construction:
+#
+#   * a correct 3-file Demo Day tree normalises to ~71 chars against a 90 floor;
+#   * the canonical 3-row Task Sizing Legend
+#     (`| Size | Effort |` / `| S | < 2h |` / …) normalises to 33 chars against
+#     a 50 floor — and adding a "Meaning" column pushes it to 124, so the
+#     advisory fired on the TIGHTER artifact;
+#   * a small Dependency Graph is a handful of `T-001 --> T-002` edges.
+#
+# Each grader measures the structure the section is actually for. A section that
+# carries NO structure of the expected kind falls through to the prose floor
+# rather than passing, so this can never widen into an escape hatch — that is
+# the whole reason these are graders and not an exemption list.
+_ENUMERATED_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S")
+_TABLE_SEPARATOR_RE = re.compile(r"^[\s|:\-]+$")
 
 
-def _manifest_section_issue(heading: str, body: str) -> CompletenessIssue | None:
-    """Grade a manifest section by the paths it names, never by prose length."""
-    if _file_tree_paths(body):
+def _table_data_rows(body: str) -> int:
+    """Markdown table rows that carry data (header and rule excluded)."""
+    pipe_rows = 0
+    separators = 0
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line.startswith("|"):
+            continue
+        pipe_rows += 1
+        if _TABLE_SEPARATOR_RE.match(line):
+            separators += 1
+    if not pipe_rows:
+        return 0
+    # One header row per separator rule; a table with no rule is all data.
+    return max(0, pipe_rows - separators - (1 if separators else 0))
+
+
+def _enumerated_rows(body: str) -> int:
+    """Rows of a fixed-format enumeration, however it is rendered.
+
+    A legend is equally correct as a markdown table or as a bullet list, so the
+    measure is the larger of the two counts. Prose scores zero and falls through
+    to the depth floor.
+    """
+    bullets = sum(1 for raw in body.splitlines() if _ENUMERATED_ITEM_RE.match(raw))
+    return max(_table_data_rows(body), bullets)
+
+
+@dataclass(frozen=True)
+class _StructuralGrader:
+    measure: Callable[[str], int]
+    minimum: int
+    detail: str
+    # Whether a section carrying none of the expected structure may still pass on
+    # prose length. False only where the structure IS the contract: a File Tree
+    # that names no paths is definitionally broken, however well it reads.
+    prose_fallback: bool
+
+
+_STRUCTURAL_SECTIONS: dict[str, _StructuralGrader] = {
+    "## File Tree": _StructuralGrader(
+        measure=lambda body: len(_file_tree_paths(body)),
+        minimum=1,
+        detail="does not name any file paths",
+        prose_fallback=False,
+    ),
+    "## Task Sizing Legend": _StructuralGrader(
+        measure=_enumerated_rows,
+        minimum=3,
+        detail="does not define at least three task sizes",
+        prose_fallback=True,
+    ),
+    "## Dependency Graph": _StructuralGrader(
+        measure=lambda body: len(set(_TASK_DEP_RE.findall(body))),
+        minimum=2,
+        detail="does not name at least two task identifiers",
+        prose_fallback=True,
+    ),
+}
+
+
+def _structural_section_issue(
+    heading: str, body: str, stage_type: str, mode: str
+) -> CompletenessIssue | None:
+    """Grade a fixed-format section by its structure, never by prose length."""
+    grader = _STRUCTURAL_SECTIONS[heading]
+    if grader.measure(body) >= grader.minimum:
+        return None
+    if grader.prose_fallback and len(
+        _normalise_body_for_depth(body)
+    ) >= _min_body_chars(stage_type, mode):
         return None
     return CompletenessIssue(
         code="shallow_required_section",
-        detail=f"{heading} does not name any file paths.",
+        detail=f"{heading} {grader.detail}.",
         reference=heading,
     )
 
@@ -577,10 +657,12 @@ def _section_body_issues(
     conditional = _conditional_headings_for_stage(stage_type)
     for heading in _required_headings(stage_type, deps, mode):
         body = _section_body(artifact_md, heading)
-        if heading in _MANIFEST_SECTIONS:
-            manifest_issue = _manifest_section_issue(heading, body)
-            if manifest_issue is not None:
-                issues.append(manifest_issue)
+        if heading in _STRUCTURAL_SECTIONS:
+            structural_issue = _structural_section_issue(
+                heading, body, stage_type, mode
+            )
+            if structural_issue is not None:
+                issues.append(structural_issue)
             continue
         # A conditional section answered with the blessed "Not applicable …"
         # one-liner is valid even though it is well under the depth floor — the
@@ -879,14 +961,17 @@ def _normalise_harness_path(path: str) -> str:
 # ---------------------------------------------------------------------------
 # Multi-language harness test index.
 #
-# ONE scanner, two consumers: the online-eval structural task validator and the
-# construction verifiers (``standard_plan_linter``). It used to live privately in
-# ``services/evals/online_eval.py`` while the verifier joined on the Python-only
-# ``_harness_test_refs`` below — so a Vitest/Go/RSpec harness parsed as ZERO
-# tests and C2 ``test_coverage`` hard-failed every non-Python package. Moving it
-# here (a pure, dependency-free module both can import) is what keeps the two
-# join keys from drifting again; ``online_eval`` now imports these names and
-# keeps its private aliases, so its behaviour is byte-identical.
+# ONE scanner, every consumer: the online-eval structural task validator, the
+# construction verifiers (``standard_plan_linter``), and the completeness gate's
+# ``_task_harness_ref_issues``. It used to live privately in
+# ``services/evals/online_eval.py`` while the verifier joined on a Python-only
+# ``_harness_test_refs`` — so a Vitest/Go/RSpec harness parsed as ZERO tests and
+# C2 ``test_coverage`` hard-failed every non-Python package. Moving it here (a
+# pure, dependency-free module every caller can import) is what keeps the join
+# keys from drifting again; ``online_eval`` imports these names and keeps its
+# private aliases, so its behaviour is byte-identical. The last Python-only
+# holdout (``_task_harness_ref_issues``) was migrated with it and the duplicate
+# scanner/matcher pair deleted.
 # ---------------------------------------------------------------------------
 _HARNESS_FILE_HEADING_RE = re.compile(r"^#{2,3}\s+File:\s+(.+)$")
 # H2 section heading (## Overview, ## Files, …). Ends the current ### File:
@@ -903,7 +988,14 @@ _SECTION_H2_RE = re.compile(r"^##\s+\S")
 # ``\s``: a leading tab is 4 columns (tab stop), so a tab-indented run of
 # backticks is content, never a fence delimiter — mirrors the tab guard on the
 # close path in `_harness_ref_index` (Fable verify #5).
-_HARNESS_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,})([^`]*)$")
+# TILDE fences (``~~~``) are accepted alongside backticks: CommonMark treats them
+# as equivalent, and this scanner's ``files_with_body`` is now the single
+# definition of "this promised file was actually emitted" (see
+# ``_emitted_file_index``). A tilde-fenced file read as BODYLESS would therefore
+# manufacture a coverage gap on a correct harness — a false alarm on exactly the
+# artifacts that are right. The info string keeps the conservative ``[^`]*``
+# bound for both delimiters.
+_HARNESS_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})([^`]*)$")
 _CLASS_DEF_RE = re.compile(r"^\s*class\s+(Test\w+)")
 # Python test functions (sync or async).
 _TEST_FUNC_DEF_RE = re.compile(r"^\s*(?:async\s+)?def\s+(test_\w+)")
@@ -1011,6 +1103,7 @@ def harness_test_index(harness_content: str) -> HarnessTestIndex:
     file_canon: str | None = None
     in_fence = False
     fence_len = 0
+    fence_char = "`"
     current_class: str | None = None
     current_describe: str | None = None
 
@@ -1069,6 +1162,9 @@ def harness_test_index(harness_content: str) -> HarnessTestIndex:
             if fence_m:
                 in_fence = True
                 fence_len = len(fence_m.group(1))
+                # A fence closes only on its OWN delimiter (CommonMark): a ``` run
+                # inside a ~~~ block is content.
+                fence_char = fence_m.group(1)[0]
                 # NOTE: files_with_body is recorded on the first non-blank line
                 # INSIDE the fence (below), not here at the opener. An empty
                 # fenced block (```lang immediately followed by the closing ```)
@@ -1098,7 +1194,7 @@ def harness_test_index(harness_content: str) -> HarnessTestIndex:
             # verify #5).
             and "\t" not in line[:leading]
             and bool(stripped)
-            and stripped.count("`") == len(stripped)
+            and stripped.count(fence_char) == len(stripped)
             and len(stripped) >= fence_len
         )
         if is_close:
@@ -1282,22 +1378,41 @@ def _canonical_basename(canon: str) -> str:
     return canon.rsplit("/", 1)[-1]
 
 
-def _emitted_file_index(artifact_md: str) -> tuple[set[str], set[str], set[str]]:
-    """Emitted ``### File:`` identity sets, for basename-safe presence checks.
+def _emitted_file_index(
+    artifact_md: str, index: HarnessTestIndex | None = None
+) -> tuple[set[str], set[str], set[str]]:
+    """Emitted-file identity sets, for basename-safe presence checks.
 
-    Returns ``(canonical_paths, all_basenames, bare_heading_basenames)``:
-    every heading's canonical path, the basename of every heading, and the
-    basenames of headings rendered WITHOUT a directory. See ``_file_is_emitted``
-    for how the three combine to match a bare tree/matrix entry to a
-    directory-qualified heading (and vice versa) without masking a real gap.
+    "Emitted" means the ``### File:`` heading opened a fenced code block **with
+    content** — ``harness_test_index(...).files_with_body`` — never the bare
+    heading. This is the single definition of the predicate, shared by
+    :func:`uncovered_requirements`, :func:`harness_coverage_ratio`,
+    :func:`missing_harness_files`, and :func:`_harness_issues`.
+
+    It used to be ``_FILE_HEADING_RE`` — headings only — which is how a harness
+    that listed every promised test file as a bare ``### File: tests/x.py`` with
+    ZERO code passed every gate and reported 100% coverage. The block-aware
+    check existed (``_FILE_BLOCK_RE``) but was reachable only from
+    ``_harness_issues``, i.e. the ``else`` branch of
+    :func:`validate_artifact_completeness` — so Demo Day, the guarantee-bearing
+    mode, ran no file-body check at all. Keying every consumer on one
+    body-aware scan closes that for both modes at once, and closes it for the
+    coverage NUMBER too (a bodyless file no longer counts as covering
+    anything), which the old ``_harness_issues``-only advisory never did.
+
+    ``files_with_body`` is the deliberately weakest, most language-agnostic
+    signal the scanner produces (any non-blank line inside any fence, in any
+    language) — not ``files_with_tests`` — so a file whose test shape we cannot
+    parse is still "emitted". A false gap here would be a paid alarm; a false
+    pass is a silent hole. This picks the conservative side of each.
+
+    Returns ``(canonical_paths, all_basenames, bare_heading_basenames)``. See
+    ``_file_is_emitted`` for how the three combine to match a bare tree/matrix
+    entry to a directory-qualified heading (and vice versa) without masking a
+    real gap. Pass a precomputed *index* to avoid re-scanning a large harness.
     """
-    canon = {
-        c
-        for c in (
-            _canonical_test_path(p) for p in _FILE_HEADING_RE.findall(artifact_md)
-        )
-        if c
-    }
+    scanned = index if index is not None else harness_test_index(artifact_md)
+    canon = {c for c in scanned.files_with_body if c}
     all_bases = {_canonical_basename(c) for c in canon}
     bare_bases = {c for c in canon if "/" not in c}
     return canon, all_bases, bare_bases
@@ -1626,85 +1741,48 @@ def reconcile_effort_summary(artifact_md: str) -> tuple[str, bool]:
 
 
 _MATRIX_REQ_ID_RE = re.compile(r"^(?:FR|NFR|SEC|AC)-\d+(?:\.\d+)*$")
+# A ``# Tests: FR-001`` / ``// Tests: AC-002, FR-003`` traceability tag on the
+# line above a test. The harness prompt mandates it, ``_test_has_traceability_
+# comment`` already checks for it, and ``prompts/harness_patch.py`` emits it —
+# the paid patch adds tagged FILES and no matrix row, so a matrix-only coverage
+# computation could never register the coverage the user just paid for.
+# The comment marker is REQUIRED, not optional. This is the one path that can
+# INFLATE coverage, and the segment scanned here spans a file's whole
+# ``### File:`` block — prose between the heading and the fence included — so a
+# bare narrative line reading ``Tests: FR-001, FR-002, FR-003`` would credit
+# three requirements without a line of code existing. Requiring a comment marker
+# and a following identifier matches both the harness prompt's mandated
+# ``# Tests: <req-id>`` form and ``_test_has_traceability_comment``.
+_TESTS_TAG_RE = re.compile(
+    r"^[ \t]*(?:[#*]|//|--|/\*)[ \t]*Tests:[ \t]*((?:FR|NFR|SEC|AC)-\d{3}.*)$",
+    re.MULTILINE,
+)
 
 
-def uncovered_requirements(harness_content: str) -> list[str]:
-    """Requirement IDs whose every mapped matrix test file was never emitted.
+def upstream_requirement_ids(*sources: str) -> set[str]:
+    """Distinct FR/NFR/SEC identifiers named across *sources*.
 
-    Reads the Requirement-to-Test Matrix as the source of truth for what each
-    requirement's test *should* be, then checks the ``## Files`` section for what
-    was actually emitted. A requirement is genuinely uncovered only when it maps
-    to ≥1 test file and **none** of those files exist as a ``### File:`` block —
-    so a requirement with at least one emitted test (even if another of its tiers
-    was trimmed) is correctly treated as covered, not a gap.
+    The public denominator builder for :func:`harness_coverage_ratio` — callers
+    pass the upstream SPEC body. Acceptance IDs are deliberately excluded: an AC
+    is verified through the requirement it belongs to, and mixing the two
+    inflates the denominator with rows the matrix is not asked to carry.
+    """
+    ids: set[str] = set()
+    for source in sources:
+        ids.update(_REQUIREMENT_ID_RE.findall(source or ""))
+    return ids
 
-    This replaces the old "scrape ``TestCategoryGap reqs=``" heuristic, which
-    surfaced *category-depth* trims as per-requirement gaps and so listed
-    requirements that already had tests. The returned set is the honest input to
-    both the coverage panel and the paid harness patch: it collapses to the real
-    holes (and to ``[]`` for a fully emitted harness). Order is matrix order;
-    duplicates are removed. Conservative by construction: a requirement whose row
-    names no parseable test file is never invented as a gap.
+
+def _matrix_requirement_files(harness_content: str) -> dict[str, set[str]]:
+    """``{requirement id: canonical test-file paths}`` from the RTM, in row order.
+
+    Conservative by construction: a row naming no parseable test file is skipped
+    entirely rather than invented as a gap.
     """
     matrix = _section_body(harness_content, "## Requirement-to-Test Matrix")
-    if not matrix:
-        return []
-    emitted = _emitted_file_index(harness_content)
     req_files: dict[str, set[str]] = {}
-    order: list[str] = []
-    for line in matrix.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("|"):
-            continue
-        cells = stripped.strip("|").split("|")
-        if not cells:
-            continue
-        req = cells[0].strip().strip("`").strip().upper()
-        if not _MATRIX_REQ_ID_RE.match(req):
-            continue
-        files = _matrix_cell_test_files(cells[1:])
-        if not files:
-            continue
-        if req not in req_files:
-            req_files[req] = set()
-            order.append(req)
-        req_files[req] |= files
-    return [
-        req
-        for req in order
-        if req_files[req]
-        and all(not _file_is_emitted(f, emitted) for f in req_files[req])
-    ]
-
-
-def harness_coverage_ratio(harness_content: str) -> tuple[int, int]:
-    """Deterministic ``(covered, total)`` requirement coverage for a harness.
-
-    ``total`` is the number of distinct requirement IDs the Requirement-to-Test
-    Matrix maps to at least one parseable test file; ``covered`` is how many of
-    those have at least one of their mapped files actually emitted as a
-    ``### File:`` block. Exactly the complement of :func:`uncovered_requirements`,
-    so the coverage number, the CoveragePanel gap list, and the paid patch can
-    never disagree — they are three views of one computation.
-
-    This exists to replace the judge's ``coverage_percent``, which is derived
-    from a harness compacted to ~20K chars (10K on the compact retry) while a
-    real harness runs 60–120KB. That is the same truncation poisoning that got
-    the judge's ``uncovered_reqs`` pulled from the UI and excluded from the paid
-    patch — but ``coverage_percent`` kept being displayed as a headline figure
-    and weighted at 0.20 in the harness score, so the judge was scoring coverage
-    it structurally could not see.
-
-    Returns ``(0, 0)`` when the matrix names no test files at all (unparseable
-    or absent). Callers must treat a zero total as "unknown" and show nothing —
-    never as 0% coverage, which would be a false alarm on an artifact whose
-    matrix simply did not parse.
-    """
-    matrix = _section_body(harness_content, "## Requirement-to-Test Matrix")
     if not matrix:
-        return 0, 0
-    emitted = _emitted_file_index(harness_content)
-    req_files: dict[str, set[str]] = {}
+        return req_files
     for line in matrix.splitlines():
         stripped = line.strip()
         if not stripped.startswith("|"):
@@ -1720,14 +1798,118 @@ def harness_coverage_ratio(harness_content: str) -> tuple[int, int]:
             continue
         req_files.setdefault(req, set())
         req_files[req] |= files
-    if not req_files:
+    return req_files
+
+
+def _tagged_requirement_ids(artifact_md: str, emitted_paths: set[str]) -> set[str]:
+    """Requirement IDs carried by ``Tests:`` tags inside EMITTED file bodies.
+
+    Scoped to files that actually have a body (``emitted_paths``) so a tag in a
+    heading-only stub can never claim coverage. This is the second of the two
+    ways a requirement can be covered — see :func:`covered_requirement_ids`.
+    """
+    files_idx = artifact_md.find("\n## Files")
+    if files_idx == -1:
+        return set()
+    tagged: set[str] = set()
+    segments = re.split(r"(?m)(?=^#{2,3}\s+File:\s+)", artifact_md[files_idx:])
+    for segment in segments[1:]:
+        heading = _FILE_HEADING_RE.match(segment)
+        if heading is None:
+            continue
+        if _canonical_test_path(heading.group(1)) not in emitted_paths:
+            continue
+        for tag_body in _TESTS_TAG_RE.findall(segment):
+            tagged.update(_REQUIREMENT_ID_RE.findall(tag_body))
+    return tagged
+
+
+def covered_requirement_ids(
+    harness_content: str, index: HarnessTestIndex | None = None
+) -> set[str]:
+    """Requirement IDs this harness demonstrably tests.
+
+    A requirement is covered when it has at least one **emitted-with-body** test
+    file, established by EITHER a Requirement-to-Test Matrix row mapping it to
+    that file, OR a ``# Tests: <id>`` traceability tag inside that file. The two
+    paths matter independently: the matrix is what the generator writes, the tag
+    is what the paid gap patch writes (patch files carry no matrix row).
+
+    Single predicate behind both :func:`harness_coverage_ratio` and
+    :func:`uncovered_requirements`, so the coverage chip, the CoveragePanel gap
+    list, and the paid patch cannot contradict each other.
+    """
+    scanned = index if index is not None else harness_test_index(harness_content)
+    emitted = _emitted_file_index(harness_content, scanned)
+    covered = {
+        req
+        for req, files in _matrix_requirement_files(harness_content).items()
+        if any(_file_is_emitted(path, emitted) for path in files)
+    }
+    covered |= _tagged_requirement_ids(harness_content, emitted[0])
+    return covered
+
+
+def uncovered_requirements(
+    harness_content: str, *, upstream_ids: set[str] | None = None
+) -> list[str]:
+    """Requirement IDs with no emitted test file.
+
+    With *upstream_ids* (the SPEC's FR/NFR/SEC set) this is the exact complement
+    of :func:`harness_coverage_ratio` — a requirement the matrix never mentioned
+    is a gap, not an absence of evidence. Without it, the answer is scoped to
+    what the matrix itself claims, which is all a caller holding only the harness
+    can honestly say.
+
+    The returned list is the input to both the CoveragePanel and the paid harness
+    patch, so it is conservative in the matrix-only mode: a requirement whose row
+    names no parseable test file is never invented as a gap.
+    """
+    covered = covered_requirement_ids(harness_content)
+    if upstream_ids:
+        return sorted({req.upper() for req in upstream_ids} - covered)
+    return [
+        req for req in _matrix_requirement_files(harness_content) if req not in covered
+    ]
+
+
+def harness_coverage_ratio(
+    harness_content: str, *, upstream_ids: set[str] | None = None
+) -> tuple[int, int]:
+    """Deterministic ``(covered, total)`` requirement coverage for a harness.
+
+    ``total`` is the number of distinct **upstream** FR/NFR/SEC identifiers
+    (``upstream_ids``, built from the SPEC by :func:`upstream_requirement_ids`);
+    ``covered`` is how many of those :func:`covered_requirement_ids` proves the
+    harness tests. Exactly the complement of :func:`uncovered_requirements` when
+    given the same ``upstream_ids``, so the coverage number, the CoveragePanel
+    gap list, and the paid patch are three views of one computation.
+
+    The denominator used to be "requirement rows present in the matrix", which
+    made the number structurally incapable of reporting the failure it existed to
+    catch: when the contract chunk runs out of budget the matrix loses rows, and
+    the denominator shrinks along with the numerator — a harness covering 12 of
+    20 requirements reported **100%**, with an empty gap list and a paid patch
+    that had nothing to patch, while the real gap surfaced only as a non-blocking
+    ``insufficient_upstream_traceability`` advisory contradicting the chip beside
+    it.
+
+    Returns ``(0, 0)`` when no upstream identifiers are supplied — callers must
+    treat a zero total as "unknown" and render nothing, never as 0%. There is
+    deliberately NO fallback to identifiers scraped from the harness itself: a
+    budget-truncated harness drops those requirements from its whole body, not
+    just from the matrix, so that fallback would reproduce the exact 100% lie.
+
+    This also replaces the judge's ``coverage_percent``, which is derived from a
+    harness compacted to ~20K chars (10K on the compact retry) while a real
+    harness runs 60–120KB — the same truncation poisoning that got the judge's
+    ``uncovered_reqs`` pulled from the UI and excluded from the paid patch.
+    """
+    total_ids = {req.upper() for req in (upstream_ids or set())}
+    if not total_ids:
         return 0, 0
-    covered = sum(
-        1
-        for files in req_files.values()
-        if any(_file_is_emitted(f, emitted) for f in files)
-    )
-    return covered, len(req_files)
+    covered = covered_requirement_ids(harness_content)
+    return len(total_ids & covered), len(total_ids)
 
 
 def _matrix_cell_test_files(cells: list[str]) -> set[str]:
@@ -1813,7 +1995,8 @@ def missing_harness_files(artifact_md: str) -> tuple[list[str], int]:
 
 def _harness_issues(artifact_md: str, deps: dict[str, str]) -> list[CompletenessIssue]:
     issues: list[CompletenessIssue] = []
-    emitted = _emitted_file_index(artifact_md)
+    index = harness_test_index(artifact_md)
+    emitted = _emitted_file_index(artifact_md, index)
     tree_paths = _file_tree_paths(_section_body(artifact_md, "## File Tree"))
     if tree_paths:
         # Compare canonically (case/`./`/`harness/`-insensitive) AND by basename
@@ -1924,10 +2107,29 @@ def _harness_issues(artifact_md: str, deps: dict[str, str]) -> list[Completeness
                 )
             )
             break
+    issues.extend(_harness_file_body_issues(artifact_md, index))
+    return issues
+
+
+def _harness_file_body_issues(
+    artifact_md: str, index: HarnessTestIndex
+) -> list[CompletenessIssue]:
+    """``### File:`` headings that were promised but carry no code — both modes.
+
+    Shared by standard and Demo Day (called from ``validate_artifact_completeness``
+    for the latter): "the Files section exists but nothing in it has a body" is a
+    structural fact about the artifact, not a mode-specific rigor level, and Demo
+    Day is the mode whose whole contract is that the package builds.
+
+    Reads the same body-aware scan as :func:`_emitted_file_index` rather than
+    re-matching fences with a second regex — the previous ``_FILE_BLOCK_RE``
+    required the fence to follow the heading IMMEDIATELY, so a file with one line
+    of prose before its code block was reported as lacking a block at all.
+    """
     if "## Files" not in artifact_md:
-        return issues
-    file_blocks = list(_FILE_BLOCK_RE.finditer(artifact_md))
-    if not file_blocks:
+        return []
+    issues: list[CompletenessIssue] = []
+    if not index.files_with_body:
         issues.append(
             CompletenessIssue(
                 code="missing_harness_file_blocks",
@@ -1938,20 +2140,23 @@ def _harness_issues(artifact_md: str, deps: dict[str, str]) -> list[Completeness
                 reference="## Files",
             )
         )
-    file_headings = _FILE_HEADING_RE.findall(artifact_md)
-    complete_paths = {match.group(1).strip() for match in file_blocks}
-    for path in file_headings:
-        if path.strip() not in complete_paths:
-            issues.append(
-                CompletenessIssue(
-                    code="incomplete_harness_file_block",
-                    detail=(
-                        f"Harness file {path.strip()} lacks a complete fenced "
-                        "code block."
-                    ),
-                    reference=path.strip(),
-                )
+    # ``known_files``/``files_with_body`` are canonical (casefolded, prefix
+    # stripped) — matching identity, never display. Recover each heading's
+    # original spelling for the message the user reads.
+    display: dict[str, str] = {}
+    for heading in _FILE_HEADING_RE.findall(artifact_md):
+        display.setdefault(_canonical_test_path(heading), heading.strip())
+    for path in sorted(index.known_files - index.files_with_body):
+        issues.append(
+            CompletenessIssue(
+                code="incomplete_harness_file_block",
+                detail=(
+                    f"Harness file {display.get(path, path)} lacks a complete "
+                    "fenced code block."
+                ),
+                reference=display.get(path, path),
             )
+        )
     return issues
 
 
@@ -2207,6 +2412,33 @@ def _first_token(value: str | None) -> str:
     return parts[0].upper() if parts else ""
 
 
+def _ref_token(ref: str) -> str:
+    """The harness reference inside a backticked token that may be a COMMAND.
+
+    Task acceptance criteria routinely cite a test as a runnable command —
+    ``pytest tests/test_auth.py::test_login -q`` — and the ``test_``-bearing
+    backtick scan picks the whole string up. Matching that verbatim always fails
+    (``parts[-1]`` is ``test_login -q``, not a test name), so every task that
+    wrote its acceptance criterion as a command produced a phantom
+    ``task_harness_ref_not_found`` on an artifact whose test exists.
+
+    Normalises first (so ``path :: test`` is one token, not three), then takes
+    the whitespace-delimited component that actually names a test — preferring a
+    ``::``-qualified one, else a path. A plain reference is returned unchanged.
+    """
+    normalized = _normalise_harness_ref(ref)
+    if " " not in normalized and "\t" not in normalized:
+        return normalized
+    tokens = normalized.split()
+    for token in tokens:
+        if "::" in token:
+            return token
+    for token in tokens:
+        if "/" in token:
+            return token
+    return normalized
+
+
 def _task_harness_ref_issues(
     artifact_md: str,
     deps: dict[str, str],
@@ -2214,7 +2446,14 @@ def _task_harness_ref_issues(
     harness = deps.get("harness", "")
     if not harness:
         return []
-    known = _harness_test_refs(harness)
+    # The SHARED multi-language index, not the retired Python-only scanner this
+    # call site was left behind on. That scanner keyed on `def test_` / `class
+    # Test`, so a Vitest/Go/RSpec harness parsed as ZERO refs and the check
+    # silently disabled itself (`if not known: return []`) — while its matcher
+    # skipped `_normalise_harness_ref`, manufacturing false gaps out of `path ::
+    # test` spacing, a `./` prefix, or a case difference. `online_eval` and
+    # `standard_plan_linter` already read this index; this was the last holdout.
+    known = harness_test_index(harness).known_refs
     if not known:
         return []
     task_refs = {
@@ -2222,7 +2461,9 @@ def _task_harness_ref_issues(
         for ref in re.findall(r"`([^`]*test_[^`]*)`", artifact_md)
         if "::" in ref or "/" in ref
     }
-    missing_refs = sorted(ref for ref in task_refs if not _ref_matches(ref, known))
+    missing_refs = sorted(
+        ref for ref in task_refs if not ref_matches_harness(_ref_token(ref), known)
+    )
     if missing_refs:
         return [
             CompletenessIssue(
@@ -2235,48 +2476,6 @@ def _task_harness_ref_issues(
             )
         ]
     return []
-
-
-def _harness_test_refs(harness: str) -> set[str]:
-    known: set[str] = set()
-    current_path: str | None = None
-    current_class: str | None = None
-    for line in harness.splitlines():
-        heading = re.match(r"^#{2,3}\s+File:\s+(.+?)$", line)
-        if heading:
-            current_path = heading.group(1).strip()
-            if current_path.startswith("harness/"):
-                current_path = current_path[len("harness/") :]
-            current_class = None
-            continue
-        class_match = re.match(r"^class\s+(Test\w+)", line)
-        if class_match:
-            current_class = class_match.group(1)
-            continue
-        if line and not line.startswith((" ", "\t")):
-            current_class = None
-        test_match = re.match(r"^\s*def\s+(test_\w+)", line)
-        if not test_match:
-            continue
-        name = test_match.group(1)
-        known.add(name)
-        if current_path:
-            known.add(f"{current_path}::{name}")
-        if current_class:
-            known.add(f"{current_class}::{name}")
-            if current_path:
-                known.add(f"{current_path}::{current_class}::{name}")
-    return known
-
-
-def _ref_matches(ref: str, known: set[str]) -> bool:
-    normalized = ref.strip().replace("\\", "/")
-    if normalized.startswith("harness/"):
-        normalized = normalized[len("harness/") :]
-    if normalized in known:
-        return True
-    parts = normalized.split("::")
-    return bool(parts) and (parts[-1] in known or "::".join(parts[-2:]) in known)
 
 
 # ---------------------------------------------------------------------------
@@ -2362,6 +2561,7 @@ def _e2e_names_a_test(body: str) -> bool:
 
 def _demo_day_harness_issues(artifact_md: str) -> list[CompletenessIssue]:
     issues: list[CompletenessIssue] = []
+    index = harness_test_index(artifact_md)
     e2e_body = _section_body(artifact_md, "## End-to-End Smoke Test")
     if not _e2e_names_a_test(e2e_body):
         issues.append(
@@ -2375,7 +2575,24 @@ def _demo_day_harness_issues(artifact_md: str) -> list[CompletenessIssue]:
                 reference="## End-to-End Smoke Test",
             )
         )
-    issues.extend(_promised_file_issues(artifact_md))
+    promised_issues = _promised_file_issues(artifact_md)
+    issues.extend(promised_issues)
+    # Backstop for the one file-emission hole ``_promised_file_issues`` cannot
+    # see: it reports only files the File Tree / Matrix promised in a PARSEABLE
+    # form, so a Files section with no bodies and no parseable promise is silent.
+    # Demo Day deliberately surfaces ONE consolidated file finding rather than
+    # standard mode's triad, so this fires only when that one is absent.
+    if not promised_issues and "## Files" in artifact_md and not index.files_with_body:
+        issues.append(
+            CompletenessIssue(
+                code="missing_harness_file_blocks",
+                detail=(
+                    "Demo Day HARNESS ## Files section contains no complete "
+                    "fenced code block."
+                ),
+                reference="## Files",
+            )
+        )
     return issues
 
 
