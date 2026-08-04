@@ -107,12 +107,20 @@ def test_demo_day_plan_user_prompt_verifies_the_new_contract() -> None:
 
 
 def test_demo_day_plan_prompt_version_is_bumped() -> None:
-    from prompts.base import stage_prompt_version
+    """Demo Day's plan carries its OWN version suffix, distinct from standard's.
 
-    assert stage_prompt_version("plan", "demo_day").endswith(":plan-v6")
+    The suffix moves whenever the Demo Day plan's rendered bytes move (v7: the
+    whole-document length floor 3,500 -> 6,000); what is pinned here is that it
+    is a separate key set, so a Demo Day change can never mutate the standard
+    version (the §4 regression-pin contract).
+    """
+    from prompts.base import DEMO_DAY_PROMPT_VERSION, stage_prompt_version
+
+    demo = stage_prompt_version("plan", "demo_day")
+    assert demo.startswith(f"{DEMO_DAY_PROMPT_VERSION}:plan-v")
     # §4 regression pin — the standard plan version is untouched.
     assert stage_prompt_version("plan") == stage_prompt_version("plan", "standard")
-    assert ":plan-v6" not in stage_prompt_version("plan")
+    assert DEMO_DAY_PROMPT_VERSION not in stage_prompt_version("plan")
 
 
 def test_demo_day_keep_list_carries_integrations_downstream() -> None:

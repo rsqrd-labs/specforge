@@ -23,8 +23,11 @@ wolf on a correct artifact is worse than no gate.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
+from config import settings
 from services.evals import online_eval as oe
 from services.pipeline import artifact_validator as av
 from services.pipeline import stage_manager as sm
@@ -40,6 +43,11 @@ _NESTED_TREE = (
     "└── e2e/\n"
     "    └── test_smoke.py"
 )
+
+
+def _char_figures(target: str) -> list[int]:
+    """Every "N,NNN characters"-style figure in a length target, ascending."""
+    return sorted(int(m.replace(",", "")) for m in re.findall(r"\d[\d,]{3,}", target))
 
 
 def _harness(files_section: str, *, tree: str, matrix: str) -> str:
@@ -99,7 +107,7 @@ def test_demo_day_files_chunk_gets_the_same_budget_as_standard():
     assert sm._chunk_length_target("harness", demo_files) == sm._chunk_length_target(
         "harness", std_files
     )
-    assert "every promised runnable file" in sm._chunk_length_target(
+    assert "Emit EVERY file named in the File Tree" in sm._chunk_length_target(
         "harness", demo_files
     )
 
@@ -732,10 +740,12 @@ def test_whole_document_chunks_get_a_single_call_length_target():
         assert chunk.whole_document is True
         target = sm._chunk_length_target(stage, chunk)
         assert "24,000" in target
-        # Density initiative (2026-08-02): the floor was lowered from 8,000 to
-        # 3,500 as a deliberate density lever — a per-call prose-budget change,
-        # not the depth floors (_min_body_chars etc.), which are untouched.
-        assert "3,500" in target
+        # The whole-document FLOOR is 6,000, not the 3,500 of a slice: a Demo
+        # Day plan is 13 required sections in ONE chunk against a 180-char depth
+        # floor, needing ~4,715 raw chars — a ~0.3% margin against 3,500, so a
+        # model obeying its own lower bound tripped shallow_required_section.
+        # test_chunk_floors_clear_the_depth_floors pins the relation.
+        assert "6,000" in target
 
 
 def test_standard_document_chunks_fit_one_provider_call():
@@ -781,7 +791,7 @@ def test_harness_length_targets_are_not_affected_by_the_whole_document_rule():
             for c in sm._chunk_specs_for_stage("harness", mode)
             if c.required_heading != "## Files"
         )
-        assert "every promised runnable file" in sm._chunk_length_target(
+        assert "Emit EVERY file named in the File Tree" in sm._chunk_length_target(
             "harness", files
         )
         assert "contract chunk" in sm._chunk_length_target("harness", contract)
@@ -800,16 +810,15 @@ def test_every_chunk_one_ceiling_stays_at_or_below_a_reachable_figure():
     walks every chunk-1-shaped target across both stage sets and both modes
     and pins each to a ceiling that is actually reachable inside the 240s cap.
 
-    The harness contract chunk deliberately keeps a HIGHER (less-margin)
-    reachable ceiling than spec/plan/tasks — 30,000 vs 24,000 — because unlike
-    them it is enumeration-shaped (Requirement-to-Test Matrix, File Tree)
-    rather than prose the model can freely tighten, and there is no measured
-    incident of this specific chunk overrunning the watchdog. Both figures
-    must stay reachable; neither may drift back toward the unreachable 45,000/
-    80,000 band a future edit might reintroduce.
+    The HARNESS is now in scope on both chunks, and the two must add up: they
+    are strictly sequential and share ONE run-scoped budget of 270 provider-
+    seconds. At ~145 chars/s, 15,000 (contract) + 22,000 (files) is ~255s. The
+    Files chunk was previously exempt at 180,000 characters — ~5x what 240s buys
+    — on the reasoning that its length is set by the file list rather than prose
+    depth; the watchdog kills on wall clock and does not care about the shape of
+    the output.
     """
     non_harness_ceiling = "24,000"
-    harness_ceiling = "30,000"
     for mode in ("standard", "demo_day"):
         for stage in ("spec", "plan", "tasks"):
             for chunk in sm._chunk_specs_for_stage(stage, mode):
@@ -822,8 +831,74 @@ def test_every_chunk_one_ceiling_stays_at_or_below_a_reachable_figure():
             if c.required_heading != "## Files"
         )
         target = sm._chunk_length_target("harness", contract)
-        assert harness_ceiling in target, (mode, "harness", contract.key, target)
-        assert "45,000" not in target, (mode, "harness", contract.key, target)
+        assert "15,000" in target, (mode, "harness", contract.key, target)
+        assert "45,000" not in target and "30,000" not in target
+
+        files = next(
+            c
+            for c in sm._chunk_specs_for_stage("harness", mode)
+            if c.required_heading == "## Files"
+        )
+        files_target = sm._chunk_length_target("harness", files)
+        assert "22,000" in files_target, (mode, "harness", files.key, files_target)
+        assert "180,000" not in files_target
+
+
+def test_the_two_harness_chunks_fit_the_run_budget_together():
+    """The harness is two STRICTLY SEQUENTIAL chunks on ONE 270s run budget.
+
+    Nothing in the code allocated that budget between them, so the contract
+    chunk's target could authorise ~207s and leave the chunk carrying every
+    runnable test file ~63s. The targets are now sized to add up.
+    """
+    chars_per_second = 145  # measured: ~38 tok/s at effort=medium, ~3.5 chars/tok
+    provider_seconds = (
+        settings.stage_generation_deadline_seconds
+        - settings.stage_generation_finalise_reserve_seconds
+    )
+    for mode in ("standard", "demo_day"):
+        ceilings = []
+        for chunk in sm._chunk_specs_for_stage("harness", mode):
+            target = sm._chunk_length_target("harness", chunk)
+            ceilings.append(max(_char_figures(target)))
+        assert len(ceilings) == 2, mode
+        assert sum(ceilings) / chars_per_second <= provider_seconds, (mode, ceilings)
+        # And each single chunk still fits one provider call on its own.
+        for ceiling in ceilings:
+            assert (
+                ceiling / chars_per_second
+                <= settings.stage_provider_call_timeout_seconds
+            ), (mode, ceiling)
+
+
+def test_chunk_floors_clear_the_depth_floors():
+    """A stage's prompted length FLOOR must leave room for its own depth floors.
+
+    Demo Day plan is the shape that broke: 13 required sections in ONE chunk at a
+    180-char normalised floor needs ~4,715 RAW characters once markdown
+    normalisation is accounted for (measured keep-rates: tables 69%, mermaid 54%,
+    bullets 79%) — against a 3,500-char advertised floor. ~0.3% margin, on a
+    prompt that also says "do not pad toward the upper bound", so a model obeying
+    its own instruction tripped shallow_required_section on multiple sections.
+
+    Asserted for every (stage, mode) pair so the next density initiative cannot
+    silently re-create it on a different shape.
+    """
+    keep_rate = 0.70  # conservative blend for table/diagram-heavy contracts
+    margin = 1.30
+    for mode in ("standard", "demo_day"):
+        for stage in ("spec", "plan", "harness", "tasks"):
+            headings = av.section_contract(stage, mode)
+            floor = av._min_body_chars(stage, mode)
+            needed = len(headings) * floor / keep_rate * margin
+            needed += sum(len(h) + 2 for h in headings)
+            budgeted = 0.0
+            for chunk in sm._chunk_specs_for_stage(stage, mode):
+                figures = _char_figures(sm._chunk_length_target(stage, chunk))
+                # A chunk whose target states only a ceiling (the harness Files
+                # chunk) contributes no floor — deliberately conservative.
+                budgeted += min(figures) if len(figures) > 1 else 0
+            assert budgeted >= needed, (stage, mode, budgeted, needed)
 
 
 def test_length_target_keys_on_structure_not_the_demo_full_key_string():

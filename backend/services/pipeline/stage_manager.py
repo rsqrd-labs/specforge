@@ -1700,6 +1700,23 @@ def _merge_harness_patch(existing: str, patch: str, *, source: str = "patch") ->
     return existing.rstrip() + "\n\n" + "\n\n".join(new_sections)
 
 
+# How many files the harness contract chunk may promise in its File Tree.
+#
+# The Files chunk emits every promised file in exactly ONE provider call, capped
+# by ``stage_provider_call_timeout_seconds`` (240s). At the measured ~145 chars/s
+# that call is budgeted at 22,000 characters (see ``_chunk_length_target``), so
+# 10 files leaves ~2,200 characters each — lean but genuinely runnable — and 6
+# leaves ~3,600 for a Demo Day package. Without a cap on the PROMISE, no length
+# target can make the Files chunk feasible: "emit every promised file" is
+# unbounded, so the model either overruns the watchdog (partial discarded, whole
+# deadline burned) or silently drops files.
+#
+# Consolidating tests per requirement group rather than one file per requirement
+# is the intended shape and is what the prompt asks for.
+_MAX_HARNESS_FILES = 10
+_MAX_DEMO_DAY_HARNESS_FILES = 6
+
+
 def _demo_day_chunk_specs_for_stage(stage_type: str) -> list[ArtifactChunkSpec]:
     """Chunking for Demo Day mode (single-pass per stage; harness split for files).
 
@@ -1725,7 +1742,12 @@ def _demo_day_chunk_specs_for_stage(stage_type: str) -> list[ArtifactChunkSpec]:
                     "Overview, Frozen Interface Contracts, Requirement-to-Test "
                     "Matrix, End-to-End Smoke Test, File Tree. The File Tree must "
                     "name every test, fixture, and schema file the Files section "
-                    "will contain, including the end-to-end smoke test file."
+                    "will contain, including the end-to-end smoke test file, and "
+                    f"must name AT MOST {_MAX_DEMO_DAY_HARNESS_FILES} files: "
+                    "group related tests into one file per requirement group "
+                    "rather than emitting one file per requirement. The next "
+                    "chunk must emit every file you name here, in a single pass, "
+                    "so a longer list means thinner files, not more coverage."
                 ),
             ),
             ArtifactChunkSpec(
@@ -1822,12 +1844,23 @@ def _is_harness_files_chunk(stage_type: str, chunk: ArtifactChunkSpec) -> bool:
 def _chunk_output_budget(
     stage_type: str, chunk: ArtifactChunkSpec, route: LLMRoute
 ) -> int:
-    """Return the fixed first-attempt ceiling for a generation chunk."""
-    if stage_type == "harness":
-        requested = 49_152 if _is_harness_files_chunk(stage_type, chunk) else 24_576
-    else:
-        requested = 32_768
-    return min(requested, model_max_output_tokens(route.provider, route.model))
+    """Return the fixed first-attempt ceiling for a generation chunk.
+
+    ONE number for every chunk. The per-chunk budgets (49,152 for the harness
+    Files chunk, 24,576 for the rest of the harness, 32,768 elsewhere) implied a
+    size ordering that wall-clock does not honour: a chunk is exactly one
+    provider call, bounded by ``stage_provider_call_timeout_seconds`` (240s), and
+    at the measured ~38 visible tok/s that call cannot emit more than ~9,120
+    tokens on the platform primary whatever the budget says. So the budget was
+    never the binding constraint on Anthropic, and the divergence between the
+    three values has already caused one production bug (the Demo Day Files chunk
+    silently getting half the budget — see ``_is_harness_files_chunk``).
+
+    It still matters on the faster fallback providers and as the trigger for the
+    ``provider_stopped_by_limit`` doubling repair, so it stays generous — well
+    above every length target — and is clamped to the model's catalog ceiling.
+    """
+    return min(32_768, model_max_output_tokens(route.provider, route.model))
 
 
 def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
@@ -1868,31 +1901,46 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
     and were both unreachable inside the bound. Advertising a ceiling the
     model cannot reach inside the bound is what runs the clock out.
 
-    The harness CONTRACT chunk (below) deliberately keeps a HIGHER ceiling,
-    30,000 (the same ~6%-margin figure the other chunks moved away from), not
-    24,000. It shares the same chunk-#1/240s exposure in principle, but two
-    things distinguish it: (1) there is no measured incident of a harness
-    contract chunk ever hitting the watchdog — 65fe5f10 was a spec chunk, and
-    (2) unlike spec/plan/tasks, this chunk is not prose the model can pad or
-    tighten at will. Its ``## Requirement-to-Test Matrix`` is enumeration —
-    one row per upstream FR/NFR/SEC/AC, hard-gated ("missing one ID fails the
-    HARNESS") — and that same matrix is what
-    ``artifact_validator.harness_coverage_ratio`` parses into the deterministic
-    coverage number driving the coverage chip, the CoveragePanel gap list, and
-    the paid patch. A large spec's matrix can legitimately need more room than
-    24,000 leaves; truncating it doesn't fail loud like a watchdog kill, it
-    silently drops rows and corrupts coverage%. 30,000 gives that headroom
-    while still being reachable (~225s of the 240s cap) rather than the prior
-    45,000, which needed ~338s and was unreachable by design regardless of
-    content shape.
+    **The harness is no longer exempt, and its two chunks are budgeted to fit
+    the run together.** The harness is two STRICTLY SEQUENTIAL chunks drawing on
+    ONE run-scoped budget of 270 provider-seconds
+    (``GenerationControl.provider_seconds_remaining``), and nothing allocated it
+    between them. The Files chunk advertised "below 180,000 characters" — ~5x
+    what 240s buys — on the reasoning that its length is set by the promised
+    file list rather than by prose depth; but the watchdog kills on WALL CLOCK,
+    and the shape of the output is irrelevant to it. Meanwhile the contract
+    chunk's 30,000 could legitimately consume ~207s, leaving the chunk that
+    carries every runnable test file ~63s. The two targets now add up:
 
-    The lower bound of the target (below) is a density lever, deliberately
-    distinct from the depth floors (``_min_body_chars``, the task/requirement-
-    id minimums), which are untouched: those are advisory correctness floors
-    on the FINAL artifact, while this is prompt guidance for one call's prose
-    budget. A standard spec is 3 chunks, and harness's own floor is 60-90
-    chars, so the document as a whole is still budgeted well above any floor
-    even at the lower per-chunk target.
+        contract  3,000-15,000 chars  ~103s
+        files     below 22,000 chars  ~152s
+                                      ~255s of the 270s available
+
+    at the measured ~145 chars/s. The contract chunk does not need the old
+    headroom once the File Tree is bounded (below): its matrix is one row per
+    upstream identifier, and a 40-requirement matrix is ~3,200 characters.
+
+    **The promise is bounded too, which is the actual root cause.** "Emit every
+    promised runnable file" is unbounded because the File Tree was unbounded, so
+    no length target could make the Files chunk feasible on its own. The
+    contract chunk is now capped at ``_MAX_HARNESS_FILES`` /
+    ``_MAX_DEMO_DAY_HARNESS_FILES`` files, sized so ~22,000 characters leaves
+    each file genuinely runnable, and the Files chunk is told to shrink file
+    bodies rather than drop a file — dropping one is a loud gap now
+    (``missing_harness_files`` is body-aware in both modes), not a silent one.
+
+    The lower bound of the target is a density lever, deliberately distinct from
+    the depth floors (``_min_body_chars``, the task/requirement-id minimums),
+    which are untouched: those are advisory correctness floors on the FINAL
+    artifact, while this is prompt guidance for one call's prose budget. The
+    ``whole_document`` lower bound is **6,000**, not 3,500: a Demo Day plan is 13
+    required sections in ONE chunk against a 180-char depth floor, which needs
+    ~4,715 raw characters at the measured normalisation keep-rates (tables 69%,
+    mermaid 54%) — a ~0.3% margin against the 3,500 the same string advertised,
+    so a model obeying its own lower bound tripped ``shallow_required_section``
+    on multiple sections. ``test_chunk_floors_clear_the_depth_floors`` asserts
+    this relation for every (stage, mode) pair so the next density initiative
+    cannot silently re-create it.
 
     The two non-harness branches stay separate because ``whole_document``
     chunks carry the ENTIRE artifact in one call (Demo Day's ``demo-full``;
@@ -1903,23 +1951,18 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
     ``"demo-full"`` key string, for the same reason ``_is_harness_files_chunk``
     is: the two modes name their chunks differently, and key-string matching
     is exactly what silently excluded Demo Day from the harness Files budget.
-
-    The harness Files chunk is exempt from this reasoning entirely: it emits
-    runnable code whose length is set by the promised file list rather than by
-    prose depth, and it has its own budget (49,152 tokens) and its own
-    180,000-character bound. The harness CONTRACT chunk (chunk #1, both
-    standard and Demo Day) is in scope but at its own, higher ceiling — see
-    above — because it is enumeration-shaped, not prose-shaped like every
-    other chunk #1.
     """
     if _is_harness_files_chunk(stage_type, chunk):
         return (
-            "Length target: include every promised runnable file, while keeping "
-            "the complete chunk below 180,000 characters."
+            "Length target: keep the complete chunk below 22,000 characters. "
+            "Emit EVERY file named in the File Tree — never drop one to fit the "
+            "target. If space is tight, make each file leaner (fewer cases per "
+            "file, tighter fixtures) while keeping every file runnable: a "
+            "missing file is a coverage hole, a shorter file is not."
         )
     if stage_type == "harness":
         return (
-            "Length target: 3,000-30,000 characters for this contract chunk. "
+            "Length target: 3,000-15,000 characters for this contract chunk. "
             "The Requirement-to-Test Matrix and File Tree are enumeration, not "
             "prose — never drop a requirement row or a promised file to fit "
             "the target; trim the Overview/Coverage Plan prose first if space "
@@ -1927,7 +1970,7 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
         )
     if chunk.whole_document:
         return (
-            "Length target: 3,500-24,000 characters for this complete document. "
+            "Length target: 6,000-24,000 characters for this complete document. "
             "Every required section must be substantive and dense — spend the "
             "budget on concrete IDs, decisions, and assertions, never on "
             "preamble, restated headings, or filler. Shorter and denser beats "
@@ -2172,7 +2215,13 @@ def _chunk_specs_for_stage(
                     ],
                     extra=(
                         "The file tree must name every test, fixture, factory, "
-                        "and schema file that the Files section will contain."
+                        "and schema file that the Files section will contain, "
+                        f"and must name AT MOST {_MAX_HARNESS_FILES} files: "
+                        "group related tests into one file per requirement "
+                        "group rather than emitting one file per requirement. "
+                        "The next chunk must emit every file you name here, in "
+                        "a single pass, so a longer list means thinner files, "
+                        "not more coverage."
                     ),
                 ),
             ),

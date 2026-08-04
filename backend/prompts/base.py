@@ -76,7 +76,17 @@ logger = structlog.get_logger(__name__)
 # "Check ASDD_PROMPT_VERSION bump" gate fails closed on any diff under
 # backend/prompts/ regardless of which mode it touches (same rationale as
 # v2.7.0 above).
-ASDD_PROMPT_VERSION = "asdd-v2.8.0"
+# v2.9.0 — harness capacity fix (harness-v7 below, plus every Demo Day stage).
+# The harness is TWO strictly sequential chunks sharing ONE 270-provider-second
+# run budget, and nothing allocated it between them: the Files chunk advertised
+# 180,000 characters (~5x what a 240s call buys at the measured ~145 chars/s)
+# and the contract chunk's 30,000 could consume ~207s of the 270 on its own.
+# Targets now add up (15,000 + 22,000 ≈ 255s) and the PROMISE is bounded too —
+# the File Tree is capped at 10 files (6 on Demo Day), because "emit every
+# promised file" cannot be made feasible by a length target while the list it
+# refers to is unbounded. Standard spec/plan/tasks prompt content is
+# byte-identical; bumped for the same fail-closed gate as v2.7.0/v2.8.0.
+ASDD_PROMPT_VERSION = "asdd-v2.9.0"
 STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # spec-v5: audit M8 — the clarification Q&A block is now fenced with
     # wrap_untrusted_content instead of rendering user-typed answers raw in
@@ -153,7 +163,19 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # "never drop a row/file to fit the target" instruction for the same
     # reason. The Files chunk (chunk #2, its own 49,152-token /
     # 180,000-char budget) is untouched.
-    "harness": f"{ASDD_PROMPT_VERSION}:harness-v6",
+    # harness-v7: harness capacity fix — BOTH chunks are now sized to fit the
+    # run together, because they are strictly sequential and share one 270s
+    # provider budget. Contract 30,000 -> 15,000 (~103s); Files 180,000 ->
+    # 22,000 (~152s) — the Files chunk's exemption ("its length is set by the
+    # promised file list rather than prose depth") was wrong: the watchdog kills
+    # on wall clock and the shape of the output is irrelevant to it. The File
+    # Tree is capped at _MAX_HARNESS_FILES (10) with an explicit
+    # consolidate-per-requirement-group instruction, which is the actual root
+    # cause — an unbounded promise cannot be made feasible by a length target —
+    # and the Files chunk is told to make files leaner rather than drop one.
+    # Per-chunk output budgets collapse to one number (32,768) since no call can
+    # emit more than ~9,120 visible tokens inside the 240s cap anyway.
+    "harness": f"{ASDD_PROMPT_VERSION}:harness-v7",
     # tasks-v5: finding #8 — tasks.py now instructs acknowledgement of any
     # harness TestCategoryGap record (a task or Open Questions/Assumptions
     # entry naming the deferred category), closing the gap where known-
@@ -221,7 +243,15 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
 # byte-identical (the regression pin). This bump alone changes every stage's
 # rendered prompt; see the per-stage suffixes below for stages whose OWN role
 # text also changed.
-DEMO_DAY_PROMPT_VERSION = "demo-day-v2.3.0"
+# v2.4.0 — harness capacity fix + the whole-document length FLOOR. Demo Day's
+# spec/plan/tasks are single-chunk whole_document, so they take the branch whose
+# floor moves 3,500 -> 6,000: 13 required plan sections at a 180-char depth floor
+# need ~4,715 RAW characters once markdown normalisation is accounted for, a
+# ~0.3% margin against a prompt that in the same breath says "do not pad toward
+# the upper bound" — so a model obeying its own lower bound tripped
+# shallow_required_section on multiple sections. The harness contract chunk also
+# picks up the 15,000 target and the 6-file File Tree cap (see harness-v5).
+DEMO_DAY_PROMPT_VERSION = "demo-day-v2.4.0"
 DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # spec-v3: "AI slop" frontend remediation — Overview gains one clause
     # naming the brand personality/emotional register (as a named contrast,
@@ -235,7 +265,8 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # 30,000 -> 24,000 characters, same 25%-margin reasoning.
     # spec-v5: the ~5-hour role-text mention becomes tier-aware
     # (`_spec_role(hours)`); sprint's default render is byte-identical.
-    "spec": f"{DEMO_DAY_PROMPT_VERSION}:spec-v5",
+    # spec-v6: whole-document length FLOOR 3,500 -> 6,000 (see v2.4.0 above).
+    "spec": f"{DEMO_DAY_PROMPT_VERSION}:spec-v6",
     # plan-v3: demo-readiness gaps — adds the mandatory ## External Integrations
     # and Secrets section (per-service REAL/MOCKED stance, env-var credential
     # source, on-stage failure fallback) and folds four demo-day stages into
@@ -262,7 +293,11 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # Environment and Bootstrap bullets gain a restricted-environment
     # reinforcement sentence when set. Sprint/unrestricted default render is
     # byte-identical.
-    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v6",
+    # plan-v7: whole-document length FLOOR 3,500 -> 6,000. THIS is the shape the
+    # fix exists for — 13 required sections in one chunk against the highest
+    # depth floor in either mode (180 chars) is the only contract whose prompted
+    # floor did not leave room for its own advisory floors.
+    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v7",
     # harness-v3: chunk-1 refund fix — Demo Day's contract chunk
     # ("demo-harness-contract") hits the same harness branch of
     # _chunk_length_target as standard's harness-v6; 45,000 -> 30,000
@@ -280,7 +315,14 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # only the plan got the explicit reinforcement. restricted_environment=False
     # (and the tier/hour parameters, which harness never used) render
     # byte-identical text — the regression pin.
-    "harness": f"{DEMO_DAY_PROMPT_VERSION}:harness-v4",
+    # harness-v5: harness capacity fix — the contract chunk takes the shared
+    # 3,000-15,000 target and the Files chunk the shared "below 22,000, never
+    # drop a file" one (see harness-v7 in the standard table), plus a File Tree
+    # capped at _MAX_DEMO_DAY_HARNESS_FILES (6) with a consolidate-per-
+    # requirement-group instruction. 6 rather than standard's 10 because a
+    # <=5-hour build is smaller and ~22,000 characters then leaves ~3,600 per
+    # file — comfortable room for a runnable Demo Day test file.
+    "harness": f"{DEMO_DAY_PROMPT_VERSION}:harness-v5",
     # tasks-v3: the C6 plan_coverage join — `Plan refs` now names PLAN.md
     # sections and enumerates the four load-bearing ones (seed dataset, demo
     # surface, external integrations, auth stance) that a task must cite, and
@@ -298,7 +340,8 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # tier-aware (`_tasks_role(hours, tier)`), gain a task-count hint for
     # extended/full_day tiers, and gain a restricted-environment check when
     # set. Sprint/unrestricted default render is byte-identical.
-    "tasks": f"{DEMO_DAY_PROMPT_VERSION}:tasks-v6",
+    # tasks-v7: whole-document length FLOOR 3,500 -> 6,000 (see v2.4.0 above).
+    "tasks": f"{DEMO_DAY_PROMPT_VERSION}:tasks-v7",
 }
 
 

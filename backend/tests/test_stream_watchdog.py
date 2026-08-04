@@ -274,11 +274,18 @@ def test_chunk_output_budgets_are_fixed_and_model_clamped(monkeypatch) -> None:
     harness_contract, harness_files = _chunk_specs_for_stage("harness")
     tasks_chunk = _chunk_specs_for_stage("tasks")[0]
 
+    # ONE budget for every chunk. A chunk is exactly one provider call bounded
+    # by stage_provider_call_timeout_seconds (240s), and at the measured ~38
+    # visible tok/s no call can emit more than ~9,120 tokens on the platform
+    # primary — so the per-chunk budgets were never the binding constraint, and
+    # their divergence has already caused one production bug (the Demo Day Files
+    # chunk silently getting half the budget). It stays generous for the faster
+    # fallback providers and for the stopped_by_limit doubling repair.
     assert _chunk_output_budget("spec", spec_chunk, route) == 32_768
     assert _chunk_output_budget("plan", plan_chunk, route) == 32_768
     assert _chunk_output_budget("tasks", tasks_chunk, route) == 32_768
-    assert _chunk_output_budget("harness", harness_contract, route) == 24_576
-    assert _chunk_output_budget("harness", harness_files, route) == 49_152
+    assert _chunk_output_budget("harness", harness_contract, route) == 32_768
+    assert _chunk_output_budget("harness", harness_files, route) == 32_768
 
     monkeypatch.setattr(
         stage_manager_module, "model_max_output_tokens", lambda *_: 8_192
