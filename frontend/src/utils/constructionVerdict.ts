@@ -86,6 +86,7 @@ export const CHECK_LABELS: Record<string, string> = {
   ac_to_test: "Every acceptance criterion has a test",
   e2e_reachable: "End-to-end smoke test is reachable",
   time_budget: "Estimated build time vs target",
+  environment_constraints: "No disallowed tooling (Docker/sudo/system installs)",
   // Standard
   requirement_coverage: "Every requirement is claimed by a task",
   test_coverage: "Every harness test is built by a task",

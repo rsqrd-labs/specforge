@@ -166,4 +166,59 @@ describe("CreateWorkspaceModal — Demo Day mode", () => {
     expect(payload.mode).toBe("demo_day")
     expect(payload.target_agent).toBe("codex")
   })
+
+  it("defaults the time budget to 5h and restricted environment to false", async () => {
+    flagState.demoDayMode = true
+    const user = userEvent.setup()
+    renderModal()
+
+    await user.type(screen.getByLabelText("Idea Name"), "Todos")
+    await user.type(screen.getByLabelText("What should this become?"), VALID_STATEMENT)
+    await user.click(screen.getByRole("button", { name: /Demo Day/ }))
+    expect(screen.getByRole("button", { name: "5h" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    )
+    await user.click(screen.getByRole("button", { name: /^Generate/ }))
+
+    await waitFor(() => expect(createWorkspaceMock).toHaveBeenCalledOnce())
+    const payload = createWorkspaceMock.mock.calls[0][0]
+    expect(payload.time_budget_minutes).toBe(300)
+    expect(payload.restricted_environment).toBe(false)
+  })
+
+  it("threads a chosen time budget and restricted-environment flag into the payload", async () => {
+    flagState.demoDayMode = true
+    const user = userEvent.setup()
+    renderModal()
+
+    await user.type(screen.getByLabelText("Idea Name"), "Todos")
+    await user.type(screen.getByLabelText("What should this become?"), VALID_STATEMENT)
+    await user.click(screen.getByRole("button", { name: /Demo Day/ }))
+    await user.click(screen.getByRole("button", { name: "24h" }))
+    await user.click(screen.getByRole("switch", { name: /Locked-down environment/ }))
+    await user.click(screen.getByRole("button", { name: /^Generate/ }))
+
+    await waitFor(() => expect(createWorkspaceMock).toHaveBeenCalledOnce())
+    const payload = createWorkspaceMock.mock.calls[0][0]
+    expect(payload.time_budget_minutes).toBe(1440)
+    expect(payload.restricted_environment).toBe(true)
+  })
+
+  it("omits time budget and restricted environment for a standard create", async () => {
+    flagState.demoDayMode = true
+    const user = userEvent.setup()
+    renderModal()
+
+    await user.type(screen.getByLabelText("Idea Name"), "Todos")
+    await user.type(screen.getByLabelText("What should this become?"), VALID_STATEMENT)
+    // Mode defaults to "standard" — the Demo Day-only controls never render.
+    expect(screen.queryByText("Build time budget")).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: /^Generate/ }))
+
+    await waitFor(() => expect(createWorkspaceMock).toHaveBeenCalledOnce())
+    const payload = createWorkspaceMock.mock.calls[0][0]
+    expect(payload).not.toHaveProperty("time_budget_minutes")
+    expect(payload).not.toHaveProperty("restricted_environment")
+  })
 })

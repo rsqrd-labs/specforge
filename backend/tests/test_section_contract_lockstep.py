@@ -44,7 +44,7 @@ _PROMPT_SOURCES = {
 }
 
 _DEMO_DAY_SOURCES = {
-    stage: demo_day_prompts._STAGE_ROLES[stage]
+    stage: demo_day_prompts._role_for(stage, None, False)
     for stage in ("spec", "plan", "harness", "tasks")
 }
 

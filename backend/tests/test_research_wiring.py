@@ -63,6 +63,7 @@ def _orm_workspace(*, enabled: bool) -> Workspace:
         public_share_enabled=False,
         disable_critic=False,
         brave_research_enabled=enabled,
+        restricted_environment=False,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )

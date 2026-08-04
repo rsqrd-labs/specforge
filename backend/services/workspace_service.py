@@ -31,7 +31,9 @@ class WorkspaceService:
     ) -> Workspace:
         await self._assert_problem_statement_is_valid(payload.problem_statement)
         initial_route = self._server_default_route()
-        mode, target_agent, time_budget_minutes = self._resolve_mode(payload)
+        mode, target_agent, time_budget_minutes, restricted_environment = (
+            self._resolve_mode(payload)
+        )
 
         # Lock the user row so concurrent create requests are serialized and
         # the quota check + insert are atomic within this transaction.
@@ -61,6 +63,7 @@ class WorkspaceService:
             mode=mode,
             target_agent=target_agent,
             time_budget_minutes=time_budget_minutes,
+            restricted_environment=restricted_environment,
         )
         db.add(workspace)
         await db.flush()
@@ -214,18 +217,25 @@ class WorkspaceService:
 
     def _resolve_mode(
         self, payload: WorkspaceCreate
-    ) -> tuple[str, str | None, int | None]:
-        """Resolve the persisted (mode, target_agent, time_budget_minutes).
+    ) -> tuple[str, str | None, int | None, bool]:
+        """Resolve the persisted (mode, target_agent, time_budget_minutes,
+        restricted_environment).
 
         The ``demo_day_mode_enabled`` config flag is the master server-side gate
         (plan §4/§0): when it is off, ``mode`` is forced to ``"standard"`` and the
-        Demo-Day-only time budget is dropped, so a client cannot opt a workspace
-        into Demo Day before the feature is enabled. Agent instructions apply to
-        both modes and therefore survive the standard-mode fallback.
+        Demo-Day-only time budget and environment constraint are dropped, so a
+        client cannot opt a workspace into Demo Day before the feature is
+        enabled. Agent instructions apply to both modes and therefore survive
+        the standard-mode fallback.
         """
         if not settings.demo_day_mode_enabled or payload.mode != "demo_day":
-            return "standard", payload.target_agent, None
-        return "demo_day", payload.target_agent, payload.time_budget_minutes
+            return "standard", payload.target_agent, None, False
+        return (
+            "demo_day",
+            payload.target_agent,
+            payload.time_budget_minutes,
+            payload.restricted_environment,
+        )
 
     def _server_default_route(self):
         try:

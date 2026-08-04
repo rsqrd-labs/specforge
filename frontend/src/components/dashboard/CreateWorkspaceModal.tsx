@@ -54,6 +54,17 @@ const AGENT_OPTIONS: { id: TargetAgent; name: string; desc: string }[] = [
 // mode is demo_day, so the selector is never left null.
 const DEFAULT_TARGET_AGENT: TargetAgent = "claude_code"
 
+// Time-budget presets (minutes). 5h is the default/untouched value — selecting
+// it produces the same payload shape a client omitting the field would (the
+// regression pin every existing Demo Day workspace relies on).
+const TIME_BUDGET_OPTIONS: { minutes: number; label: string }[] = [
+  { minutes: 300, label: "5h" },
+  { minutes: 480, label: "8h" },
+  { minutes: 720, label: "12h" },
+  { minutes: 1440, label: "24h" },
+]
+const DEFAULT_TIME_BUDGET_MINUTES = 300
+
 export function CreateWorkspaceModal({
   onClose,
   initialName = "",
@@ -76,6 +87,10 @@ export function CreateWorkspaceModal({
   const demoDayEnabled = featureFlags.demoDayMode
   const [mode, setMode] = useState<WorkspaceMode>("standard")
   const [targetAgent, setTargetAgent] = useState<TargetAgent>(DEFAULT_TARGET_AGENT)
+  const [timeBudgetMinutes, setTimeBudgetMinutes] = useState<number>(
+    DEFAULT_TIME_BUDGET_MINUTES,
+  )
+  const [restrictedEnvironment, setRestrictedEnvironment] = useState(false)
   const isDemoDay = demoDayEnabled && mode === "demo_day"
 
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -114,6 +129,8 @@ export function CreateWorkspaceModal({
       // Mode remains Demo-Day-only; agent instructions apply to every workspace.
       if (isDemoDay) {
         payload.mode = "demo_day"
+        payload.time_budget_minutes = timeBudgetMinutes
+        payload.restricted_environment = restrictedEnvironment
       }
       const ws = await createWorkspace(payload)
       void navigate(`/workspace/${ws.id}`)
@@ -278,6 +295,44 @@ export function CreateWorkspaceModal({
                 ))}
               </div>
 
+            </div>
+          )}
+
+          {/* Time budget + restricted-environment (Demo Day only). Untouched
+              defaults (5h, unrestricted) reproduce today's behavior exactly. */}
+          {isDemoDay && (
+            <div className="modal-mode">
+              <span className="modal-label">Build time budget</span>
+              <div className="modal-mode-grid">
+                {TIME_BUDGET_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.minutes}
+                    type="button"
+                    onClick={() => setTimeBudgetMinutes(opt.minutes)}
+                    aria-pressed={timeBudgetMinutes === opt.minutes}
+                    className={`provider-pill${timeBudgetMinutes === opt.minutes ? " selected" : ""}`}
+                  >
+                    <span>{opt.label}</span>
+                  </button>
+                ))}
+              </div>
+              <p className="modal-mode-hint">
+                Advisory only — bigger budgets deepen the same one happy path
+                (more edge cases, more tasks), never multiple features.
+              </p>
+
+              <button
+                type="button"
+                role="switch"
+                aria-checked={restrictedEnvironment}
+                onClick={() => setRestrictedEnvironment((v) => !v)}
+                className={`provider-pill${restrictedEnvironment ? " selected" : ""}`}
+              >
+                <span>Locked-down environment</span>
+                <small className="modal-provider-desc">
+                  No Docker, no admin/sudo installs (e.g. a hackathon laptop)
+                </small>
+              </button>
             </div>
           )}
 

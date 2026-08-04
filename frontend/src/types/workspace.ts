@@ -92,8 +92,14 @@ export interface Workspace {
   mode?: WorkspaceMode
   /** Coding-agent instruction files included in ZIP and GitHub exports. */
   target_agent?: TargetAgent | null
-  /** Advisory build-time target in minutes (demo_day only; target ≤ 300). */
+  /** Advisory build-time target in minutes (demo_day only; target ≤ 1440). */
   time_budget_minutes?: number | null
+  /**
+   * Locked-down build environment (demo_day only) — no Docker, no admin/sudo
+   * installs. Set at creation for a hackathon venue that disallows installing
+   * Docker/admin software.
+   */
+  restricted_environment?: boolean
   /**
    * Persisted construction verdict (demo_day only, plan §7.2). Null for a
    * standard workspace and until the verifier first runs after the tasks stage.
@@ -114,4 +120,5 @@ export interface CreateWorkspacePayload {
   mode?: WorkspaceMode
   target_agent?: TargetAgent | null
   time_budget_minutes?: number | null
+  restricted_environment?: boolean
 }

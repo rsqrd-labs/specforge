@@ -22,6 +22,15 @@ guarantee by checking that the package is internally consistent:
   while the verdict still read ``verified``.
 - C7 ``task_inventory`` (advisory) — the task count against the plan's own Build
   Sequence steps and the spec's ``FR-NNN`` count.
+- C8 ``environment_constraints`` (advisory) — when ``restricted_environment`` is
+  set (a hackathon venue that disallows installing Docker/admin software), a
+  zero-LLM command-shaped denylist scan of PLAN.md/HARNESS/TASKS.md for
+  Docker/podman/kubectl/sudo/system-package-install invocations. A no-op when
+  ``restricted_environment`` is False. Matches invocation syntax
+  (``docker run``, ``sudo apt install``, …), never a bare noun, so a compliant
+  artifact's own prose ("Assumption: Docker unavailable, using SQLite instead")
+  never fires — the prompt (``prompts/demo_day.py``) explicitly asks the model
+  to write that sentence when it avoids Docker for a genuine need.
 
 **Verdict:** every check that is non-advisory AND enforced must pass. C5 and C7
 are advisory — reported but never verdict-bearing (the §2.2 separation of the two
@@ -76,6 +85,36 @@ __all__ = [
     "is_verdict_stale",
     "verify_construction",
 ]
+
+# Fix 2 (restricted-environment constraint). Command-shaped denylist — matches
+# invocation syntax, not a bare noun, mirroring the false-positive guarding in
+# services.security.downstream_command_guard (a sibling deterministic denylist
+# for a different trust boundary). A bare "Docker" mention in prose — including
+# the prompt's own mandated "Assumption: Docker unavailable, using X instead"
+# substitution sentence — never matches any of these.
+_ENVIRONMENT_CONSTRAINT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\bdocker(?:[\s-]compose)?\s+(?:run|up|build|exec|pull|push)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bdocker-compose\b", re.IGNORECASE),
+    re.compile(r"\bpodman\s+(?:run|build|compose)\b", re.IGNORECASE),
+    re.compile(r"\bkubectl\s+\S", re.IGNORECASE),
+    re.compile(r"\bhelm\s+install\b", re.IGNORECASE),
+    re.compile(r"\bsudo\s+(?:apt|apt-get|brew|yum|dnf|pacman)\b", re.IGNORECASE),
+    re.compile(r"\b(?:apt-get|apt)\s+install\b", re.IGNORECASE),
+    re.compile(r"\bbrew\s+install\b", re.IGNORECASE),
+    re.compile(r"\bsystemctl\s+\S", re.IGNORECASE),
+    re.compile(r"\bvagrant\s+up\b", re.IGNORECASE),
+    # A literal Dockerfile reference (path, heading, or backtick) implies a
+    # container build regardless of whether it's invoked via a command above.
+    re.compile(r"\bDockerfile\b"),
+)
+
+# A complete markdown table row: structured data (e.g. a Technology Stack
+# table cell), never a command to auto-run — skipped so a runtime named in a
+# stack table is never mistaken for an invocation.
+_MARKDOWN_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
 
 # The linter's fallback build-time target when the workspace column is NULL. The
 # default lives here, not in the DB (plan §7.1.1 / §7.2).
@@ -395,6 +434,40 @@ def _check_task_inventory(
     return CheckResult("task_inventory", not gaps, gaps, advisory=True)
 
 
+def _environment_constraint_hits(text: str, source: str) -> list[str]:
+    if not text:
+        return []
+    hits: list[str] = []
+    for line in text.splitlines():
+        if _MARKDOWN_TABLE_ROW_RE.match(line):
+            continue
+        for pattern in _ENVIRONMENT_CONSTRAINT_PATTERNS:
+            match = pattern.search(line)
+            if match:
+                hits.append(
+                    f"{source}: disallowed for a locked-down environment — "
+                    f"{match.group(0)!r} in: {line.strip()[:160]}"
+                )
+                break  # one hit per line is enough signal
+    return hits
+
+
+def _check_environment_constraints(
+    plan_md: str, harness_md: str, tasks_md: str, restricted_environment: bool
+) -> CheckResult:
+    """C8 (advisory): no Docker/admin-install invocation when the workspace is
+    marked restricted_environment. A no-op (always passes, no gaps) otherwise —
+    zero behavior change for every workspace that doesn't set the flag."""
+    if not restricted_environment:
+        return CheckResult("environment_constraints", True, [], advisory=True)
+    gaps = (
+        _environment_constraint_hits(plan_md, "PLAN.md")
+        + _environment_constraint_hits(harness_md, "HARNESS")
+        + _environment_constraint_hits(tasks_md, "TASKS.md")
+    )
+    return CheckResult("environment_constraints", not gaps, gaps, advisory=True)
+
+
 def _ordered_unique(values: list[str]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
@@ -414,6 +487,7 @@ def verify_construction(
     time_budget_minutes: int | None = None,
     stage_versions: dict[str, int] | None = None,
     enforce_plan_coverage: bool = False,
+    restricted_environment: bool = False,
 ) -> ConstructionVerdict:
     """Run C1–C7 over the four finalised stage contents and return the verdict.
 
@@ -450,7 +524,19 @@ def verify_construction(
         enforced=enforce_plan_coverage,
     )
     c7 = _check_task_inventory(spec or "", plan or "", blocks)
-    checks = {"C1": c1, "C2": c2, "C3": c3, "C4": c4, "C5": c5, "C6": c6, "C7": c7}
+    c8 = _check_environment_constraints(
+        plan or "", harness or "", tasks or "", restricted_environment
+    )
+    checks = {
+        "C1": c1,
+        "C2": c2,
+        "C3": c3,
+        "C4": c4,
+        "C5": c5,
+        "C6": c6,
+        "C7": c7,
+        "C8": c8,
+    }
     verified = resolve_verified(checks)
     return ConstructionVerdict(
         verified=verified,

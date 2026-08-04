@@ -245,6 +245,104 @@ def test_c7_never_affects_the_verdict_even_when_failing() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Demo Day C8 — environment_constraints (advisory only; no-op unless
+# restricted_environment is set; command-shaped denylist, never a bare noun).
+# ---------------------------------------------------------------------------
+
+
+def test_c8_is_a_noop_when_restricted_environment_is_false() -> None:
+    plan_with_docker = _DD_PLAN + "\nRun `docker compose up` to start the stack.\n"
+    verdict = demo_day_plan_linter.verify_construction(
+        spec="FR-001", plan=plan_with_docker, harness="", tasks=_DD_TASKS
+    )
+    c8 = verdict.checks["C8"]
+    assert c8.passed is True
+    assert c8.gaps == []
+    assert c8.advisory is True
+
+
+def test_c8_flags_a_docker_invocation_in_the_plan_when_restricted() -> None:
+    plan_with_docker = _DD_PLAN + "\nRun `docker compose up` to start the stack.\n"
+    verdict = demo_day_plan_linter.verify_construction(
+        spec="FR-001",
+        plan=plan_with_docker,
+        harness="",
+        tasks=_DD_TASKS,
+        restricted_environment=True,
+    )
+    c8 = verdict.checks["C8"]
+    assert c8.passed is False
+    assert c8.advisory is True
+    assert any("docker compose up" in gap for gap in c8.gaps)
+
+
+def test_c8_flags_a_sudo_install_only_present_in_tasks() -> None:
+    tasks_with_sudo = _DD_TASKS.replace(
+        "1. `pytest tests/e2e/test_smoke.py` passes.",
+        "1. Run `sudo apt-get install -y postgresql`, then `pytest tests/e2e/"
+        "test_smoke.py` passes.",
+    )
+    verdict = demo_day_plan_linter.verify_construction(
+        spec="FR-001",
+        plan=_DD_PLAN,
+        harness="",
+        tasks=tasks_with_sudo,
+        restricted_environment=True,
+    )
+    c8 = verdict.checks["C8"]
+    assert c8.passed is False
+    assert any("TASKS.md" in gap and "sudo apt" in gap for gap in c8.gaps)
+
+
+def test_c8_never_fires_on_the_compliant_docker_substitution_sentence() -> None:
+    """The prompt (prompts/demo_day.py) explicitly asks the model to write this
+    exact sentence when it substitutes away from Docker. It must never trip the
+    denylist — that would penalise the artifacts that got it right."""
+    compliant_plan = (
+        _DD_PLAN + "\nAssumption: Docker unavailable, using SQLite instead. Run "
+        "`pip install -r requirements.txt && python app.py`.\n"
+    )
+    verdict = demo_day_plan_linter.verify_construction(
+        spec="FR-001",
+        plan=compliant_plan,
+        harness="",
+        tasks=_DD_TASKS,
+        restricted_environment=True,
+    )
+    c8 = verdict.checks["C8"]
+    assert c8.passed is True
+    assert c8.gaps == []
+
+
+def test_c8_ignores_docker_named_in_a_technology_stack_table_row() -> None:
+    plan_with_table = _DD_PLAN + (
+        "\n## Technology Stack\n| Layer | Choice |\n| --- | --- |\n"
+        "| Runtime | Docker 24 |\n"
+    )
+    verdict = demo_day_plan_linter.verify_construction(
+        spec="FR-001",
+        plan=plan_with_table,
+        harness="",
+        tasks=_DD_TASKS,
+        restricted_environment=True,
+    )
+    assert verdict.checks["C8"].passed is True
+
+
+def test_c8_never_affects_the_verdict_even_when_failing() -> None:
+    plan_with_docker = _DD_PLAN + "\nRun `docker compose up` to start the stack.\n"
+    verdict = demo_day_plan_linter.verify_construction(
+        spec="FR-001",
+        plan=plan_with_docker,
+        harness="",
+        tasks=_DD_TASKS,
+        restricted_environment=True,
+    )
+    assert verdict.checks["C8"].passed is False
+    assert verdict.checks["C8"].advisory is True
+
+
+# ---------------------------------------------------------------------------
 # Standard mode fixtures — a small but internally consistent package.
 # ---------------------------------------------------------------------------
 

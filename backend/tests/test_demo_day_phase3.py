@@ -195,6 +195,19 @@ def test_golden_package_is_verified():
     assert verdict.stage_versions == {"spec": 1, "plan": 1, "harness": 1, "tasks": 1}
 
 
+def test_c8_failing_never_flips_an_otherwise_verified_package():
+    """C8 is advisory (see CheckResult docs) — `resolve_verified` must filter it
+    out regardless of outcome. Proven against a package that is genuinely
+    ``verified`` on every other check, so a regression that made C8 verdict-
+    bearing would be caught here, not masked by an unrelated C1-C7 failure."""
+    harness_with_docker = _HARNESS + "\nRun `docker compose up` to start the stack.\n"
+    verdict = _verify(harness=harness_with_docker, restricted_environment=True)
+    assert verdict.checks["C8"].passed is False
+    assert verdict.checks["C8"].advisory is True
+    assert all(verdict.checks[c].passed for c in ("C1", "C2", "C3", "C4"))
+    assert verdict.verified is True
+
+
 def test_verdict_to_dict_shape_round_trips_into_report():
     verdict = _verify()
     payload = verdict.to_dict()

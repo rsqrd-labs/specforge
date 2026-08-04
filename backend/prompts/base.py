@@ -70,7 +70,13 @@ logger = structlog.get_logger(__name__)
 # with no per-stage-only exception. Cache-busting every stage's Langfuse
 # prompt-cache entry for a harness-only content change is the known, accepted
 # cost of satisfying that gate rather than special-casing it.
-ASDD_PROMPT_VERSION = "asdd-v2.7.0"
+# v2.8.0 — Demo Day restricted-environment + tiered time-budget support
+# (DEMO_DAY_PROMPT_VERSION v2.3.0 below). Standard-mode prompt content is
+# byte-identical; bumped only because .github/workflows/prompt-eval.yml's
+# "Check ASDD_PROMPT_VERSION bump" gate fails closed on any diff under
+# backend/prompts/ regardless of which mode it touches (same rationale as
+# v2.7.0 above).
+ASDD_PROMPT_VERSION = "asdd-v2.8.0"
 STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # spec-v5: audit M8 — the clarification Q&A block is now fenced with
     # wrap_untrusted_content instead of rendering user-typed answers raw in
@@ -202,7 +208,20 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
 # whole-document verify tail and carry a chunk-scoped closing contract. Demo
 # Day's own prompt texts are untouched (DEMO_DAY_OUTPUT_RULES deliberately
 # keeps its breadth-trimming contract and did not inherit the M10 rewording).
-DEMO_DAY_PROMPT_VERSION = "demo-day-v2.2.0"
+# v2.3.0 — DEMO_DAY_DIRECTIVE (shared infrastructure, included in every
+# stage's system prompt) gains two parameters per
+# docs/evals/PROMPT_CHANGE_REVIEW.md's shared-infrastructure exception: (1)
+# the ~5-hour budget bullet is now tier-aware (`time_budget_minutes`; sprint
+# ≤6h renders byte-identical text, extended/full_day deepen the SAME one
+# happy path within the SAME per-call length ceiling — never a bigger one)
+# and (2) the Zero-provisioning bias bullet becomes a hard "Docker is NOT
+# available" constraint when `restricted_environment` is set (a hackathon
+# venue that disallows installing Docker/admin software). Both default to the
+# original sprint/unrestricted text, so an unparameterized render is
+# byte-identical (the regression pin). This bump alone changes every stage's
+# rendered prompt; see the per-stage suffixes below for stages whose OWN role
+# text also changed.
+DEMO_DAY_PROMPT_VERSION = "demo-day-v2.3.0"
 DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # spec-v3: "AI slop" frontend remediation — Overview gains one clause
     # naming the brand personality/emotional register (as a named contrast,
@@ -214,7 +233,9 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # whole_document=True ("demo-full"), so it hits the same
     # _chunk_length_target whole-document branch as standard's spec-v9;
     # 30,000 -> 24,000 characters, same 25%-margin reasoning.
-    "spec": f"{DEMO_DAY_PROMPT_VERSION}:spec-v4",
+    # spec-v5: the ~5-hour role-text mention becomes tier-aware
+    # (`_spec_role(hours)`); sprint's default render is byte-identical.
+    "spec": f"{DEMO_DAY_PROMPT_VERSION}:spec-v5",
     # plan-v3: demo-readiness gaps — adds the mandatory ## External Integrations
     # and Secrets section (per-service REAL/MOCKED stance, env-var credential
     # source, on-stage failure fallback) and folds four demo-day stages into
@@ -236,7 +257,12 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # same as the other four C6 sections).
     # plan-v5: chunk-1 refund fix — same whole_document 30,000 -> 24,000 drop
     # as spec-v4, same reasoning.
-    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v5",
+    # plan-v6: the ~5-hour role-text mention becomes tier-aware
+    # (`_plan_role(hours, restricted_environment)`), and the Technology Stack /
+    # Environment and Bootstrap bullets gain a restricted-environment
+    # reinforcement sentence when set. Sprint/unrestricted default render is
+    # byte-identical.
+    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v6",
     # harness-v3: chunk-1 refund fix — Demo Day's contract chunk
     # ("demo-harness-contract") hits the same harness branch of
     # _chunk_length_target as standard's harness-v6; 45,000 -> 30,000
@@ -244,7 +270,17 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # timeout on this chunk, and its RTM/File Tree content is enumeration, not
     # prose, so it keeps more headroom). The Files chunk ("demo-harness-files")
     # is untouched.
-    "harness": f"{DEMO_DAY_PROMPT_VERSION}:harness-v3",
+    # harness-v4: the ~5h/restricted_environment directive parameters (v2.3.0)
+    # were initially wired to skip harness's own role/user-prompt text — only
+    # the shared directive prefix covered it. Closed the gap: the
+    # restricted_environment=True reinforcement now also lands in the
+    # ## Harness Overview role bullet (the point the harness actually writes
+    # its run/setup command) and in the user prompt's verify checklist, so a
+    # Docker/sudo command can't slip into the harness's own setup line while
+    # only the plan got the explicit reinforcement. restricted_environment=False
+    # (and the tier/hour parameters, which harness never used) render
+    # byte-identical text — the regression pin.
+    "harness": f"{DEMO_DAY_PROMPT_VERSION}:harness-v4",
     # tasks-v3: the C6 plan_coverage join — `Plan refs` now names PLAN.md
     # sections and enumerates the four load-bearing ones (seed dataset, demo
     # surface, external integrations, auth stance) that a task must cite, and
@@ -258,7 +294,11 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # touching task must set up those tokens before any screen is built.
     # tasks-v5: chunk-1 refund fix — same whole_document 30,000 -> 24,000 drop
     # as spec-v4/plan-v5, same reasoning.
-    "tasks": f"{DEMO_DAY_PROMPT_VERSION}:tasks-v5",
+    # tasks-v6: the Effort Summary/Estimated-minutes ~5h mentions become
+    # tier-aware (`_tasks_role(hours, tier)`), gain a task-count hint for
+    # extended/full_day tiers, and gain a restricted-environment check when
+    # set. Sprint/unrestricted default render is byte-identical.
+    "tasks": f"{DEMO_DAY_PROMPT_VERSION}:tasks-v6",
 }
 
 
@@ -439,8 +479,20 @@ def _enforce_security_rules(name: str, body: str) -> str:
 
 
 async def load_prompt(name: str, fallback: str) -> str:
+    """Fetch a remote prompt override, or use ``fallback`` (cached either way).
+
+    The cache key includes a hash of ``fallback``, not just ``name``: most
+    callers pass a constant fallback per name, so this is a no-op for them,
+    but demo_day.py's Fix-1/Fix-2 fallbacks vary by (time_budget_minutes,
+    restricted_environment) for the SAME remote prompt name — keying on
+    ``name`` alone would silently serve one call's cached fallback to a later
+    call with different parameters. Truncated sha256 (not Python's built-in
+    ``hash()``) keeps the key deterministic and matches the ``_fence_nonce``
+    convention already used in this module.
+    """
     now = time.time()
-    cached = _PROMPT_CACHE.get(name)
+    cache_key = f"{name}:{hashlib.sha256(fallback.encode()).hexdigest()[:16]}"
+    cached = _PROMPT_CACHE.get(cache_key)
     if cached and now - cached[0] < settings.langfuse_prompt_cache_ttl:
         return cached[1]
     try:
@@ -451,7 +503,7 @@ async def load_prompt(name: str, fallback: str) -> str:
         value = _enforce_security_rules(name, remote)
     else:
         value = fallback
-    _PROMPT_CACHE[name] = (now, value)
+    _PROMPT_CACHE[cache_key] = (now, value)
     return value
 
 

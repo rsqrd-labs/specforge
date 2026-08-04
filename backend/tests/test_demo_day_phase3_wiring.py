@@ -90,12 +90,15 @@ def _stage_map(*, versions: dict[str, int] | None = None) -> dict[str, Any]:
     return {t: _stage(t, contents[t], versions.get(t, 1)) for t in STAGE_TYPES}
 
 
-def _ws(*, mode="demo_day", verdict=None, budget=None) -> SimpleNamespace:
+def _ws(
+    *, mode="demo_day", verdict=None, budget=None, restricted_environment=False
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=uuid4(),
         mode=mode,
         time_budget_minutes=budget,
         construction_verdict=verdict,
+        restricted_environment=restricted_environment,
     )
 
 
@@ -160,6 +163,21 @@ def test_compute_verdict_honours_workspace_budget() -> None:
         _ws(budget=120), _stage_map()
     )
     assert verdict.time_budget_minutes == 120
+
+
+def test_compute_verdict_honours_workspace_restricted_environment() -> None:
+    docker_plan = "# PLAN\n\nRun `docker compose up` to start the stack.\n"
+    stages = _stage_map()
+    stages["plan"] = _stage("plan", docker_plan)
+
+    unrestricted = construction_verdict_service.compute_verdict(_ws(), stages)
+    assert unrestricted.checks["C8"].passed is True
+
+    restricted = construction_verdict_service.compute_verdict(
+        _ws(restricted_environment=True), stages
+    )
+    assert restricted.checks["C8"].passed is False
+    assert restricted.verified is True  # C8 is advisory — never withholds verified
 
 
 def test_all_stages_present_requires_content() -> None:

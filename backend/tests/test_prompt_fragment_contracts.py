@@ -84,7 +84,8 @@ def test_core_stage_system_prompts_embed_security_rules() -> None:
 
 
 def test_demo_day_system_prompts_embed_security_rules() -> None:
-    for stage_type, role in demo_day._STAGE_ROLES.items():
+    for stage_type in ("spec", "plan", "harness", "tasks"):
+        role = demo_day._role_for(stage_type, None, False)
         rendered = demo_day._demo_day_system_prompt(role)
         assert SECURITY_AND_PRIVACY_RULES in rendered, stage_type
 

@@ -45,6 +45,7 @@ def test_standard_payload_defaults_to_standard_mode() -> None:
     assert payload.mode == "standard"
     assert payload.target_agent is None
     assert payload.time_budget_minutes is None
+    assert payload.restricted_environment is False
 
 
 @pytest.mark.asyncio
@@ -55,6 +56,7 @@ async def test_standard_create_sets_standard_columns() -> None:
     assert workspace.mode == "standard"
     assert workspace.target_agent is None
     assert workspace.time_budget_minutes is None
+    assert workspace.restricted_environment is False
 
 
 @pytest.mark.asyncio
@@ -69,12 +71,16 @@ async def test_demo_day_payload_is_forced_standard_when_flag_off(
     svc = WorkspaceService()
     db = _FakeDB()
     payload = _standard_payload(
-        mode="demo_day", target_agent="claude_code", time_budget_minutes=240
+        mode="demo_day",
+        target_agent="claude_code",
+        time_budget_minutes=240,
+        restricted_environment=True,
     )
     workspace = await svc.create(uuid4(), payload, db)
     assert workspace.mode == "standard"
     assert workspace.target_agent == "claude_code"
     assert workspace.time_budget_minutes is None
+    assert workspace.restricted_environment is False
 
 
 # ---------------------------------------------------------------------------
@@ -92,12 +98,16 @@ async def test_demo_day_create_persists_fields_when_flag_on(
     svc = WorkspaceService()
     db = _FakeDB()
     payload = _standard_payload(
-        mode="demo_day", target_agent="codex", time_budget_minutes=180
+        mode="demo_day",
+        target_agent="codex",
+        time_budget_minutes=180,
+        restricted_environment=True,
     )
     workspace = await svc.create(uuid4(), payload, db)
     assert workspace.mode == "demo_day"
     assert workspace.target_agent == "codex"
     assert workspace.time_budget_minutes == 180
+    assert workspace.restricted_environment is True
 
 
 # ---------------------------------------------------------------------------
@@ -112,10 +122,14 @@ def test_demo_day_requires_target_agent() -> None:
 
 def test_standard_mode_keeps_agent_and_drops_demo_day_budget() -> None:
     payload = _standard_payload(
-        mode="standard", target_agent="claude_code", time_budget_minutes=200
+        mode="standard",
+        target_agent="claude_code",
+        time_budget_minutes=200,
+        restricted_environment=True,
     )
     assert payload.target_agent == "claude_code"
     assert payload.time_budget_minutes is None
+    assert payload.restricted_environment is False
 
 
 def test_invalid_mode_rejected() -> None:
@@ -146,3 +160,4 @@ def test_response_defaults_to_standard() -> None:
     assert fields["mode"].default == "standard"
     assert fields["target_agent"].default is None
     assert fields["time_budget_minutes"].default is None
+    assert fields["restricted_environment"].default is False

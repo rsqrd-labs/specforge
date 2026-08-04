@@ -81,6 +81,9 @@ def compute_verdict(
             time_budget_minutes=workspace.time_budget_minutes,
             stage_versions=versions,
             enforce_plan_coverage=settings.demo_day_plan_coverage_enforced,
+            restricted_environment=bool(
+                getattr(workspace, "restricted_environment", False)
+            ),
         )
     return standard_plan_linter.verify_construction(
         **contents,
