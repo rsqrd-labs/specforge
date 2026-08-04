@@ -1713,6 +1713,11 @@ def _merge_harness_patch(existing: str, patch: str, *, source: str = "patch") ->
 #
 # Consolidating tests per requirement group rather than one file per requirement
 # is the intended shape and is what the prompt asks for.
+# How many uncovered requirements one paid harness patch may be asked to fill.
+# Same physics as the Files chunk: one provider call under the 240s watchdog cap,
+# at ~2,200 characters per runnable test file. See `generate_harness_patch`.
+_MAX_PATCH_REQUIREMENTS_PER_CALL = 8
+
 _MAX_HARNESS_FILES = 10
 _MAX_DEMO_DAY_HARNESS_FILES = 6
 
@@ -6370,7 +6375,18 @@ class StageManager:
         workspace_id = workspace.id
         patch_mode = _workspace_mode(workspace)
         system_prompt = await get_patch_system_prompt()
-        user_prompt = build_patch_user_prompt(baseline_content, uncovered_reqs)
+        # One patch is ONE provider call, bounded by the same 240s watchdog hard
+        # cap as a generation chunk — so the number of files it can be asked for
+        # is bounded too. The gap list is now scoped to the upstream SPEC's
+        # requirement set (`uncovered_requirements`), which on a harness with a
+        # truncated matrix can legitimately run to a dozen-plus entries; handing
+        # all of them to one call is the same "unbounded promise" defect the
+        # harness Files chunk had. The endpoint is repeatable and the panel
+        # recomputes the remaining gaps after each merge, so patching in batches
+        # is the correct shape — and a batch that fits is strictly better than a
+        # self-truncated one the user still pays for.
+        batch_reqs = uncovered_reqs[:_MAX_PATCH_REQUIREMENTS_PER_CALL]
+        user_prompt = build_patch_user_prompt(baseline_content, batch_reqs)
 
         route = _resolve_preflight_route(
             lambda: _route_for_stage_generation("harness", workspace)

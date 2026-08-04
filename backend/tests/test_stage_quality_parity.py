@@ -649,6 +649,43 @@ def test_pay():
     assert av.uncovered_requirements(harness, upstream_ids=ids) == []
 
 
+def test_a_prose_tests_line_cannot_claim_coverage():
+    """The `# Tests:` tag path is the one route that can INFLATE coverage.
+
+    It scans a file's whole `### File:` block — prose between the heading and
+    the fence included — so a bare narrative line must not credit requirements
+    that no code exists for. The comment marker is required.
+    """
+    spec = "FR-001 a. FR-002 b. FR-003 c."
+    harness = _harness(
+        """
+### File: tests/test_login.py
+
+Tests: FR-002, FR-003
+
+```python
+# Tests: FR-001
+def test_login():
+    assert True
+```
+""",
+        tree="tests/test_login.py",
+        matrix="| Req | Test |\n| --- | --- |\n| FR-001 | `tests/test_login.py` |\n",
+    )
+    ids = av.upstream_requirement_ids(spec)
+    assert av.harness_coverage_ratio(harness, upstream_ids=ids) == (1, 3)
+    assert av.uncovered_requirements(harness, upstream_ids=ids) == ["FR-002", "FR-003"]
+
+
+def test_a_paid_patch_is_batched_to_what_one_call_can_write():
+    """A patch is ONE provider call under the same 240s watchdog cap as a
+    generation chunk, so the requirement list handed to it is bounded — the same
+    "unbounded promise" defect the harness Files chunk had. The endpoint is
+    repeatable, so the remainder is patched in the next batch rather than
+    charged for and half-written."""
+    assert sm._MAX_PATCH_REQUIREMENTS_PER_CALL <= sm._MAX_HARNESS_FILES
+
+
 def test_coverage_and_the_gap_list_can_never_disagree():
     """The chip, the CoveragePanel and the paid patch are three views of one
     computation — a 100% chip beside a populated gap list is now impossible."""

@@ -187,12 +187,16 @@ async def _upstream_spec_content(stage: Stage, db: AsyncSession) -> str:
     """
     if stage.type != "harness":
         return ""
+    # `.first()`, not `.scalar_one_or_none()`: there is no unique constraint on
+    # `Stage(workspace_id, type)` (only CHECK constraints), and
+    # `_eval_context_for_stage` likewise reads with `.all()` rather than assuming
+    # one row per pair. A duplicate row must not 500 a read endpoint.
     row = await db.execute(
         select(Stage.content).where(
             Stage.workspace_id == stage.workspace_id, Stage.type == "spec"
         )
     )
-    return row.scalar_one_or_none() or ""
+    return row.scalars().first() or ""
 
 
 async def _refresh_stale_task_findings(

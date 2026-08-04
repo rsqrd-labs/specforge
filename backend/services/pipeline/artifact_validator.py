@@ -1746,8 +1746,16 @@ _MATRIX_REQ_ID_RE = re.compile(r"^(?:FR|NFR|SEC|AC)-\d+(?:\.\d+)*$")
 # comment`` already checks for it, and ``prompts/harness_patch.py`` emits it —
 # the paid patch adds tagged FILES and no matrix row, so a matrix-only coverage
 # computation could never register the coverage the user just paid for.
+# The comment marker is REQUIRED, not optional. This is the one path that can
+# INFLATE coverage, and the segment scanned here spans a file's whole
+# ``### File:`` block — prose between the heading and the fence included — so a
+# bare narrative line reading ``Tests: FR-001, FR-002, FR-003`` would credit
+# three requirements without a line of code existing. Requiring a comment marker
+# and a following identifier matches both the harness prompt's mandated
+# ``# Tests: <req-id>`` form and ``_test_has_traceability_comment``.
 _TESTS_TAG_RE = re.compile(
-    r"^[ \t]*(?:[#*]|//|--|/\*)?[ \t]*Tests:\s*(.+)$", re.MULTILINE
+    r"^[ \t]*(?:[#*]|//|--|/\*)[ \t]*Tests:[ \t]*((?:FR|NFR|SEC|AC)-\d{3}.*)$",
+    re.MULTILINE,
 )
 
 
