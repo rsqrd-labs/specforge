@@ -1,6 +1,11 @@
 overrides:
   "js-yaml@>=4.0.0 <4.3.0": "4.3.0"
-  "undici@>=7.23.0 <7.28.0": "^7.28.0"
+  # undici is transitive under jsdom (vitest's DOM environment). The range key
+  # is widened each time a new advisory raises the patched floor; 7.29.0 clears
+  # GHSA-4cwx-7wf7-3272 / -8xcm-r25x-g524 / -m8rv-5g2x-5cg5 / -jr45-8vmc-qm54 /
+  # -v3r7-h72x-cjcm, all of which name `>=7.0.0 <7.29.0` and so caught the
+  # 7.28.0 this override previously pinned.
+  "undici@>=7.23.0 <7.29.0": "^7.29.0"
   # GHSA-rgw5-rvv9-x895 (brace-expansion DoS via unbounded intermediate
   # arrays — a bypass of the GHSA-mh99-v99m-4gvg mitigation below). All three
   # maintenance lines now ship a real patched version (1.1.18 / 2.1.4 /
