@@ -239,6 +239,14 @@ harness/node_modules
 # Local-only docs (never commit)
 CLAUDE.md
 handoff.md
+AGENTS.md
+Plan v1.md
+SpecForge — Complete System Architecture.md
+V1 spec.md
+landing.png
+
+# Local Codex CLI config (personal MCP server setup, not project config)
+.codex/
 
 # Playwright MCP browser-session artifacts (screenshots, snapshots, console logs)
 .playwright-mcp/
