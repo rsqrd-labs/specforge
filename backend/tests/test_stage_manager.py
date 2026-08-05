@@ -10,6 +10,7 @@ from uuid import uuid4
 import artifact_fixtures
 import pytest
 
+from config import settings
 from models import (
     CreditLedger,
     EvalResult,
@@ -34,12 +35,17 @@ from services.pipeline.stage_manager import (
     QualityGateBlockedError,
     StageDependencyError,
     StageManager,
+    StreamWatchdogTimeout,
+    _chunk_length_target,
     _chunk_specs_for_stage,
     _chunk_user_prompt,
     _chunk_waves_for_stage,
     _ensure_chunk_heading,
+    _max_target_chars,
     _stage_has_parallel_waves,
     _task_parallel_waves,
+    _watchdog_stream,
+    _wave_deadline,
 )
 
 _VALID_SPEC = artifact_fixtures.VALID_SPEC
@@ -147,6 +153,184 @@ def test_task_parallel_waves_pre_assign_numbering_ranges() -> None:
     assert "group (c)" in block_instructions
 
 
+# ---------------------------------------------------------------------------
+# Wave-budget enforcement (standard spec/tasks): _wave_deadline is a REAL
+# runtime cap, not just prompt guidance — a chunk that ignores its advertised
+# length target could still consume the whole per-call 240s, so the earlier
+# wave in a two-wave stage is capped to its weighted share of whatever run
+# budget remains, guaranteeing the later wave a floor of time.
+# ---------------------------------------------------------------------------
+
+
+def _control_with_seconds_remaining(seconds: float) -> GenerationControl:
+    """A GenerationControl whose provider_seconds_remaining is ~`seconds`
+    right after start(), by inflating duration_seconds by the finalise
+    reserve the same way production code's 300s/30s split does."""
+    duration = seconds + settings.stage_generation_finalise_reserve_seconds
+    control = GenerationControl(
+        run_id=uuid4(),
+        stage_id=uuid4(),
+        redis=_FakeRedis(),
+        deadline_at=datetime.now(UTC) + timedelta(seconds=duration),
+        duration_seconds=duration,
+    )
+    control.start()
+    return control
+
+
+def test_max_target_chars_reads_back_the_chunk_length_target() -> None:
+    waves = _chunk_waves_for_stage("spec", "standard")
+    product_scope = waves[0][0]
+    validation_risk = waves[1][0]
+    assert _max_target_chars("spec", product_scope) == 24_000
+    assert _max_target_chars("spec", validation_risk) == 13_000
+    # It is literally reading _chunk_length_target's own output back, so the
+    # two can never drift apart.
+    assert "13,000" in _chunk_length_target("spec", validation_risk)
+    assert "24,000" in _chunk_length_target("spec", product_scope)
+
+
+@pytest.mark.asyncio
+async def test_wave_deadline_is_none_outside_standard_spec_and_tasks() -> None:
+    control = _control_with_seconds_remaining(270)
+    try:
+        # Wrong mode.
+        waves = _chunk_waves_for_stage("spec", "demo_day")
+        assert _wave_deadline("spec", "demo_day", control, waves, 0) is None
+        # Wrong stage (plan has one wave; harness's two-wave shape is
+        # deliberately excluded — its split is prompt-only and untouched).
+        plan_waves = _chunk_waves_for_stage("plan", "standard")
+        assert _wave_deadline("plan", "standard", control, plan_waves, 0) is None
+        harness_waves = _chunk_waves_for_stage("harness", "standard")
+        assert _wave_deadline("harness", "standard", control, harness_waves, 0) is None
+    finally:
+        await control.close()
+
+
+@pytest.mark.asyncio
+async def test_wave_deadline_weights_by_advertised_wave_ceiling() -> None:
+    """spec's wave 1 (24,000-char ceiling) must get a LARGER share of the
+    270s pool than wave 2 (13,000-char ceiling) — an even 50/50 split would
+    under-allocate the heavier parallel wave and trip the cap on ordinary,
+    non-pathological generations."""
+    control = _control_with_seconds_remaining(270)
+    try:
+        waves = _chunk_waves_for_stage("spec", "standard")
+        loop = asyncio.get_running_loop()
+        wave0_deadline = _wave_deadline("spec", "standard", control, waves, 0)
+        assert wave0_deadline is not None
+        wave0_share = wave0_deadline - loop.time()
+        # Expected: 270 * (24000 / (24000 + 13000)).
+        expected_share = 270.0 * (24_000 / 37_000)
+        assert wave0_share == pytest.approx(expected_share, abs=0.5)
+        # And it comfortably covers the ~165s the 24,000-char target implies.
+        assert wave0_share > 165.0
+    finally:
+        await control.close()
+
+
+@pytest.mark.asyncio
+async def test_wave_deadline_last_wave_is_never_capped() -> None:
+    """The final wave's weighted share always collapses to 100% of whatever
+    remains — nothing after it needs protecting, and it must not be starved
+    by its own cap after an earlier wave legitimately used more time."""
+    control = _control_with_seconds_remaining(270)
+    try:
+        waves = _chunk_waves_for_stage("tasks", "standard")
+        loop = asyncio.get_running_loop()
+        last_index = len(waves) - 1
+        deadline = _wave_deadline("tasks", "standard", control, waves, last_index)
+        assert deadline is not None
+        share = deadline - loop.time()
+        assert share == pytest.approx(control.provider_seconds_remaining, abs=0.5)
+    finally:
+        await control.close()
+
+
+@pytest.mark.asyncio
+async def test_wave_deadline_share_scales_with_whatever_currently_remains() -> None:
+    """The share is derived from control.provider_seconds_remaining AT CALL
+    TIME, not a value fixed once at the start of the run — a control with less
+    time left yields a proportionally smaller absolute deadline. This is the
+    mechanism the recompute-per-attempt fix in _run_chunk_attempts relies on:
+    a retry that calls _wave_deadline again, later, after real budget has been
+    spent, must get a genuinely smaller (not identical, not expired) window.
+    See test_wave_budget_retry_gets_a_fresh_window_not_an_expired_one for the
+    end-to-end version of this through an actual failed-then-retried chunk.
+    """
+    waves = _chunk_waves_for_stage("spec", "standard")
+    loop = asyncio.get_running_loop()
+    generous_control = _control_with_seconds_remaining(270)
+    tight_control = _control_with_seconds_remaining(90)
+    try:
+        generous_deadline = _wave_deadline(
+            "spec", "standard", generous_control, waves, 1
+        )
+        tight_deadline = _wave_deadline("spec", "standard", tight_control, waves, 1)
+        assert generous_deadline is not None
+        assert tight_deadline is not None
+        assert (tight_deadline - loop.time()) < (generous_deadline - loop.time())
+    finally:
+        await generous_control.close()
+        await tight_control.close()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_stream_enforces_wave_deadline() -> None:
+    """A chunk that ignores its advertised length target and keeps streaming
+    is still cut at its wave's deadline, even though the per-call hard cap and
+    the run-level budget both have plenty of room left — this is the actual
+    enforcement, not just prompt guidance."""
+
+    async def runaway():
+        while True:
+            await asyncio.sleep(0.01)
+            yield "x"
+
+    control = _control_with_seconds_remaining(270)
+    try:
+        loop = asyncio.get_running_loop()
+        wave_deadline = loop.time() + 0.05
+        with pytest.raises(StreamWatchdogTimeout) as exc_info:
+            async for _ in _watchdog_stream(
+                runaway(),
+                stage_type="spec",
+                provider="anthropic",
+                control=control,
+                wave_deadline=wave_deadline,
+            ):
+                pass
+        assert exc_info.value.kind == "wave_budget"
+    finally:
+        await control.close()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_stream_wave_deadline_is_a_no_op_when_none() -> None:
+    """The default (every caller except standard spec/tasks) must behave
+    identically to before this change."""
+
+    async def quick():
+        yield "a"
+        yield "b"
+
+    control = _control_with_seconds_remaining(270)
+    try:
+        tokens = [
+            token
+            async for token in _watchdog_stream(
+                quick(),
+                stage_type="spec",
+                provider="anthropic",
+                control=control,
+                wave_deadline=None,
+            )
+        ]
+        assert tokens == ["a", "b"]
+    finally:
+        await control.close()
+
+
 class _ConcurrencyAdapter:
     """Fake adapter recording how many streams are in flight simultaneously."""
 
@@ -203,13 +387,14 @@ async def _run_durable_generation_for_test(
     adapter_factory,
     emit=None,
     phase=None,
+    duration_seconds: float = 300,
 ):
     control = GenerationControl(
         run_id=uuid4(),
         stage_id=uuid4(),
         redis=_FakeRedis(),
-        deadline_at=datetime.now(UTC) + timedelta(seconds=300),
-        duration_seconds=300,
+        deadline_at=datetime.now(UTC) + timedelta(seconds=duration_seconds),
+        duration_seconds=duration_seconds,
     )
     control.start()
     completed = 0
@@ -263,6 +448,83 @@ async def test_parallel_generation_runs_chunks_concurrently_and_completes() -> N
     assert "## Non-Functional Requirements" in generated.content
     assert "## Acceptance Criteria" in generated.content
     assert generated.content_generation_id == "gen-parallel"
+
+
+@pytest.mark.asyncio
+async def test_wave_budget_retry_gets_a_fresh_window_not_an_expired_one() -> None:
+    """A wave-1 chunk slow enough to trip its wave deadline must still be able
+    to succeed on the mid-tier fallback retry.
+
+    Before the fix, the retry reused the SAME already-expired absolute
+    deadline the first attempt had already hit, so _watchdog_stream raised
+    "wave_budget" again on the very first check of the retry — turning a
+    merely-slow wave into a hard generation failure even though real run
+    budget remained. The fix (`_wave_deadline` recomputed fresh on every
+    attempt in `_run_chunk_attempts`) gives the retry a genuine, smaller
+    window instead, and the whole generation completes.
+    """
+    attempts = {"product-scope": 0}
+
+    class _SlowThenFastAdapter:
+        def __init__(self) -> None:
+            self.last_completion = None
+            self.last_generation_id = "gen-retry"
+
+        async def stream(self, _system, user, max_tokens, **_kwargs):
+            del max_tokens
+            key = artifact_fixtures.chunk_key_from_prompt(user, "product-scope")
+            if key == "product-scope":
+                attempts["product-scope"] += 1
+                if attempts["product-scope"] == 1:
+                    # Exceeds wave 1's ~1.3s share of a ~2s pool (24000/37000 *
+                    # 2.0s) but stays far under the unpatched 90s idle / 240s
+                    # hard-cap bounds, so only the wave deadline can fire.
+                    await asyncio.sleep(1.6)
+                else:
+                    await asyncio.sleep(0.05)
+            else:
+                await asyncio.sleep(0.05)
+            self.last_completion = LLMCompletionInfo.started(
+                provider="anthropic",
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1000,
+            )
+            yield artifact_fixtures.spec_stream_payload(user)
+
+    fallback = LLMRoute(
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        model_tier="mid",
+        operation="spec.generate",
+        latency_class="interactive",
+        cross_provider_fallback=False,
+        reason="test",
+        requested_tier="mid",
+        fallback_tier=None,
+        selection_reason="test",
+    )
+
+    with (
+        patch(
+            "services.pipeline.stage_manager._runtime_fallback_route",
+            return_value=fallback,
+        ),
+        patch.object(
+            stage_manager_module.settings,
+            "stage_retry_min_remaining_seconds",
+            0.1,
+        ),
+    ):
+        generated, _ = await _run_durable_generation_for_test(
+            adapter_factory=lambda _route: _SlowThenFastAdapter(),
+            # duration_seconds - the 30s finalise reserve leaves ~2.0s of
+            # provider_seconds_remaining, matching the sleep timings above.
+            duration_seconds=32.0,
+        )
+
+    assert attempts["product-scope"] == 2  # failed once on wave_budget, then retried
+    assert "## Overview" in generated.content
+    assert "## Acceptance Criteria" in generated.content
 
 
 @pytest.mark.asyncio
