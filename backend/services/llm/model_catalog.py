@@ -209,23 +209,40 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         recommended_operations=(*CORE_GENERATION_OPERATIONS, "storyboard.generate"),
         default_operations=(),
         supports_reasoning=True,
-        # Medium, NOT the Claude-API default of high. Core stages are bound by a
-        # locked interactive deadline contract — stage_provider_call_timeout_seconds
-        # caps a single provider stream at 240s and stage_generation_deadline_seconds
-        # is validator-pinned to 300s — and high-effort reasoning tokens are spent
-        # before any visible output. Measured 2026-07-30 (generation 65fe5f10):
-        # medium sustains ~38 visible tok/s on a dense spec chunk, i.e. ~9K tokens
-        # inside the 240s bound. Raising this to high spends more of that window on
-        # invisible reasoning and needs a fresh per-chunk wall-clock measurement
-        # first — the ~15-18K-token band this comment used to cite was assumed,
-        # never measured, and was wrong by ~2x.
-        reasoning_effort="medium",
+        # HIGH, not the previously-shipped medium, as of 2026-08-06. Core stages
+        # are bound by a locked interactive deadline contract —
+        # stage_provider_call_timeout_seconds caps a single provider stream (now
+        # 270s, the full 300s deadline minus the 30s finalise reserve — see
+        # config.py) — and high-effort reasoning tokens are spent before any
+        # visible output, which is exactly what made medium the safer default
+        # when the cap was a tighter 240s.
+        #
+        # This move is a deliberate quality-over-margin trade, NOT a re-measured
+        # one: it was made after a production spec generation was judged not up
+        # to the mark at medium effort, without first collecting a fresh
+        # per-chunk wall-clock sample at high effort the way the 2026-07-30
+        # medium measurement (generation 65fe5f10: ~38 visible tok/s on a dense
+        # spec chunk) was collected. The call cap was widened from 240 to 270 in
+        # the same change specifically to give high-effort reasoning more room
+        # before the watchdog kills a chunk and discards its partial output —
+        # but the chunk length targets in ``_chunk_length_target``
+        # (stage_manager.py) are still sized against the ~145 chars/s MEDIUM
+        # throughput figure, not a high-effort one. If chunks start timing out
+        # (watch ``provider_stopped_by_limit`` / hard_cap kills in the
+        # generation route logs) or the mid-tier Sonnet-5 fallback fires more
+        # than before, that is the throughput assumption being wrong — capture a
+        # real high-effort measurement and retarget both this value and the
+        # chunk length targets together, the same way the medium figure was
+        # originally derived.
+        reasoning_effort="high",
         rollout_notes=(
             "Anthropic full-artifact generation primary: the four core ASDD "
             "stages, full regenerate and the harness gap-patch, in both standard "
             "and Demo Day mode. Resolves via active_same_tier (no default_operations "
             "claim) — route logs show that selection_reason, not active_default. "
-            "A hard runtime failure retries down once on Sonnet 5 (mid)."
+            "A hard runtime failure retries down once on Sonnet 5 (mid). Runs at "
+            "effort=high (2026-08-06) against a 270s per-call cap — see the "
+            "reasoning_effort comment for the unmeasured-throughput caveat."
         ),
         routing_priority=1,
     ),

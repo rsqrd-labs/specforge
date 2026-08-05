@@ -205,11 +205,11 @@ def test_frontier_adapter_policy_is_explicit() -> None:
         # Medium, not the API default of high — GPT-5.5 is now OpenAI's
         # full-artifact PRIMARY (the fallback reached when Anthropic is
         # unconfigured or its circuit is open), so it runs under the same
-        # locked 180s/300s interactive deadline that forced Opus 5 to medium.
-        # A high-effort timeout here would fail exactly when Anthropic is
-        # already down. See the claude-opus-5 assertion below for the full
-        # rationale; raising either back to "high" needs re-measured
-        # per-chunk wall-clock first.
+        # locked 270s/300s interactive deadline that used to keep Opus 5 on
+        # medium too (Opus 5 has since moved to high, unmeasured — see the
+        # claude-opus-5 assertion below). A high-effort timeout here would
+        # fail exactly when Anthropic is already down, which is the reason
+        # GPT-5.5 was deliberately NOT moved to high in the same change.
         "reasoning_effort": "medium",
         "thinking_level": None,
         "automatic_prompt_caching": True,
@@ -221,15 +221,15 @@ def test_frontier_adapter_policy_is_explicit() -> None:
     assert (
         model_request_policy("google", "gemini-3.6-flash")["thinking_level"] == "high"
     )
-    # Opus 5 runs the four core stages at MEDIUM effort, not the Claude-API
-    # default of high: core generation is bound by a locked interactive deadline
-    # (a single provider stream is capped at stage_provider_call_timeout_seconds
-    # and the stage at a validator-pinned 300s), and high-effort reasoning tokens
-    # are spent before any visible output. Raising this back to "high" without
-    # first re-measuring per-chunk wall-clock will start timing out core stages.
+    # Opus 5 runs the four core stages at HIGH effort (since 2026-08-06, a
+    # deliberate quality-over-margin trade after medium was judged not up to
+    # the mark in production — see the claude-opus-5 catalog entry). The call
+    # cap moved to 270s in the same change to give high-effort reasoning more
+    # room, but the chunk length targets are still sized against the medium
+    # throughput measurement, so this pairing is unmeasured at high effort and
+    # may need retargeting if chunks start timing out.
     assert (
-        model_request_policy("anthropic", "claude-opus-5")["reasoning_effort"]
-        == "medium"
+        model_request_policy("anthropic", "claude-opus-5")["reasoning_effort"] == "high"
     )
 
 

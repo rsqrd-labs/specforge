@@ -312,26 +312,55 @@ class Settings(BaseSettings):
     # Core stage-run deadline contract. These values are intentionally separate
     # from storyboard/increment timeouts: Spec/Plan/Harness/Tasks are interactive
     # and must reach a durable terminal state within five minutes.
-    # The per-call cap is 240, not the original 180, and the arithmetic that
-    # allows it is: the 300s deadline minus the 30s finalise reserve leaves 270
-    # provider-seconds, so a 240s call fits with 30s of slack for preflight and
-    # the quality gates. The 300s product contract is untouched.
+    # The per-call cap is 270 — the full provider budget the 300s deadline minus
+    # the 30s finalise reserve grants a single call — not an artificially
+    # tighter 240. The 300s product contract is untouched.
     #
     # 180 was measured too low on 2026-07-30 (generation 65fe5f10): two parallel
     # Opus 5 spec chunks were both killed at exactly 180,000ms having produced
     # 6,821 and 7,521 visible output tokens — ~38 tok/s at effort=medium, so one
     # call buys ~26,000 characters, not the ~15-18K tokens this code assumed
     # without ever measuring it. Both partials were discarded and the run
-    # terminalised as incomplete_output.
+    # terminalised as incomplete_output. The cap was then raised to 240 with 30s
+    # of deliberate slack, and later to the full 270 on 2026-08-06 when Opus 5
+    # moved to effort=high (see the claude-opus-5 catalog entry): reasoning
+    # tokens are spent before any visible output, so effort=high needs more of
+    # the call's own budget to finish a chunk. Neither cap value has been
+    # measured directly against high-effort throughput — 270 is the deadline
+    # arithmetic's true ceiling, used because it is provably safe (it cannot
+    # exceed what the 300s/30s contract already grants), not because per-chunk
+    # wall-clock was re-measured at high effort. Re-measure and retarget chunk
+    # length prompts (``_chunk_length_target``) once real high-effort throughput
+    # data exists.
     #
-    # A deliberate consequence: after a 240s first attempt only ~30s remains,
-    # below stage_retry_min_remaining_seconds, so the mid-tier retry no longer
-    # starts. That retry was structurally doomed — in the same trace both Sonnet
-    # 5 retries were killed at ~90s redoing work Opus could not finish in 180 —
-    # so a clean terminal failure is strictly better than paying for it.
+    # A deliberate consequence, unchanged by the 240->270 move: after a
+    # full-length first attempt at most 0-30s remains, below
+    # stage_retry_min_remaining_seconds (45s), so the mid-tier retry still
+    # cannot start. That retry was structurally doomed — in the same trace both
+    # Sonnet 5 retries were killed at ~90s redoing work Opus could not finish in
+    # 180 — so a clean terminal failure is strictly better than paying for it.
+    #
+    # A real, accepted trade-off of the 240->270 move: the harness stage's two
+    # sequential chunks (contract, then files) share this same 270s run budget
+    # with no independent per-chunk split (``_chunk_length_target``'s harness
+    # docstring). At the old 240 cap, a single chunk could never consume more
+    # than 240 of the 270s pool, so the second chunk always had >=30s left. At
+    # 270, a contract chunk that badly overshoots its own 3,000-15,000-char
+    # prompt target could in principle consume the whole budget and leave the
+    # files chunk 0s, i.e. an immediate GenerationDeadlineExceeded instead of a
+    # doomed-but-nonzero attempt. Both outcomes are already failures in that
+    # edge case, so this does not introduce a new failure mode, only changes
+    # its shape — but the PROBABILITY of hitting it also went up, not just its
+    # ceiling: Opus 5 moved to effort=high in the same change, and high-effort
+    # reasoning spends more wall-clock before visible output, making a contract
+    # chunk overrun its own target more likely than when this trade-off was
+    # first accepted. Still accepted rather than patched with an unmeasured
+    # per-chunk carve-out, but re-evaluate if harness starvation shows up in
+    # production (missing_harness_files / GenerationDeadlineExceeded on the
+    # files chunk specifically).
     stage_generation_deadline_seconds: int = 300
     stage_generation_finalise_reserve_seconds: int = 30
-    stage_provider_call_timeout_seconds: int = 240
+    stage_provider_call_timeout_seconds: int = 270
     stage_provider_idle_timeout_seconds: int = 90
     stage_retry_min_remaining_seconds: int = 45
     stage_generation_cancel_poll_seconds: float = 1.0
@@ -350,17 +379,19 @@ class Settings(BaseSettings):
             raise ValueError("STAGE_GENERATION_FINALISE_RESERVE_SECONDS must be 30")
         # The ceiling is the provider budget the deadline actually grants:
         # deadline - finalise reserve. Anything above it is a bound the run can
-        # never reach, which is how a call cap silently becomes a lie.
+        # never reach, which is how a call cap silently becomes a lie. This is
+        # the ONLY ceiling — there is deliberately no separate hardcoded literal
+        # below it (a prior version enforced 240 here, a self-imposed 30s margin
+        # below the true 270s budget; see the stage_provider_call_timeout_seconds
+        # comment above for why that margin was given back to Opus 5 at
+        # effort=high on 2026-08-06).
         provider_budget = (
             self.stage_generation_deadline_seconds
             - self.stage_generation_finalise_reserve_seconds
         )
-        if not 1 <= self.stage_provider_call_timeout_seconds <= 240:
-            raise ValueError("STAGE_PROVIDER_CALL_TIMEOUT_SECONDS must be 1..240")
-        if self.stage_provider_call_timeout_seconds > provider_budget:
+        if not 1 <= self.stage_provider_call_timeout_seconds <= provider_budget:
             raise ValueError(
-                "STAGE_PROVIDER_CALL_TIMEOUT_SECONDS cannot exceed the deadline "
-                "minus the finalise reserve"
+                f"STAGE_PROVIDER_CALL_TIMEOUT_SECONDS must be 1..{provider_budget}"
             )
         if not 1 <= self.stage_provider_idle_timeout_seconds <= 90:
             raise ValueError("STAGE_PROVIDER_IDLE_TIMEOUT_SECONDS must be 1..90")

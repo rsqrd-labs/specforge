@@ -275,7 +275,7 @@ def test_chunk_output_budgets_are_fixed_and_model_clamped(monkeypatch) -> None:
     tasks_chunk = _chunk_specs_for_stage("tasks")[0]
 
     # ONE budget for every chunk. A chunk is exactly one provider call bounded
-    # by stage_provider_call_timeout_seconds (240s), and at the measured ~38
+    # by stage_provider_call_timeout_seconds (270s), and at the measured ~38
     # visible tok/s no call can emit more than ~9,120 tokens on the platform
     # primary — so the per-chunk budgets were never the binding constraint, and
     # their divergence has already caused one production bug (the Demo Day Files
@@ -304,8 +304,8 @@ def test_settings_reject_generation_bounds_outside_contract() -> None:
         config.Settings(stage_provider_idle_timeout_seconds=91)
     with pytest.raises(ValidationError, match="at least 45"):
         config.Settings(stage_retry_min_remaining_seconds=44)
-    with pytest.raises(ValidationError, match="must be 1..240"):
-        config.Settings(stage_provider_call_timeout_seconds=241)
+    with pytest.raises(ValidationError, match="must be 1..270"):
+        config.Settings(stage_provider_call_timeout_seconds=271)
 
 
 def test_call_cap_cannot_exceed_the_provider_budget_the_deadline_grants() -> None:
@@ -315,19 +315,25 @@ def test_call_cap_cannot_exceed_the_provider_budget_the_deadline_grants() -> Non
 
     Measured 2026-07-30 (generation 65fe5f10): Opus 5 chunks died at exactly the
     180s cap, and the mid-tier retries then died at ~90s — the remainder of the
-    run budget, not the cap they were nominally granted.
+    run budget, not the cap they were nominally granted. The cap was raised
+    180->240 (30s of deliberate margin below the 270s true budget) then, and
+    240->270 on 2026-08-06 when Opus 5 moved to effort=high and needed more of
+    the call's own budget to finish a chunk before the watchdog kills it.
     """
     import config
 
-    assert config.settings.stage_provider_call_timeout_seconds == 240
+    assert config.settings.stage_provider_call_timeout_seconds == 270
     budget = (
         config.settings.stage_generation_deadline_seconds
         - config.settings.stage_generation_finalise_reserve_seconds
     )
     assert config.settings.stage_provider_call_timeout_seconds <= budget
 
-    # The budget rule in the validator is defence-in-depth and is deliberately
-    # UNREACHABLE today: the deadline and reserve are pinned to exactly 300/30
-    # by checks that run first, so nothing can shrink the budget below the cap.
-    # It is there to fail loudly the day those pins are relaxed without anyone
-    # revisiting the cap, which is precisely how 180 outlived its justification.
+    # The validator now enforces ONLY this dynamic budget-derived ceiling (a
+    # prior version also hardcoded a stricter static 240 literal below it,
+    # removed when the cap was raised to the true 270s budget). The ceiling is
+    # deliberately UNREACHABLE-as-a-separate-constraint today: the deadline and
+    # reserve are pinned to exactly 300/30 by checks that run first, so nothing
+    # can shrink the budget below the cap. It is there to fail loudly the day
+    # those pins are relaxed without anyone revisiting the cap, which is
+    # precisely how 180 outlived its justification.
