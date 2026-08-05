@@ -893,10 +893,11 @@ class StreamWatchdogTimeout(TimeoutError):
     """Raised when the stream watchdog kills an unhealthy generation stream.
 
     kind is "idle" (token gap exceeded the idle timeout — a stalled provider
-    stream) or "hard_cap" (the absolute per-stream bound was hit — a runaway
-    generation).  A steadily streaming generation is never killed, no matter
-    how long the artifact is — that was the flat-timeout failure mode behind
-    issue #19.
+    stream), "hard_cap" (the absolute per-stream bound was hit — a runaway
+    generation), or "wave_budget" (a standard spec/tasks chunk ran past its
+    wave's weighted share of the shared run budget — see ``_wave_deadline``).
+    A steadily streaming generation is never killed, no matter how long the
+    artifact is — that was the flat-timeout failure mode behind issue #19.
     """
 
     def __init__(self, *, kind: str, timeout_seconds: float) -> None:
@@ -923,6 +924,7 @@ async def _watchdog_stream(
     stage_type: str,
     provider: str,
     control: GenerationControl | None = None,
+    wave_deadline: float | None = None,
 ) -> AsyncGenerator[str, None]:
     """Supervise an adapter token stream with an idle timeout and a hard cap.
 
@@ -936,6 +938,12 @@ async def _watchdog_stream(
     reasons silently for minutes therefore never trips the idle bound while
     its provider connection is demonstrably alive (issue #19).  The hard cap
     bounds runaway provider cost.
+
+    ``wave_deadline`` is an optional third clamp (see ``_wave_deadline``):
+    an absolute monotonic time this call may not stream past, used only by
+    standard spec/tasks to stop an earlier wave from starving a later one on
+    their shared run budget. ``None`` (every other caller) is a no-op — the
+    clamp simply never binds tighter than the existing per-call/per-run bounds.
     """
     idle_timeout = float(settings.stage_provider_idle_timeout_seconds)
     hard_cap = float(settings.stage_provider_call_timeout_seconds)
@@ -947,13 +955,19 @@ async def _watchdog_stream(
         run_remaining = (
             control.provider_seconds_remaining if control is not None else hard_cap
         )
-        remaining = min(call_remaining, run_remaining)
+        wave_remaining = (
+            wave_deadline - loop.time() if wave_deadline is not None else call_remaining
+        )
+        remaining = min(call_remaining, run_remaining, wave_remaining)
         if remaining <= 0:
             if control is not None and run_remaining <= 0:
                 control.request_deadline()
                 await _bounded_close_stream(iterator)
                 raise GenerationDeadlineExceeded()
-            kind, bound = "hard_cap", hard_cap
+            if wave_deadline is not None and wave_remaining <= 0:
+                kind, bound = "wave_budget", wave_deadline - started
+            else:
+                kind, bound = "hard_cap", hard_cap
         else:
             next_event = asyncio.create_task(anext(iterator))
             stop_event = (
@@ -981,7 +995,9 @@ async def _watchdog_stream(
                     if control is not None and control.provider_seconds_remaining <= 0:
                         control.request_deadline()
                         raise GenerationDeadlineExceeded()
-                    if elapsed >= hard_cap:
+                    if wave_deadline is not None and loop.time() >= wave_deadline:
+                        kind, bound = "wave_budget", wave_deadline - started
+                    elif elapsed >= hard_cap:
                         kind, bound = "hard_cap", hard_cap
                     else:
                         kind, bound = "idle", idle_timeout
@@ -1956,6 +1972,62 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
     ``"demo-full"`` key string, for the same reason ``_is_harness_files_chunk``
     is: the two modes name their chunks differently, and key-string matching
     is exactly what silently excluded Demo Day from the harness Files budget.
+
+    **Standard spec and tasks have the same unbudgeted-wave defect the harness
+    fix above closed, and it is now closed for them too — both in the prompt
+    AND at runtime.** ``_chunk_waves_for_stage`` runs spec as two SEQUENTIAL
+    waves (``product-scope`` + ``system-expectations`` in parallel, ~165s at
+    the generic 24,000-char ceiling, then ``validation-risk`` alone) and tasks
+    as two SEQUENTIAL waves (``task-overview`` alone, then
+    ``task-foundation-blocks`` + ``task-interface-blocks`` +
+    ``task-hardening-blocks`` in parallel, ~165s at the same ceiling) on the
+    SAME shared 270s run pool (``GenerationControl.provider_seconds_remaining``
+    — one deadline for the whole run, not per wave). Before this fix every
+    chunk in both stages independently advertised the generic 24,000-char /
+    ~165s ceiling regardless of wave, so the two sequential legs could sum to
+    ~330s — over budget — and the second wave could be killed by
+    ``GenerationDeadlineExceeded`` with its partial text discarded, failing the
+    whole generation.
+
+    The fix has two layers, matching how harness was fixed AND closing the gap
+    harness's own docstring calls out ("nothing allocated that budget between
+    them" — true of harness too, since its split is prompt-only). First, as
+    with harness, whichever wave is the smaller sequential-only leg is shrunk
+    so the two targets add up: ``validation-risk`` (spec) and ``task-overview``
+    (tasks) are each capped at 3,000-13,000 characters (~90s), leaving the
+    unchanged 24,000-char parallel wave (~165s) ~255s total of the 270s pool —
+    the same margin as the harness split. Second, and unlike harness, this is
+    also enforced at runtime: ``_wave_deadline`` computes an absolute deadline
+    for each wave, threaded through ``_run_chunk_attempts`` /
+    ``_generate_chunk_once`` into ``_watchdog_stream`` as a third clamp
+    alongside the per-call and per-run bounds. The deadline is a WEIGHTED share
+    of whatever run budget remains at the moment the wave starts — weighted by
+    each wave's own advertised ceiling (read back from this same function via
+    ``_max_target_chars``, so the prompt guidance and the runtime cap can never
+    drift apart) — recomputed fresh per wave, so a wave that finishes early
+    hands its slack to the next one, and the LAST wave is never capped (its
+    weighted share collapses to 100% of what remains, since nothing after it
+    needs protecting). Capping the earlier wave to its fair share is what
+    actually guarantees the later wave a floor of run budget; the prompt target
+    alone is advisory and a chunk that ignores it could still consume the
+    whole per-call 240s regardless of what it was asked to aim for.
+
+    Demo Day is unaffected: its spec/tasks stay single ``whole_document``
+    chunks (``_chunk_waves_for_stage`` gives each its own wave, no dependency
+    sum, so ``_wave_deadline`` returns ``None``), and neither
+    ``validation-risk`` nor ``task-overview`` exists under the ``"demo-full"``
+    chunk. Both new length-target branches are keyed on ``stage_type`` +
+    ``chunk.key`` (never reached by Demo Day's differently-named chunks), and
+    ``_wave_deadline`` is gated on ``stage_type in ("spec", "tasks")`` and
+    ``mode == "standard"`` explicitly — plan and harness keep their existing
+    single-wave / prompt-only treatment untouched even though harness also has
+    two waves, because harness's split is already tuned and tested on its own
+    terms and was not asked to change. So this only ever changes standard-mode
+    spec/tasks behaviour. ``test_the_spec_and_task_waves_fit_the_run_budget_together``
+    pins the prompt-target arithmetic the same way
+    ``test_the_two_harness_chunks_fit_the_run_budget_together`` does for
+    harness; ``test_wave_deadline_*`` in test_stage_manager.py pins the runtime
+    clamp.
     """
     if _is_harness_files_chunk(stage_type, chunk):
         return (
@@ -1972,6 +2044,32 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
             "prose — never drop a requirement row or a promised file to fit "
             "the target; trim the Overview/Coverage Plan prose first if space "
             "is tight."
+        )
+    if (
+        stage_type == "spec"
+        and chunk.key == "validation-risk"
+        and not chunk.whole_document
+    ):
+        return (
+            "Length target: 3,000-13,000 characters for this chunk. It runs "
+            "SECOND, after the product-scope/system-expectations wave already "
+            "spends part of the shared 270s run budget — keep this chunk lean "
+            "so the two waves fit together. Shorter and denser beats longer "
+            "and padded; do not pad toward the upper bound."
+        )
+    if (
+        stage_type == "tasks"
+        and chunk.key == "task-overview"
+        and not chunk.whole_document
+    ):
+        return (
+            "Length target: 3,000-13,000 characters for this chunk. It runs "
+            "FIRST, before the foundation/interface/hardening wave that needs "
+            "most of the shared 270s run budget — keep this chunk lean (the "
+            "Dependency Graph and Task Sizing Legend are graded structurally, "
+            "not by prose length, so most of this budget is really for the "
+            "Traceability Overview) so the two waves fit together. Shorter "
+            "and denser beats longer and padded."
         )
     if chunk.whole_document:
         return (
@@ -2432,6 +2530,88 @@ def _stage_has_parallel_waves(stage_type: str, mode: str = "standard") -> bool:
     return any(len(wave) > 1 for wave in _chunk_waves_for_stage(stage_type, mode))
 
 
+_CHARS_PER_SECOND = 145.0  # measured: ~38 tok/s at effort=medium, ~3.5 chars/tok
+_CHAR_FIGURE_RE = re.compile(r"\d[\d,]{3,}")
+
+
+def _max_target_chars(stage_type: str, chunk: ArtifactChunkSpec) -> int:
+    """The largest N,NNN-style figure in this chunk's advertised length target.
+
+    Lets a runtime caller (``_wave_deadline``) read back the same ceiling the
+    prompt advertises, so the two can never drift apart the way the harness
+    docstring warns a hand-duplicated figure eventually does. Every branch of
+    ``_chunk_length_target`` happens to advertise a parseable figure today, but
+    this runs on the runtime path for every wave of every standard spec/tasks
+    generation, so a target string edited to drop its last figure must not
+    crash a live generation — ``default=0`` makes that structurally safe
+    rather than incidentally safe; ``_wave_deadline`` treats a 0 as "cannot
+    weight this wave" and backs off to no cap at all.
+    """
+    target = _chunk_length_target(stage_type, chunk)
+    return max(
+        (int(m.replace(",", "")) for m in _CHAR_FIGURE_RE.findall(target)),
+        default=0,
+    )
+
+
+# Standard-mode stages whose waves are strictly sequential on one shared run
+# budget with no allocation between them (the defect _chunk_length_target's
+# docstring describes). Harness has the same two-wave shape but is
+# deliberately excluded: its split is prompt-only, already tuned, and was not
+# asked to change — this only ever affects spec and tasks.
+_WAVE_BUDGET_ENFORCED_STAGES = frozenset({"spec", "tasks"})
+
+
+def _wave_deadline(
+    stage_type: str,
+    mode: str,
+    control: GenerationControl,
+    waves: list[list[ArtifactChunkSpec]],
+    wave_index: int,
+) -> float | None:
+    """Absolute monotonic deadline capping how long THIS wave may run.
+
+    ``None`` means "no additional cap" — the caller falls back to the existing
+    per-call (240s) and per-run (270s pool) bounds unchanged, which is every
+    stage/mode except standard spec/tasks and every non-multi-wave case within
+    those two.
+
+    The deadline is a WEIGHTED share of whatever run budget remains right now
+    (``control.provider_seconds_remaining``), not a fixed 270/N split —
+    weighted by each wave's own advertised character ceiling (via
+    ``_max_target_chars``, reading the same numbers ``_chunk_length_target``
+    put in the prompt), because spec's and tasks' two waves are NOT equal in
+    content: an even split would under-allocate the heavier parallel wave and
+    over-allocate the lighter sequential one, making normal-latency
+    generations trip the cap that previously never applied. The share is
+    recomputed fresh at the start of each wave, so a wave that finishes early
+    hands its slack to the next one, and the LAST wave's weighted share always
+    collapses to 100% of what remains (nothing after it needs protecting) — it
+    is never itself capped. Capping the EARLIER wave to its fair share is what
+    actually guarantees the later wave a floor of run budget.
+    """
+    if mode != "standard" or stage_type not in _WAVE_BUDGET_ENFORCED_STAGES:
+        return None
+    if len(waves) < 2:
+        return None
+    wave_seconds = [
+        max(_max_target_chars(stage_type, chunk) for chunk in wave) / _CHARS_PER_SECOND
+        for wave in waves
+    ]
+    if any(seconds <= 0 for seconds in wave_seconds):
+        # A chunk's length target had no parseable figure — the weighting is
+        # meaningless without one. Fail open to no cap rather than divide by
+        # (or weight by) zero.
+        return None
+    remaining_weight = sum(wave_seconds[wave_index:])
+    if remaining_weight <= 0:
+        return None
+    share = control.provider_seconds_remaining * (
+        wave_seconds[wave_index] / remaining_weight
+    )
+    return asyncio.get_running_loop().time() + share
+
+
 # Anchor for the whole-document contract that ends every stage user prompt
 # (standard and Demo Day): the "Before returning, verify" checklist followed by
 # the "Return only <ARTIFACT>" line. Chunked generation strips from this marker
@@ -2777,6 +2957,7 @@ class StageManager:
             chunk: ArtifactChunkSpec,
             prior_chunks: list[str],
             stream_live: bool,
+            wave_index: int,
         ) -> tuple[str, str, LLMRoute, int, str | None]:
             attempt_route = route
             fallback_used = False
@@ -2788,6 +2969,17 @@ class StageManager:
                     raise GenerationDeadlineExceeded()
                 adapter = adapter_factory(attempt_route)
                 retry_count = int(fallback_used) + rate_limit_retries
+                # Recomputed on EVERY attempt (including a fallback retry) from
+                # whatever run budget genuinely remains right now. A deadline
+                # frozen once at wave start would already be expired by the
+                # time a retry begins (it was, by definition, what killed the
+                # prior attempt), guaranteeing the retry an instant second
+                # failure — turning a merely-slow wave into a hard generation
+                # failure instead of the smaller-but-real window a fresh
+                # recompute gives it.
+                wave_deadline = _wave_deadline(
+                    stage_type, mode, control, waves, wave_index
+                )
                 try:
                     text = await self._generate_chunk_once(
                         adapter=adapter,
@@ -2808,6 +3000,7 @@ class StageManager:
                             mode, chunk, attempt_route.provider
                         ),
                         control=control,
+                        wave_deadline=wave_deadline,
                     )
                     return (
                         chunk.key,
@@ -2868,9 +3061,12 @@ class StageManager:
             chunk: ArtifactChunkSpec,
             prior_chunks: list[str],
             stream_live: bool,
+            wave_index: int,
         ) -> tuple[str, str, LLMRoute, int, str | None]:
             try:
-                return await _run_chunk_attempts(chunk, prior_chunks, stream_live)
+                return await _run_chunk_attempts(
+                    chunk, prior_chunks, stream_live, wave_index
+                )
             except BaseException as exc:
                 # Carry canonical placement through every stop/failure path. A
                 # later parallel sibling may have checkpointed first, so merely
@@ -2893,7 +3089,12 @@ class StageManager:
                 continue
             tasks = [
                 asyncio.create_task(
-                    _one_chunk(chunk, prior, stream_live=index == 0),
+                    _one_chunk(
+                        chunk,
+                        prior,
+                        stream_live=index == 0,
+                        wave_index=wave_index,
+                    ),
                     name=f"stage-chunk:{control.run_id}:{chunk.key}",
                 )
                 for index, chunk in enumerate(pending_chunks)
@@ -3007,6 +3208,7 @@ class StageManager:
         cache_policy: PromptCachePolicy | None = None,
         cache_system: bool = True,
         control: GenerationControl | None = None,
+        wave_deadline: float | None = None,
     ) -> str:
         accumulated = ""
         _set_adapter_attempt_metadata(
@@ -3072,6 +3274,7 @@ class StageManager:
                     stage_type=stage_type,
                     provider=route.provider,
                     control=control,
+                    wave_deadline=wave_deadline,
                 ):
                     accumulated += token
                     if len(accumulated) > 500_000:

@@ -50,6 +50,13 @@ def _char_figures(target: str) -> list[int]:
     return sorted(int(m.replace(",", "")) for m in re.findall(r"\d[\d,]{3,}", target))
 
 
+# The two standard-mode chunks that were shrunk to fit their wave's sequential
+# neighbour inside the shared 270s run budget (see _chunk_length_target's
+# docstring). Demo Day never reaches either key — its spec/tasks stay
+# single-chunk — so this set is standard-mode-only by construction.
+_WAVE_BUDGET_CONSTRAINED_CHUNK_KEYS = {"validation-risk", "task-overview"}
+
+
 def _harness(files_section: str, *, tree: str, matrix: str) -> str:
     return f"""## Harness Overview
 {PAD}
@@ -787,13 +794,24 @@ def test_whole_document_chunks_get_a_single_call_length_target():
 
 def test_standard_document_chunks_fit_one_provider_call():
     """A standard slice is ALSO exactly one 240s call, so it carries the same
-    ceiling. The multi-chunk split is what supplies total document length."""
+    ceiling. The multi-chunk split is what supplies total document length.
+
+    The two chunks in _WAVE_BUDGET_CONSTRAINED_CHUNK_KEYS are the exception:
+    each is the smaller, sequential-only leg of a two-wave stage (spec's
+    validation-risk, tasks' task-overview) and was deliberately shrunk to
+    3,000-13,000 so its wave sums with its sibling wave's 24,000-char ceiling
+    inside the shared 270s run budget — see
+    test_the_spec_and_task_waves_fit_the_run_budget_together.
+    """
     for stage in ("spec", "plan", "tasks"):
         chunks = sm._chunk_specs_for_stage(stage, "standard")
         assert len(chunks) > 1, f"{stage} must stay multi-chunk in standard mode"
         for chunk in chunks:
             assert chunk.whole_document is False
             target = sm._chunk_length_target(stage, chunk)
+            if chunk.key in _WAVE_BUDGET_CONSTRAINED_CHUNK_KEYS:
+                assert "3,000" in target and "13,000" in target
+                continue
             assert "24,000" in target
             # Density initiative (2026-08-02): the floor was lowered from
             # 8,000 to 3,500 — a per-call prose-budget lever, not a depth-floor
@@ -804,12 +822,22 @@ def test_standard_document_chunks_fit_one_provider_call():
 def test_no_non_harness_chunk_advertises_a_ceiling_past_the_measured_band():
     """The regression guard. Whatever branch a non-harness chunk takes, it must
     never be told it can spend more than one provider stream can finish — that
-    is what times the stream out and de-escalates the retry to the mid tier."""
+    is what times the stream out and de-escalates the retry to the mid tier.
+
+    The wave-budget-constrained chunks (spec's validation-risk, tasks'
+    task-overview) advertise a LOWER ceiling (13,000) than the generic 24,000 —
+    still well inside the measured band, so the assertion is "at or below
+    24,000", not "exactly 24,000"."""
     for mode in ("standard", "demo_day"):
         for stage in ("spec", "plan", "tasks"):
             for chunk in sm._chunk_specs_for_stage(stage, mode):
                 target = sm._chunk_length_target(stage, chunk)
-                assert "24,000" in target, (mode, stage, chunk.key, target)
+                assert max(_char_figures(target)) <= 24_000, (
+                    mode,
+                    stage,
+                    chunk.key,
+                    target,
+                )
                 assert "80,000" not in target, (mode, stage, chunk.key, target)
                 assert "30,000" not in target, (mode, stage, chunk.key, target)
 
@@ -855,12 +883,21 @@ def test_every_chunk_one_ceiling_stays_at_or_below_a_reachable_figure():
     depth; the watchdog kills on wall clock and does not care about the shape of
     the output.
     """
-    non_harness_ceiling = "24,000"
+    non_harness_ceiling = 24_000
     for mode in ("standard", "demo_day"):
         for stage in ("spec", "plan", "tasks"):
             for chunk in sm._chunk_specs_for_stage(stage, mode):
                 target = sm._chunk_length_target(stage, chunk)
-                assert non_harness_ceiling in target, (mode, stage, chunk.key, target)
+                # Wave-budget-constrained chunks (spec's validation-risk,
+                # tasks' task-overview) advertise a lower, still-reachable
+                # 13,000 ceiling — see
+                # test_the_spec_and_task_waves_fit_the_run_budget_together.
+                assert max(_char_figures(target)) <= non_harness_ceiling, (
+                    mode,
+                    stage,
+                    chunk.key,
+                    target,
+                )
                 assert "45,000" not in target, (mode, stage, chunk.key, target)
         contract = next(
             c
@@ -906,6 +943,62 @@ def test_the_two_harness_chunks_fit_the_run_budget_together():
                 ceiling / chars_per_second
                 <= settings.stage_provider_call_timeout_seconds
             ), (mode, ceiling)
+
+
+def test_the_spec_and_task_waves_fit_the_run_budget_together():
+    """Standard spec and tasks have the harness's exact defect: two SEQUENTIAL
+    waves (a dependency-bound wave 2 that can only start once wave 1 finishes)
+    drawing on the SAME 270s run-scoped budget, with nothing allocating that
+    budget between them. Every chunk previously advertised the same generic
+    24,000-char ceiling regardless of which wave it was in, so the two waves
+    could sum to ~330s and the second wave could be killed by
+    GenerationDeadlineExceeded, discarding its partial text and failing the
+    whole generation.
+
+    spec: [product-scope, system-expectations] (parallel) -> [validation-risk]
+    tasks: [task-overview] ->
+        [task-foundation, task-interface, task-hardening] (parallel)
+
+    A wave's own wall-clock cost is bounded by its SLOWEST chunk (parallel
+    chunks run concurrently), and waves run one after another, so the budget
+    check is: sum over waves of (max ceiling in that wave) <= the run pool.
+
+    Demo Day is exempt by construction: _chunk_waves_for_stage gives each of
+    its single whole_document chunks its own wave, so there is only ever one
+    wave and no cross-wave sum to overflow.
+    """
+    chars_per_second = 145  # measured: ~38 tok/s at effort=medium, ~3.5 chars/tok
+    provider_seconds = (
+        settings.stage_generation_deadline_seconds
+        - settings.stage_generation_finalise_reserve_seconds
+    )
+    for stage in ("spec", "tasks"):
+        waves = sm._chunk_waves_for_stage(stage, "standard")
+        assert len(waves) == 2, (stage, waves)
+        wave_costs = []
+        for wave in waves:
+            ceilings = [
+                max(_char_figures(sm._chunk_length_target(stage, chunk)))
+                for chunk in wave
+            ]
+            wave_costs.append(max(ceilings))
+        assert sum(wave_costs) / chars_per_second <= provider_seconds, (
+            stage,
+            wave_costs,
+        )
+        # And each individual chunk still fits inside one provider call.
+        for wave in waves:
+            for chunk in wave:
+                ceiling = max(_char_figures(sm._chunk_length_target(stage, chunk)))
+                assert (
+                    ceiling / chars_per_second
+                    <= settings.stage_provider_call_timeout_seconds
+                ), (stage, chunk.key, ceiling)
+
+    # Demo Day is untouched: single-chunk waves, so there is nothing to sum.
+    for stage in ("spec", "tasks"):
+        waves = sm._chunk_waves_for_stage(stage, "demo_day")
+        assert all(len(wave) == 1 for wave in waves), (stage, waves)
 
 
 def test_chunk_floors_clear_the_depth_floors():
