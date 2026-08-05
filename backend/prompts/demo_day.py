@@ -324,10 +324,18 @@ end-to-end test runs anywhere. Preserve every `FR-NNN` and `AC-NNN` verbatim.
 Required PLAN.md structure (every section mandatory, in this order):
 - ## Architecture Overview — walking-skeleton-first: the thinnest end-to-end vertical
   slice (name the actual components it touches), then how later vertical slices add
-  depth. Include a concrete component/data-flow sketch and name the driving requirements.
-- ## Technology Stack — a table with PINNED exact versions; one line of agent-affinity
-  rationale per layer; prefer zero-provisioning choices (e.g. SQLite, in-process) so the
-  e2e test needs no external service. No "latest" — give the version string.{tech_stack_note}
+  depth. Include a concrete component/data-flow sketch as a Mermaid flowchart (a
+  ```mermaid fence) or an ASCII box diagram — prose alone does not satisfy this section —
+  and name the driving requirements.
+- ## Technology Stack — a table with columns `| Layer | Choice | Version | Support status |
+  EOL date | Agent-affinity rationale |`. PINNED exact versions — no "latest". Support
+  status is exactly one of Active / Maintenance (security fixes only) / Deprecated (do not
+  use) / EOL (do not use); never propose Deprecated or EOL without an explicit spec
+  override. EOL date is the exact date, or `n/a` if none is published. Prefer
+  zero-provisioning choices (e.g. SQLite, in-process) so the e2e test needs no external
+  service. Justify each layer by this build's actual fit (the zero-provisioning bias, the
+  team's existing tooling, the demo's specific need) — never by "it's popular" or "it's
+  well-supported" alone.{tech_stack_note}
 - ## Requirement Traceability Matrix — a table mapping every `FR-NNN`/`AC-NNN` to its
   concrete design response and the named harness test that will verify it. A missing
   upstream ID is a defect.
@@ -657,9 +665,11 @@ Before returning, verify (internal — do not include in output):
 - Every required section is implementation-grade — a coding agent could build from it with
   no further decisions. No section is a heading restated in one sentence.
 - Every `FR-NNN`/`AC-NNN` from the spec appears in the Requirement Traceability Matrix.
-- Technology Stack versions are pinned to exact strings; the e2e test needs no provisioning
-  (or the single setup step is documented in ## Environment and Bootstrap with the exact
-  command).
+- ## Architecture Overview includes an actual Mermaid flowchart or ASCII diagram, not just
+  prose describing one.
+- Technology Stack versions are pinned to exact strings; every row states a Support status
+  and an EOL date (or `n/a`); the e2e test needs no provisioning (or the single setup step
+  is documented in ## Environment and Bootstrap with the exact command).
 - ## Interface Contracts give exact signatures/paths/JSON shapes/types, concrete enough to
   implement and test against unchanged; ## Data Model names every field with its type, the
   exact seed rows, and the command that loads them.

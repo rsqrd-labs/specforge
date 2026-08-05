@@ -96,7 +96,17 @@ logger = structlog.get_logger(__name__)
 # gate fails closed on any diff under backend/prompts/ regardless of mode
 # (same rationale as v2.7.0/v2.8.0/v2.9.0 above). No section added/removed, so
 # DEMO_DAY_SECTION_CONTRACTS is unchanged.
-ASDD_PROMPT_VERSION = "asdd-v2.10.0"
+# v2.11.0 — plan-only, standard mode (DEMO_DAY_PROMPT_VERSION v2.6.0 below
+# carries the Demo Day side): (1) tech-safety heading-mismatch fix companion —
+# Technology Stack gains an anti-"AI slop" clause ("not by being the common or
+# trendy default"), mirroring Frontend Architecture's existing anti-generic
+# language but for backend stack choices; (2) Architecture Overview's verify
+# checklist now explicitly requires an actual ASCII/Mermaid diagram (the
+# section prose already mandated the format; this closes the gap between the
+# instruction and the deterministic _architecture_diagram_signal structural
+# grader newly registered in artifact_validator.py's _STRUCTURAL_SECTIONS).
+# No heading added/removed, so SECTION_CONTRACTS["plan"] is unchanged.
+ASDD_PROMPT_VERSION = "asdd-v2.11.0"
 STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # spec-v5: audit M8 — the clarification Q&A block is now fenced with
     # wrap_untrusted_content instead of rendering user-typed answers raw in
@@ -154,7 +164,11 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # plan-v8: chunk-1 refund fix — same 30,000 -> 24,000 length-target drop as
     # spec-v9, same reasoning (25% margin under the 240s provider-call cap
     # instead of ~6%).
-    "plan": f"{ASDD_PROMPT_VERSION}:plan-v8",
+    # plan-v9 (2026-08-05): Technology Stack gains an anti-"AI slop" clause
+    # (a popular choice must be justified by fit, not popularity); the verify
+    # checklist explicitly requires Architecture Overview's diagram. Both are
+    # additive prose within existing sections; no heading added/removed.
+    "plan": f"{ASDD_PROMPT_VERSION}:plan-v9",
     # harness-v5: density initiative (2026-08-02) — tightened the two prose
     # sections only (Harness Overview, Coverage Plan): one line/row per
     # category instead of a paragraph, no restated-heading preambles. No
@@ -273,7 +287,17 @@ STAGE_PROMPT_VERSIONS: dict[str, str] = {
 # finding kind (reuses ShallowSection) — see docs/evals/PROMPT_CHANGE_REVIEW.md
 # for the review-gate note that Demo Day isn't covered by the golden-corpus
 # runner, so this relies on the unit test suite instead.
-DEMO_DAY_PROMPT_VERSION = "demo-day-v2.5.0"
+# v2.6.0 (2026-08-05) — plan-only (plan-v9 below): the tech-safety
+# heading-mismatch fix's companion prompt work. Technology Stack gains
+# Support status / EOL date columns (previously absent entirely, which meant
+# even a fixed parser had nothing structured to extract — parse_technology_
+# stack's header gate is separately relaxed in tech_safety.py to still accept
+# a table missing them) and an anti-"AI slop" fit-justification clause;
+# Architecture Overview now explicitly requires a Mermaid/ASCII diagram
+# rather than an unspecified "sketch", closing the gap between the prompt and
+# the new _architecture_diagram_signal structural grader. No new heading, so
+# DEMO_DAY_SECTION_CONTRACTS["plan"] is unchanged.
+DEMO_DAY_PROMPT_VERSION = "demo-day-v2.6.0"
 DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # spec-v3: "AI slop" frontend remediation — Overview gains one clause
     # naming the brand personality/emotional register (as a named contrast,
@@ -331,7 +355,11 @@ DEMO_DAY_STAGE_PROMPT_VERSIONS: dict[str, str] = {
     # class (SQL injection, XSS) each validation point defends against
     # instead of a bare "input is validated" claim. No new heading, so
     # DEMO_DAY_SECTION_CONTRACTS["plan"] is unchanged.
-    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v8",
+    # plan-v9 (2026-08-05): Technology Stack gains Support status / EOL date
+    # columns and an anti-"AI slop" fit-justification clause; Architecture
+    # Overview now explicitly requires a Mermaid/ASCII diagram. No heading
+    # added/removed.
+    "plan": f"{DEMO_DAY_PROMPT_VERSION}:plan-v9",
     # harness-v3: chunk-1 refund fix — Demo Day's contract chunk
     # ("demo-harness-contract") hits the same harness branch of
     # _chunk_length_target as standard's harness-v6; 45,000 -> 30,000

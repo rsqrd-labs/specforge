@@ -292,6 +292,22 @@ def test_plan_prompt_is_implementation_ready_without_scope_creep() -> None:
     assert "Never invent product scope beyond the spec" in prompt
     assert "smallest safe technical assumption" in prompt
     assert "Prefer fewer well-justified components" in prompt
+
+
+def test_plan_prompt_rejects_generic_stack_justification() -> None:
+    # Anti-"AI slop" guidance: a popular tech choice must be justified by fit
+    # for THIS product, not by being widely used -- prompt-only, mirroring the
+    # existing precedent set by Frontend Architecture's anti-generic-default
+    # language (also not code-enforced).
+    prompt = plan.SYSTEM_PROMPT
+    assert "not by being the common or trendy default" in prompt
+    assert "widely used or well-supported" in prompt
+
+
+def test_plan_prompt_mandates_diagram_in_architecture_overview() -> None:
+    assert "ASCII/Mermaid" in plan.SYSTEM_PROMPT
+    user_prompt = plan.build_user_prompt({"spec": "s"})
+    assert "actual ASCII or Mermaid diagram" in user_prompt
     assert "Prefer simple, production-grade architecture" in plan.build_user_prompt(
         {"spec": "FR-001 Users can create projects."}
     )

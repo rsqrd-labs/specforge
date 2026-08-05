@@ -105,6 +105,22 @@ def _plan_table(*rows: str) -> str:
     )
 
 
+def _demo_day_plan_table(*rows: str) -> str:
+    """A Demo Day-shaped Technology Stack table: the leaner heading (no "and
+    Rationale") and the leaner 3-column shape Demo Day's own prompt asks for
+    (no Support status / EOL date columns) — the real shape this parser must
+    tolerate, not just the standard 6-column table `_plan_table` builds."""
+    return "\n".join(
+        [
+            "## Technology Stack",
+            "",
+            "| Layer | Choice | Version |",
+            "|---|---|---|",
+            *rows,
+        ]
+    )
+
+
 def test_parse_technology_stack_table_extracts_required_columns() -> None:
     artifact = _plan_table(
         "| language | Python | 3.12 latest stable as of 2026-06 | "
@@ -119,6 +135,102 @@ def test_parse_technology_stack_table_extracts_required_columns() -> None:
     assert choices[0].version == "3.12"
     assert choices[0].support_status == "Active"
     assert choices[0].eol_date == "2028-10-31"
+
+
+def test_parse_technology_stack_resolves_demo_day_heading() -> None:
+    # Regression: `## Technology Stack` (no "and Rationale") previously never
+    # matched the hardcoded standard-only heading, so parse_technology_stack
+    # silently returned [] for every Demo Day plan.
+    artifact = _demo_day_plan_table("| Runtime | Python | 3.12.1 |")
+
+    choices = parse_technology_stack(artifact)
+
+    assert len(choices) == 1
+    assert choices[0].layer == "Runtime"
+    assert choices[0].choice == "Python"
+    assert choices[0].version == "3.12.1"
+
+
+def test_parse_technology_stack_still_prefers_standard_heading() -> None:
+    # Regression pin: standard-mode artifacts (the more specific heading)
+    # resolve exactly as before the heading-tuple fix.
+    artifact = _plan_table(
+        "| language | Python | 3.12 latest stable as of 2026-06 | "
+        "Active | 2028-10-31 | Better ecosystem than Go |"
+    )
+
+    choices = parse_technology_stack(artifact)
+
+    assert len(choices) == 1
+    assert choices[0].source.startswith("## Technology Stack and Rationale:")
+
+
+def test_demo_day_missing_optional_columns_parses_without_crash() -> None:
+    # Demo Day's own prompt (pre Fix 2 in this same change) never asked for
+    # Support status / EOL date columns at all; the relaxed header gate must
+    # still recognise the table and default the missing fields to None rather
+    # than requiring them to even see the table as a header row.
+    artifact = _demo_day_plan_table("| Cache | Redis | 7.4 |")
+
+    choices = parse_technology_stack(artifact)
+
+    assert len(choices) == 1
+    assert choices[0].support_status is None
+    assert choices[0].eol_date is None
+
+
+@pytest.mark.asyncio
+async def test_demo_day_support_status_blocked_when_declared() -> None:
+    # Once a Demo Day table DOES carry a Support status column (Fix 2), the
+    # same structured block that already protects standard mode must fire for
+    # Demo Day too -- this is the actual regression the heading fix closes.
+    artifact = "\n".join(
+        [
+            "## Technology Stack",
+            "",
+            "| Layer | Choice | Version | Support status | EOL date |",
+            "|---|---|---|---|---|",
+            "| framework | LegacyJS | 1.0.0 | Deprecated | 2024-01-01 |",
+        ]
+    )
+
+    with pytest.raises(TechSafetyError) as exc_info:
+        await validate_technology_safety(
+            "plan", artifact, {}, redis=_FakeRedis(), today=date(2026, 8, 5)
+        )
+
+    assert exc_info.value.findings[0].code == "support_status_blocked"
+    assert exc_info.value.findings[0].technology == "LegacyJS"
+
+
+@pytest.mark.asyncio
+async def test_plan_denylist_scans_whole_document_not_just_tech_stack_section() -> None:
+    # The hard denylist must catch a denylisted runtime named OUTSIDE the
+    # Technology Stack table -- e.g. a Demo Day restricted-environment
+    # Environment and Bootstrap install command -- for both modes. Narrowing
+    # the scan to only the resolved Technology Stack section (a tempting
+    # side effect of fixing the heading mismatch) would have silently dropped
+    # this coverage instead of just fixing the bug.
+    standard_artifact = "\n\n".join(
+        [
+            _plan_table("| language | Go | 1.22 | Active | n/a | Fast enough |"),
+            "## Deployment and Operations",
+            "Bootstrap: run `python 3.9 -m venv .venv` for the local tooling shim.",
+        ]
+    )
+    demo_day_artifact = "\n\n".join(
+        [
+            _demo_day_plan_table("| Language | Go | 1.22 |"),
+            "## Environment and Bootstrap",
+            "Bootstrap: run `python 3.9 -m venv .venv` for the local tooling shim.",
+        ]
+    )
+
+    for artifact in (standard_artifact, demo_day_artifact):
+        findings = await analyze_technology_safety(
+            "plan", artifact, {}, redis=_FakeRedis(), today=date(2026, 8, 5)
+        )
+        assert any(finding.code == "runtime_eol" for finding in findings)
 
 
 @pytest.mark.asyncio

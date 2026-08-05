@@ -106,6 +106,43 @@ def test_demo_day_plan_user_prompt_verifies_the_new_contract() -> None:
         assert token in out, f"plan user prompt missing verify token {token!r}"
 
 
+def test_demo_day_plan_prompt_mandates_support_status_and_eol_columns() -> None:
+    # Fix 2: without these columns in the prompt, the deterministic tech-safety
+    # gate's structured checks (support_status_blocked, technology_eol) have
+    # nothing to parse even once the heading-mismatch bug (Fix 1) is fixed.
+    prompt = dd._demo_day_system_prompt(dd._role_for("plan", None, False))
+    for token in ("Support status", "EOL date", "Deprecated", "n/a"):
+        assert token in prompt, f"plan prompt missing tech-stack token {token!r}"
+
+
+def test_demo_day_plan_user_prompt_verifies_support_status_and_eol() -> None:
+    out = dd.build_user_prompt("plan", {"spec": "s"})
+    assert "Support status" in out
+    assert "EOL date" in out
+
+
+def test_demo_day_plan_prompt_rejects_generic_stack_justification() -> None:
+    # Fix 3: prompt-only anti-"AI slop" guidance -- a popular choice must be
+    # justified by fit, not by popularity alone.
+    prompt = dd._demo_day_system_prompt(dd._role_for("plan", None, False))
+    assert "well-supported" in prompt
+
+
+def test_demo_day_plan_prompt_mandates_diagram_format() -> None:
+    # Fix 4: Architecture Overview must require an actual Mermaid/ASCII
+    # diagram, not just prose describing one -- this is what makes the
+    # deterministic _architecture_diagram_signal grader fair to apply with
+    # prose_fallback=False.
+    prompt = dd._demo_day_system_prompt(dd._role_for("plan", None, False))
+    assert "```mermaid" in prompt
+    assert "prose alone does not satisfy" in prompt
+
+
+def test_demo_day_plan_user_prompt_verifies_diagram_present() -> None:
+    out = dd.build_user_prompt("plan", {"spec": "s"})
+    assert "Mermaid flowchart or ASCII diagram" in out
+
+
 def test_demo_day_plan_prompt_version_is_bumped() -> None:
     """Demo Day's plan carries its OWN version suffix, distinct from standard's.
 

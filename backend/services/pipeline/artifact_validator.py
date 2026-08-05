@@ -596,6 +596,49 @@ def _enumerated_rows(body: str) -> int:
     return max(_table_data_rows(body), bullets)
 
 
+# Matches only the OPENING fence, not a closing ``` too, so a chunk killed by
+# the 240s provider-call watchdog mid-diagram (partial output) still reads as
+# "has a diagram" rather than "doesn't" -- the same reasoning that keeps the
+# harness Files-chunk gates from punishing a truncated-but-real generation.
+_MERMAID_FENCE_OPEN_RE = re.compile(r"```mermaid\b", re.IGNORECASE)
+_FENCED_BLOCK_RE = re.compile(r"```.*?```", re.DOTALL)
+_ASCII_DIAGRAM_CHAR_RE = re.compile(r"[│─├└┃┏┗┣┓┛┫╰╯╭╮]")
+# Deliberately only the two-character arrow (`-->`/`<--`), not a bare `->`/`<-`:
+# a single hyphen-arrow appears in ordinary prose ("client -> API -> DB") and
+# would false-pass a section that never drew a diagram at all. A false PASS is
+# worse than a false gap here (this grader has no prose_fallback escape hatch).
+_STRICT_ARROW_RE = re.compile(r"-->|<--")
+
+
+def _architecture_diagram_signal(body: str) -> int:
+    """1 if ``body`` contains a plausible Mermaid or ASCII diagram, else 0.
+
+    A Mermaid fence is unambiguous evidence on its own. Otherwise, box-drawing
+    glyphs are a strong enough signal alone (>=4 of them); a plain-ASCII
+    diagram with no box-drawing glyphs is only credited when its arrows sit
+    inside a fenced code block, or are corroborated by box-drawing glyphs
+    across >=2 distinct lines -- arrows outside a fence with no box-drawing
+    support are exactly the ordinary-prose case this must not false-pass.
+    """
+    if _MERMAID_FENCE_OPEN_RE.search(body):
+        return 1
+    box_drawing_hits = len(_ASCII_DIAGRAM_CHAR_RE.findall(body))
+    if box_drawing_hits >= 4:
+        return 1
+    for fence in _FENCED_BLOCK_RE.finditer(body):
+        if len(_STRICT_ARROW_RE.findall(fence.group(0))) >= 2:
+            return 1
+    if box_drawing_hits >= 1:
+        arrow_lines = {
+            i
+            for i, line in enumerate(body.splitlines())
+            if _STRICT_ARROW_RE.search(line)
+        }
+        if len(arrow_lines) >= 2:
+            return 1
+    return 0
+
+
 @dataclass(frozen=True)
 class _StructuralGrader:
     measure: Callable[[str], int]
@@ -612,6 +655,16 @@ _STRUCTURAL_SECTIONS: dict[str, _StructuralGrader] = {
         measure=lambda body: len(_file_tree_paths(body)),
         minimum=1,
         detail="does not name any file paths",
+        prose_fallback=False,
+    ),
+    # Heading is byte-identical in SECTION_CONTRACTS["plan"] and
+    # DEMO_DAY_SECTION_CONTRACTS["plan"], so this one entry covers both modes.
+    # prose_fallback=False mirrors File Tree: both prompts now explicitly
+    # mandate the Mermaid/ASCII format, so the structure IS the contract here.
+    "## Architecture Overview": _StructuralGrader(
+        measure=_architecture_diagram_signal,
+        minimum=1,
+        detail="does not contain a Mermaid or ASCII architecture diagram",
         prose_fallback=False,
     ),
     "## Task Sizing Legend": _StructuralGrader(
