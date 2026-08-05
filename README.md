@@ -33,6 +33,7 @@ Core capabilities:
 - A storyboard keynote and an evolving timeline of increments and ideas on top of the base spec.
 - Export options: ZIP delivery package, PDF document, and public share link.
 - A living, bidirectional GitHub integration (GitHub App): push the package to a repository, then keep tasks and issues/PRs in sync via a durable background worker.
+- Demo Day mode: a flag-gated generation profile that produces a single-happy-path, implementation-grade package (plus a construction verifier and an agent operating manual) tuned for handing straight to a coding agent. See `docs/DEMO_DAY_MODE_IMPLEMENTATION_PLAN.md`. `DEMO_DAY_MODE_ENABLED` defaults to off.
 
 ## Product Flow
 
@@ -56,21 +57,26 @@ Browser
   |
   | React + Vite frontend
   v
-FastAPI API ----------------> Redis queue ----------------> arq worker
-  |                                                            (GitHub I/O,
-  |-- PostgreSQL: users, workspaces, stages, credits,          billing webhooks,
-  |               evals, templates, increments, billing        reconciliation crons)
-  |-- Redis: refresh sessions, rate limits, transient auth state, job queue
+FastAPI API ----------------> Redis queue ----------------> arq workers
+  |                                                            (bulk: GitHub I/O,
+  |-- PostgreSQL: users, workspaces, stages, credits,           eval batches
+  |               evals, templates, increments, billing         fast: billing
+  |-- Redis: refresh sessions, rate limits, transient auth state, webhooks, PR checks,
+  |          job queue                                          reconciliation crons)
   |-- LLM gateway: Anthropic, OpenAI, Google Gemini
   |-- PDF renderer: WeasyPrint with no-network URL fetcher
   |-- Observability: Prometheus metrics, Sentry, optional OTLP
 ```
 
 The API process never blocks on external I/O. GitHub operations and billing-webhook
-processing are enqueued onto Redis and handled by a separate **arq worker** process
-(`worker.WorkerSettings`), which runs the export/sync jobs and periodic reconciliation
-crons. The worker shares the backend image and is its own service in both
-`docker-compose.yml` and the Railway `Procfile`.
+processing are enqueued onto Redis and handled by two separate **arq worker**
+processes: a **bulk** lane (`worker.WorkerSettings`) for GitHub I/O and LLM eval
+batches, and a **fast** lane (`worker.FastWorkerSettings`) for billing credit
+grants and PR status checks, so a bulk-export storm can never starve paid grants.
+Both run periodic reconciliation crons on their respective queues. Both workers
+share the backend image and are their own services in `docker-compose.yml` and
+the Railway `Procfile` — the fast lane must run in every environment or paid
+grants never drain.
 
 Important backend areas:
 
@@ -203,6 +209,7 @@ Infrastructure:
 ├── docker-compose.yml        Local full-stack compose setup
 ├── Design.md                 Product design system notes
 ├── tasks.md                  Implementation task plan
+├── LICENSE                   Elastic License 2.0
 └── README.md                 Project guide
 ```
 
@@ -282,6 +289,7 @@ See `docs/LOCAL_TESTING_HANDBOOK.md` for a step-by-step guide to generating secr
 | `LLM_STREAM_HARD_CAP_SECONDS` | Absolute upper bound on a single stream. Defaults to 900. |
 | `CORE_CHEAP_PRIMARY` | Optional feature flag, defaults to **true** (core generation routes to each provider's cheapest viable tier first, with mid-tier escalation). Set false to revert to the previous mid-tier-first policy. |
 | `CORE_COMPLEXITY_ROUTING` | Optional feature flag, defaults to off. Enables a deterministic classifier that raises (never lowers) the starting tier for predictably hard requests. |
+| `DEMO_DAY_MODE_ENABLED` | Optional feature flag, defaults to off. Enables the Demo Day generation profile end-to-end; when off, `workspace.mode` is forced to `standard` at creation. Pair with the frontend's `VITE_DEMO_DAY_MODE`. |
 | `SENTRY_DSN` | Optional backend Sentry DSN. |
 | `GRAFANA_OTLP_ENDPOINT` | Optional OTLP trace endpoint. |
 | `GRAFANA_OTLP_TOKEN` | Optional OTLP auth token. |
@@ -298,6 +306,7 @@ See `docs/LOCAL_TESTING_HANDBOOK.md` for a step-by-step guide to generating secr
 | --- | --- |
 | `VITE_API_URL` | Browser-facing backend URL. |
 | `VITE_SENTRY_DSN` | Optional frontend Sentry DSN. |
+| `VITE_DEMO_DAY_MODE` | Optional feature flag, defaults to off. Set to `true` to surface Demo Day mode in the UI; pair with the backend's `DEMO_DAY_MODE_ENABLED`. |
 
 ## Local Development With Docker
 
@@ -317,12 +326,20 @@ The compose stack starts:
 - PostgreSQL on `localhost:5432`
 - Redis on `localhost:6379`
 - FastAPI API on `localhost:8000`
-- arq worker (no published port; drains the Redis job queue)
+- `worker` — bulk arq lane (no published port; GitHub bulk I/O + LLM eval batches)
+- `worker-fast` — fast arq lane (no published port; billing grants + PR checks)
+- `github-webhook-forwarder` — idle unless `GITHUB_WEBHOOK_PROXY_URL` is set
 - Vite frontend on `localhost:5173`
 
-The worker needs public ingress to receive GitHub and billing webhooks in dev —
-forward a tunnel (for example `smee.io` or `gh webhook forward`) to the local
-`POST /integrations/github/webhook` endpoint, and register a separate dev GitHub App.
+Both worker lanes need public ingress to receive GitHub and billing webhooks in
+dev. Set `GITHUB_WEBHOOK_PROXY_URL` in `backend/.env` to a Smee channel (or run
+`gh webhook forward` yourself) and the compose-managed `github-webhook-forwarder`
+relays signed deliveries to the local `POST /integrations/github/webhook`
+endpoint; register a separate dev GitHub App pointed at that Smee channel.
+
+Optional: run a transaction-mode PgBouncer pooler alongside the stack with
+`docker compose --profile pgbouncer up -d pgbouncer` (see the compose file for
+the matching `DATABASE_URL`/`DB_TRANSACTION_POOLER_MODE` settings).
 
 Open:
 
@@ -373,12 +390,14 @@ uv run alembic upgrade head
 uv run uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-In a second shell, run the background worker (required for GitHub sync and billing
-webhook processing):
+In a second and third shell, run both background worker lanes (required for
+GitHub sync and billing webhook processing — the fast lane specifically for
+billing grants and PR checks):
 
 ```bash
 cd backend
-uv run arq worker.WorkerSettings
+uv run arq worker.WorkerSettings       # bulk lane
+uv run arq worker.FastWorkerSettings   # fast lane
 ```
 
 Frontend:
@@ -758,4 +777,4 @@ Large frontend build warning:
 
 ## License
 
-No license file is currently included. Add one before distributing or accepting external contributions.
+Elastic License 2.0. See `LICENSE` for the full terms.
