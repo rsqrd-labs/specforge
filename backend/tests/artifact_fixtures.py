@@ -213,6 +213,18 @@ PLAN_DEFAULT_BODY = (
     "downstream harness and task generation."
 )
 
+# ## Architecture Overview is graded structurally (a Mermaid/ASCII diagram
+# must be present, prose_fallback=False) -- PLAN_DEFAULT_BODY alone would trip
+# `shallow_required_section` now that the grader is registered.
+ARCHITECTURE_OVERVIEW_BODY = (
+    f"{PLAN_DEFAULT_BODY}\n\n"
+    "```mermaid\n"
+    "flowchart TD\n"
+    "  Client -->|HTTPS| API[API Service]\n"
+    "  API -->|SQL| DB[(Postgres)]\n"
+    "```\n"
+)
+
 _RTM_HEADER = (
     "| Upstream ID | Plan coverage | Interface or control | Test intent |\n"
     "|---|---|---|---|"
@@ -244,6 +256,8 @@ def plan_chunk_md(key: str, technology_stack: str) -> str:
             sections.append(f"{heading}\n{_rtm_section_body()}")
         elif heading == "## Technology Stack and Rationale":
             sections.append(f"{heading}\n{technology_stack}")
+        elif heading == "## Architecture Overview":
+            sections.append(f"{heading}\n{ARCHITECTURE_OVERVIEW_BODY}")
         else:
             sections.append(f"{heading}\n{PLAN_DEFAULT_BODY}")
     return "\n\n".join(sections)

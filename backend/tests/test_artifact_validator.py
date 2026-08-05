@@ -11,6 +11,7 @@ from services.pipeline.artifact_validator import (
     SECTION_CONTRACTS,
     IncompleteArtifactError,
     MissingSectionError,
+    _architecture_diagram_signal,
     _task_harness_ref_issues,
     chunk_completion_sentinel,
     dedupe_file_blocks,
@@ -19,6 +20,7 @@ from services.pipeline.artifact_validator import (
     validate_completion_sentinel,
     validate_sections,
 )
+from services.pipeline.stage_manager import apply_deterministic_rewrites
 
 
 def _complete_plan_artifact() -> str:
@@ -37,6 +39,33 @@ _DEEP_SECTION_BODY = (
     "mode and recovery path, and the observability signal that proves it works."
 )
 
+# ## Architecture Overview is graded structurally (a Mermaid/ASCII diagram),
+# not by prose length (prose_fallback=False) -- every "complete"/"deep" plan
+# fixture must give it a real diagram body, or every unrelated test that
+# builds a full plan artifact and asserts no exception starts failing.
+_ARCHITECTURE_DIAGRAM_BODY = (
+    "The three driving requirements shape a single API service in front of a\n"
+    "managed Postgres instance, fronted by a CDN.\n\n"
+    "```mermaid\n"
+    "flowchart TD\n"
+    "  Client -->|HTTPS| API[API Service]\n"
+    "  API -->|SQL| DB[(Postgres)]\n"
+    "  API -->|cache| Cache[(Redis)]\n"
+    "```\n"
+)
+
+
+def _deep_body_for(heading: str) -> str:
+    """The default deep body for a plan heading in the fixture builders below.
+
+    ## Architecture Overview is graded structurally (a diagram, not prose), so
+    it gets a body carrying one instead of the generic deep prose every other
+    section uses.
+    """
+    if heading == "## Architecture Overview":
+        return _ARCHITECTURE_DIAGRAM_BODY
+    return _DEEP_SECTION_BODY
+
 
 def _deep_plan_artifact(*, frontend_body: str | None = None) -> str:
     """A PLAN.md where every base section has a substantive body.
@@ -46,7 +75,8 @@ def _deep_plan_artifact(*, frontend_body: str | None = None) -> str:
     conditional ``## Frontend Architecture`` section is appended with that body.
     """
     parts = [
-        f"{heading}\n{_DEEP_SECTION_BODY}\n" for heading in SECTION_CONTRACTS["plan"]
+        f"{heading}\n{_deep_body_for(heading)}\n"
+        for heading in SECTION_CONTRACTS["plan"]
     ]
     if frontend_body is not None:
         parts.append(f"## Frontend Architecture\n{frontend_body}\n")
@@ -75,6 +105,114 @@ def test_architecture_quality_attribute_matrix_not_falsely_shallow() -> None:
     artifact = _deep_plan_artifact()
     assert "## Architecture Quality Attribute Matrix" in artifact
     validate_artifact_completeness("plan", artifact, {})
+
+
+# ---------------------------------------------------------------------------
+# Architecture Overview diagram grader — structural, not prose-length based
+# (prose_fallback=False, mirroring ## File Tree). Covers both modes since the
+# heading is byte-identical in SECTION_CONTRACTS and DEMO_DAY_SECTION_CONTRACTS.
+# ---------------------------------------------------------------------------
+
+
+def test_architecture_diagram_signal_detects_mermaid_fence() -> None:
+    assert _architecture_diagram_signal(_ARCHITECTURE_DIAGRAM_BODY) == 1
+
+
+def test_architecture_diagram_signal_detects_ascii_box_drawing() -> None:
+    ascii_diagram = (
+        "```\n"
+        "┌────────┐     ┌──────────┐\n"
+        "│ Client ├────▶│ API      │\n"
+        "└────────┘     └────┬─────┘\n"
+        "                    ▼\n"
+        "               ┌──────────┐\n"
+        "               │ Postgres │\n"
+        "               └──────────┘\n"
+        "```\n"
+    )
+    assert _architecture_diagram_signal(ascii_diagram) == 1
+
+
+def test_architecture_diagram_signal_detects_fenced_plain_ascii_arrows() -> None:
+    fenced_arrows = "```\nClient --> API --> Postgres\nAPI --> Cache\n```\n"
+    assert _architecture_diagram_signal(fenced_arrows) == 1
+
+
+def test_architecture_diagram_signal_rejects_prose_only() -> None:
+    prose = (
+        "The system is composed of an API service backed by Postgres, with a "
+        "Redis cache in front of expensive reads and a CDN serving static assets."
+    )
+    assert _architecture_diagram_signal(prose) == 0
+
+
+def test_architecture_diagram_signal_rejects_bare_prose_arrow() -> None:
+    # A single hyphen-arrow in ordinary prose, with no fence and no box-drawing
+    # corroboration, must not false-pass -- this is the exact false-positive
+    # the strict `-->`/`<--`-only regex (vs. a loose `->`/`<-`) exists to avoid.
+    prose = "Requests flow client -> API -> DB with no caching layer today."
+    assert _architecture_diagram_signal(prose) == 0
+
+
+def test_architecture_overview_with_diagram_not_falsely_shallow() -> None:
+    artifact = _deep_plan_artifact()
+    assert "```mermaid" in artifact
+    validate_artifact_completeness("plan", artifact, {})
+
+
+def test_architecture_overview_without_diagram_is_flagged() -> None:
+    # Override Architecture Overview back to plain prose; every other section
+    # stays deep, isolating the finding to the section under test.
+    parts = [
+        f"{heading}\n{_DEEP_SECTION_BODY}\n" for heading in SECTION_CONTRACTS["plan"]
+    ]
+    artifact = "\n\n".join(parts)
+    with pytest.raises(IncompleteArtifactError) as excinfo:
+        validate_artifact_completeness("plan", artifact, {})
+    assert any(
+        issue.code == "shallow_required_section"
+        and issue.reference == "## Architecture Overview"
+        for issue in excinfo.value.issues
+    )
+
+
+def test_demo_day_architecture_overview_with_diagram_not_falsely_shallow() -> None:
+    artifact = _deep_demo_day_plan_artifact()
+    assert "```mermaid" in artifact
+    validate_artifact_completeness("plan", artifact, {}, mode="demo_day")
+
+
+def test_demo_day_architecture_overview_without_diagram_is_flagged() -> None:
+    parts = [
+        f"{heading}\n{_DEEP_SECTION_BODY}\n"
+        for heading in DEMO_DAY_SECTION_CONTRACTS["plan"]
+        if heading != "## Frontend Architecture"
+    ]
+    parts.append(f"## Frontend Architecture\n{_DEEP_SECTION_BODY}\n")
+    artifact = "\n\n".join(parts)
+    with pytest.raises(IncompleteArtifactError) as excinfo:
+        validate_artifact_completeness("plan", artifact, {}, mode="demo_day")
+    assert any(
+        issue.code == "shallow_required_section"
+        and issue.reference == "## Architecture Overview"
+        for issue in excinfo.value.issues
+    )
+
+
+def test_architecture_overview_mermaid_fence_survives_deterministic_rewrites() -> None:
+    # apply_deterministic_rewrites runs immediately before
+    # validate_artifact_completeness; if it ever mangled an inner fence, this
+    # grader's prose_fallback=False would false-flag every correct plan.
+    # _strip_code_fence only strips a fence wrapping the ENTIRE response, and
+    # dedupe_contract_sections tracks fence state so a `## `-looking line
+    # inside a fence is never read as a heading boundary -- verified here, not
+    # just asserted in a comment.
+    artifact = _deep_plan_artifact()
+    rewritten, _ = apply_deterministic_rewrites("plan", artifact, "standard")
+    assert "```mermaid" in rewritten
+    assert _architecture_diagram_signal(
+        rewritten[rewritten.index("## Architecture Overview") :]
+    )
 
 
 def test_frontend_architecture_not_applicable_one_liner_is_valid() -> None:
@@ -151,7 +289,7 @@ def test_validate_sections_frontend_conditional_skipped_when_no_sentinel() -> No
 
 def _deep_demo_day_plan_artifact(*, frontend_body: str = _DEEP_SECTION_BODY) -> str:
     parts = [
-        f"{heading}\n{_DEEP_SECTION_BODY}\n"
+        f"{heading}\n{_deep_body_for(heading)}\n"
         for heading in DEMO_DAY_SECTION_CONTRACTS["plan"]
         if heading != "## Frontend Architecture"
     ]
