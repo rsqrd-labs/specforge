@@ -1889,13 +1889,32 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
 
     Every target is sized against what ONE provider stream can actually finish,
     because a chunk is exactly one call: ``_watchdog_stream`` kills it at the
-    absolute ``stage_provider_call_timeout_seconds`` hard cap (240s, the most
-    the 300s deadline minus the 30s finalise reserve can grant), and the whole
-    run is pinned to that deadline. Overshooting the bound is not a soft failure
-    — the stream is killed and its partial text is discarded. At 240s there is
-    no longer time for the mid-tier retry either (the remainder falls below
+    absolute ``stage_provider_call_timeout_seconds`` hard cap (270s as of
+    2026-08-06 — the full 300s deadline minus the 30s finalise reserve; a prior
+    version capped this at a stricter, self-imposed 240s), and the whole run is
+    pinned to that deadline. Overshooting the bound is not a soft failure — the
+    stream is killed and its partial text is discarded. Either way there is no
+    longer time for the mid-tier retry (the remainder falls below
     ``stage_retry_min_remaining_seconds``), so a too-ambitious target burns the
     whole deadline and delivers nothing.
+
+    The targets below are NOT re-derived for the 270s cap or for Opus 5's move
+    to ``effort=high`` (also 2026-08-06): they are still sized against the
+    ~145 chars/s figure measured at ``effort=medium`` against the old 240s cap
+    (see the 24,000-character rationale below). Whether that leaves MORE margin
+    or LESS is genuinely unknown and depends on how much wall-clock high-effort
+    reasoning spends before visible output starts — margin is measured in
+    seconds, and high effort spends more of them per visible character, not
+    fewer. The cap only grew 12.5% (240s -> 270s); if high-effort throughput
+    drops by more than that, margin went DOWN despite the larger cap. The two
+    measured medium-effort core-gen calls on record bound the tolerance: on
+    2026-08-05 ``spec.generate`` ran 137.6s and ``plan.generate`` ran 163.4s
+    against the (then) 240s cap — against the new 270s cap that is 96% and 65%
+    headroom respectively, so a chunk near ``plan``'s shape can absorb at most
+    ~65% wall-clock inflation from medium to high before it starts losing
+    partial output to the watchdog. Retarget these once real high-effort
+    throughput is measured; until then, watch ``latency_ms`` and ``hard_cap``
+    kills in the generation route logs for spec/plan/harness/tasks.
 
     Every non-harness target is therefore the SAME 24,000-character ceiling,
     whether the chunk is a slice or the whole artifact. The earlier 80,000
@@ -2010,7 +2029,8 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
     needs protecting). Capping the earlier wave to its fair share is what
     actually guarantees the later wave a floor of run budget; the prompt target
     alone is advisory and a chunk that ignores it could still consume the
-    whole per-call 240s regardless of what it was asked to aim for.
+    whole per-call cap (270s as of 2026-08-06; was 240s) regardless of what it
+    was asked to aim for.
 
     Demo Day is unaffected: its spec/tasks stay single ``whole_document``
     chunks (``_chunk_waves_for_stage`` gives each its own wave, no dependency
@@ -2572,9 +2592,9 @@ def _wave_deadline(
     """Absolute monotonic deadline capping how long THIS wave may run.
 
     ``None`` means "no additional cap" — the caller falls back to the existing
-    per-call (240s) and per-run (270s pool) bounds unchanged, which is every
-    stage/mode except standard spec/tasks and every non-multi-wave case within
-    those two.
+    per-call (270s as of 2026-08-06; was 240s) and per-run (270s pool) bounds
+    unchanged, which is every stage/mode except standard spec/tasks and every
+    non-multi-wave case within those two.
 
     The deadline is a WEIGHTED share of whatever run budget remains right now
     (``control.provider_seconds_remaining``), not a fixed 270/N split —

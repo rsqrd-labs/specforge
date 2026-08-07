@@ -48,10 +48,14 @@ def test_opus_5_core_stage_request_sends_effort_not_a_thinking_block() -> None:
     sent top-level via `extra_body`, which 400s with "effort: Extra inputs are
     not permitted" — that hard-failed every Anthropic call, core stages included.
 
-    The effort is `medium`, not the Claude-API default of `high`: core stages are
-    bound by a locked interactive deadline (a single provider stream is capped at
-    `stage_provider_call_timeout_seconds`, the stage at a validator-pinned 300s)
-    and high-effort reasoning tokens are spent before any visible output.
+    The effort is `high` (since 2026-08-06 — a deliberate quality-over-margin
+    trade after a production spec generation was judged not up to the mark at
+    the previous `medium`; see the claude-opus-5 catalog entry). Core stages
+    are bound by a locked interactive deadline (a single provider stream is
+    capped at `stage_provider_call_timeout_seconds`, 270s as of the same
+    change; the stage itself at a validator-pinned 300s), and high-effort
+    reasoning tokens are spent before any visible output — this pairing has not
+    been re-measured at high effort the way `medium` was.
     """
     from services.llm.anthropic_adapter import AnthropicAdapter
     from services.llm.model_catalog import model_request_policy
@@ -65,7 +69,7 @@ def test_opus_5_core_stage_request_sends_effort_not_a_thinking_block() -> None:
     request = adapter._messages_request(system="sys", user="user", max_tokens=49152)
 
     assert request["model"] == "claude-opus-5"
-    assert request["output_config"] == {"effort": "medium"}
+    assert request["output_config"] == {"effort": "high"}
     assert "extra_body" not in request
     assert "thinking" not in request
 
