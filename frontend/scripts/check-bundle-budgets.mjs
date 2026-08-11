@@ -6,7 +6,12 @@ const assetDirectory = new URL("../dist/assets/", import.meta.url)
 const budgets = [
   [/^index-.*\.css$/, 55],
   [/^index-.*\.js$/, 36],
-  [/^react-.*\.js$/, 60],
+  // Re-baselined for React 19.2 (issue #87). Measured with this script's own
+  // gzip on a production build: React 18.3 shipped 58.27 KiB against the prior
+  // 60 ceiling; React 19.2 ships 71.89 KiB — a +13.6 KiB step from React 19's
+  // larger runtime, not from app code. 76 restores roughly the headroom the
+  // old number carried. Re-measure rather than nudge this if it trips again.
+  [/^react-.*\.js$/, 76],
   [/^Workspace-.*\.js$/, 58],
   [/^MarkdownRenderer-.*\.js$/, 110],
   [/^codemirror-.*\.js$/, 170],
