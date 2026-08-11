@@ -3,11 +3,13 @@ import userEvent from "@testing-library/user-event"
 import {
   createMemoryRouter,
   Link,
-  RouterProvider,
   useLocation,
   useNavigate,
   useParams,
-} from "react-router-dom"
+} from "react-router"
+// v8 moves DOM-specific APIs to the `react-router/dom` subpath; RouterProvider
+// is the only one this codebase uses.
+import { RouterProvider } from "react-router/dom"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { DEFAULT_TEST_PERMISSIONS, makeStoryboardPayload } from "../components/storyboard/testPayload"

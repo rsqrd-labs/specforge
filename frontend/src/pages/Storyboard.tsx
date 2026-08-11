@@ -1,6 +1,6 @@
 import axios from "axios"
 import { useCallback, useEffect, useState } from "react"
-import { useLocation, useNavigate, useParams } from "react-router-dom"
+import { useLocation, useNavigate, useParams } from "react-router"
 import { PresenterMode } from "../components/storyboard/PresenterMode"
 import { ActionAlertPanel } from "../components/shared/ActionAlert"
 import { StoryboardDeck } from "../components/storyboard/StoryboardDeck"

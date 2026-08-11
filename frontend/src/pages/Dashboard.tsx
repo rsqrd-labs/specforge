@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react"
-import { Link, useNavigate } from "react-router-dom"
+import { Link, useNavigate } from "react-router"
 import { ErrorBoundary } from "../components/ErrorBoundary"
 import { AiDisclaimer } from "../components/shared/AiDisclaimer"
 import { ActionAlertPanel } from "../components/shared/ActionAlert"

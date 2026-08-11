@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Link } from "react-router-dom"
+import { Link } from "react-router"
 import { BrandLockup } from "../components/shared/BrandLogo"
 import { MarkdownRenderer } from "../components/workspace/MarkdownRenderer"
 import { getRetentionPolicy } from "../services/api"

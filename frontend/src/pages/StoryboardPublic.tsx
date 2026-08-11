@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { useParams } from "react-router-dom"
+import { useParams } from "react-router"
 import { PresenterMode } from "../components/storyboard/PresenterMode"
 import { StoryboardDeck } from "../components/storyboard/StoryboardDeck"
 import { StoryboardDownloadMenu } from "../components/storyboard/StoryboardDownloadMenu"

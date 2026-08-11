@@ -1,5 +1,5 @@
 import { useRef, useState } from "react"
-import { useNavigate } from "react-router-dom"
+import { useNavigate } from "react-router"
 import { STARTER_WORKSPACES } from "../../config/starterWorkspaces"
 import { featureFlags } from "../../config/featureFlags"
 import { useFocusTrap } from "../../hooks/useFocusTrap"

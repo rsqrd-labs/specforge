@@ -6,7 +6,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react"
-import { MemoryRouter } from "react-router-dom"
+import { MemoryRouter } from "react-router"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { ExportGitHubModal } from "./ExportGitHubModal"
@@ -384,8 +384,12 @@ describe("ExportGitHubModal", () => {
     renderModal()
 
     // Existing-repo mode is the default when the list is non-empty.
+    // RepoPicker renders the listbox unconditionally and `repoChoiceMode`
+    // starts as "existing", so an EMPTY listbox is in the DOM on first paint —
+    // findByRole("listbox") resolves before the repo fetch settles. Await the
+    // row itself rather than querying it synchronously off that early match.
     const listbox = await screen.findByRole("listbox", { name: /repositories/i })
-    const row = within(listbox).getByRole("button", { name: /api-server/i })
+    const row = await within(listbox).findByRole("button", { name: /api-server/i })
     fireEvent.click(row)
 
     // Picking an existing repo never shows the visibility choice (it only
@@ -542,7 +546,12 @@ describe("ExportGitHubModal", () => {
 
     renderModal()
 
-    fireEvent.click(await screen.findByRole("button", { name: /^export$/i }))
+    // Export is disabled while `reposLoading` is true, and a click on a
+    // disabled button is a silent no-op — so wait for it to actually enable
+    // rather than clicking the moment it appears in the DOM.
+    const exportButton = await screen.findByRole("button", { name: /^export$/i })
+    await waitFor(() => expect(exportButton).toBeEnabled())
+    fireEvent.click(exportButton)
 
     expect(
       await screen.findByText(/no longer available|reconnect it in settings/i),
@@ -559,7 +568,10 @@ describe("ExportGitHubModal", () => {
 
     renderModal()
 
-    fireEvent.click(await screen.findByRole("button", { name: /^export$/i }))
+    // Same disabled-until-`reposLoading`-clears race as the 403 test above.
+    const exportButton = await screen.findByRole("button", { name: /^export$/i })
+    await waitFor(() => expect(exportButton).toBeEnabled())
+    fireEvent.click(exportButton)
 
     expect(
       await screen.findByText(/couldn't finish this export/i, undefined, {

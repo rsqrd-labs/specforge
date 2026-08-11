@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Link, useParams } from "react-router-dom"
+import { Link, useParams } from "react-router"
 import { AiDisclaimer } from "../components/shared/AiDisclaimer"
 import { BrandLockup } from "../components/shared/BrandLogo"
 import { HarnessCoverageChip } from "../components/workspace/HarnessCoverageChip"

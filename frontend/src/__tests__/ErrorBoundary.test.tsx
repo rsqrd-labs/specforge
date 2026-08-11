@@ -34,8 +34,9 @@ function SafeComponent() {
 let consoleSpy: ReturnType<typeof vi.spyOn>
 
 beforeEach(() => {
-  // React 18 calls console.error when a boundary catches; silence it so
-  // test output stays readable.  We assert on the spy in relevant tests.
+  // React calls console.error when a boundary catches (in React 19 via the
+  // default onCaughtError handler); silence it so test output stays readable.
+  // We assert on the spy in relevant tests.
   consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {})
 })
 

@@ -1,5 +1,5 @@
 import { useRef } from "react"
-import { Link } from "react-router-dom"
+import { Link } from "react-router"
 import type { Stage, StageStatus, StageType } from "../../types/stage"
 import type { Workspace } from "../../types/workspace"
 import { HarnessCoverageChip } from "../workspace/HarnessCoverageChip"

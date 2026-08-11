@@ -21,7 +21,10 @@ export default defineConfig({
         manualChunks(id) {
           if (!id.includes("node_modules")) return
           if (/[\\/](@codemirror|@lezer|@marijn)[\\/]/.test(id)) return "codemirror"
-          if (/[\\/](react|react-dom|react-router|react-router-dom|@remix-run[\\/]router|scheduler)[\\/]/.test(id))
+          // react-router@8 merged react-router-dom in and replaced the old
+          // @remix-run/router with cookie-es, which would otherwise fall to
+          // automatic chunking and land in the entry chunk.
+          if (/[\\/](react|react-dom|react-router|cookie-es|scheduler)[\\/]/.test(id))
             return "react"
           if (/[\\/](axios|zustand)[\\/]/.test(id)) return "vendor"
         },
