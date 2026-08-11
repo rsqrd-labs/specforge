@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { useNavigate, useSearchParams } from "react-router-dom"
+import { useNavigate, useSearchParams } from "react-router"
 
 import { ActionAlertPanel } from "../components/shared/ActionAlert"
 import { BrandLoader } from "../components/shared/BrandLoader"

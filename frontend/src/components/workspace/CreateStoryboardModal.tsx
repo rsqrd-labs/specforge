@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react"
-import { Link } from "react-router-dom"
+import { Link } from "react-router"
 import { useFocusTrap } from "../../hooks/useFocusTrap"
 import type { Stage, StageType } from "../../types/stage"
 import { ActionAlertPanel } from "../shared/ActionAlert"

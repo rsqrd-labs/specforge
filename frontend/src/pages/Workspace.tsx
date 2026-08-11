@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
-import { useNavigate, useParams } from "react-router-dom"
+import { useNavigate, useParams } from "react-router"
 import { CoveragePanel } from "../components/workspace/CoveragePanel"
 import { ConstructionGapsPanel } from "../components/workspace/ConstructionGapsPanel"
 import { ConstructionVerifiedBadge } from "../components/workspace/ConstructionVerifiedBadge"

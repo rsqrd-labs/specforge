@@ -1,6 +1,6 @@
 import { act, render, screen } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { MemoryRouter, Route, Routes } from "react-router-dom"
+import { MemoryRouter, Route, Routes } from "react-router"
 
 import { getRetentionPolicy } from "../services/api"
 import type { RetentionPolicy } from "../types/retention"

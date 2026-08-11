@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Link, useNavigate, useParams } from "react-router-dom"
+import { Link, useNavigate, useParams } from "react-router"
 
 import { BrandLogo } from "../components/shared/BrandLogo"
 import { ExportStatusBadge } from "../components/github/ExportStatusBadge"

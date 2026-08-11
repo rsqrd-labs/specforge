@@ -1,5 +1,5 @@
 import { useEffect } from "react"
-import { Link, Navigate } from "react-router-dom"
+import { Link, Navigate } from "react-router"
 import { BrandLockup } from "../components/shared/BrandLogo"
 import { useUserStore } from "../store/userStore"
 

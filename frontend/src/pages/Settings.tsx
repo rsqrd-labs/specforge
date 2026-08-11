@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useState } from "react"
-import { useLocation, useNavigate } from "react-router-dom"
+import { useLocation, useNavigate } from "react-router"
 
 import { AiDisclaimer } from "../components/shared/AiDisclaimer"
 import { BrandLogo } from "../components/shared/BrandLogo"

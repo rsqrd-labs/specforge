@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Navigate } from "react-router-dom"
+import { Navigate } from "react-router"
 import { useUserStore } from "../../store/userStore"
 import { apiUnreachableAlert } from "../../utils/errorPresentation"
 import { ActionAlertPanel } from "./ActionAlert"

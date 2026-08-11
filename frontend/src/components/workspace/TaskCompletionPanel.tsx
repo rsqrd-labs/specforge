@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Link } from "react-router-dom"
+import { Link } from "react-router"
 
 import type { SyncState, TaskSyncState } from "../../types/github"
 import { ShippedCheckIcon } from "../shared/icons"

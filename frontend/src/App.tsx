@@ -1,5 +1,5 @@
 import { lazy, Suspense, type ReactNode } from "react"
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom"
+import { BrowserRouter, Navigate, Route, Routes } from "react-router"
 import { ActionAlertProvider } from "./components/shared/ActionAlert"
 import { BrandLoader } from "./components/shared/BrandLoader"
 import { ProtectedRoute } from "./components/shared/ProtectedRoute"

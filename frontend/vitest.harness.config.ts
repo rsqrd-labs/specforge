@@ -1,7 +1,10 @@
 /// <reference types="vitest/config" />
 import react from "@vitejs/plugin-react"
 import { defineConfig } from "vitest/config"
+import { createRequire } from "node:module"
 import { resolve } from "node:path"
+
+const require = createRequire(import.meta.url)
 
 /**
  * Vitest config for harness/tests/frontend contract tests.
@@ -24,9 +27,14 @@ export default defineConfig({
         find: /^react(\/.*)?$/,
         replacement: `${resolve(__dirname, "node_modules/react")}$1`,
       },
+      // react-router@8 is exports-only — it ships no `main`/`module`, so the
+      // bare directory alias used for react below cannot resolve it. Pin the
+      // resolved entry instead. This matches the bare specifier only, which is
+      // all the harness tests import (MemoryRouter, from the root); a future
+      // `react-router/dom` import here would need its own entry.
       {
-        find: "react-router-dom",
-        replacement: resolve(__dirname, "node_modules/react-router-dom"),
+        find: /^react-router$/,
+        replacement: require.resolve("react-router", { paths: [__dirname] }),
       },
       {
         find: "@testing-library/react",

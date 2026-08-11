@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { MemoryRouter, Route, Routes } from "react-router-dom"
+import { MemoryRouter, Route, Routes } from "react-router"
 
 import { AI_DISCLAIMER_COPY } from "../components/shared/AiDisclaimer"
 import { getGitHubIntegration, getRetentionPolicy } from "../services/api"
