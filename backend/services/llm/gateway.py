@@ -26,6 +26,7 @@ _PROVIDER_KEY_SETTINGS = {
     "anthropic": ("ANTHROPIC_API_KEY", "anthropic_api_key"),
     "openai": ("OPENAI_API_KEY", "openai_api_key"),
     "google": ("GOOGLE_API_KEY", "google_api_key"),
+    "openrouter": ("OPENROUTER_API_KEY", "openrouter_api_key"),
 }
 # Adapter instances are cached per provider, model, operation policy, and API-key
 # fingerprint.
@@ -316,10 +317,12 @@ def _load_adapters() -> None:
     from services.llm.anthropic_adapter import AnthropicAdapter
     from services.llm.google_adapter import GoogleAdapter
     from services.llm.openai_adapter import OpenAIAdapter
+    from services.llm.openrouter_adapter import OpenRouterAdapter
 
     _register("anthropic", AnthropicAdapter)
     _register("openai", OpenAIAdapter)
     _register("google", GoogleAdapter)
+    _register("openrouter", OpenRouterAdapter)
 
 
 _load_adapters()

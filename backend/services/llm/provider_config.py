@@ -15,6 +15,7 @@ PROVIDER_DISPLAY: dict[str, str] = {
     "anthropic": "Anthropic",
     "openai": "OpenAI",
     "google": "Google",
+    "openrouter": "OpenRouter",
 }
 
 PROVIDER_MODELS: dict[str, list[dict[str, str]]] = {

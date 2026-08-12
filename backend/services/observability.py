@@ -337,7 +337,7 @@ ASSEMBLED_PROMPT_TOKENS = Histogram(
     ),
 )
 
-_PROVIDER_LABELS = frozenset({"anthropic", "openai", "google"})
+_PROVIDER_LABELS = frozenset({"anthropic", "openai", "google", "openrouter"})
 _STAGE_TYPE_LABELS = frozenset({"spec", "plan", "harness", "tasks"})
 
 
@@ -1179,7 +1179,7 @@ STORYBOARD_TRUNCATION_RETRIES = Counter(
 )
 
 _STORYBOARD_ACTION_LABELS = frozenset({"generate", "regenerate", "regenerate_section"})
-_STORYBOARD_PROVIDER_LABELS = frozenset({"anthropic", "openai", "google"})
+_STORYBOARD_PROVIDER_LABELS = frozenset({"anthropic", "openai", "google", "openrouter"})
 _STORYBOARD_ESCALATION_OUTCOME_LABELS = frozenset(
     {"attempted", "succeeded", "failed", "no_route"}
 )

@@ -741,6 +741,11 @@ _CORE_ARTIFACT_TIER_POLICY: dict[str, tuple[str, str | None]] = {
     "anthropic": ("strong", "mid"),
     "openai": ("strong", "mid"),
     "google": ("strong", "mid"),
+    # openrouter (issue #152): explicit, not left to the .get() default, so
+    # LLM_PROVIDER_PRIORITY=openrouter,... resolves qwen3.8-max (strong)
+    # de-escalating to glm-5.2 (mid) on a hard failure — the same shape every
+    # other provider gets — rather than silently starting at mid.
+    "openrouter": ("strong", "mid"),
 }
 
 # Demo Day matches standard mode on EVERY provider. Demo Day artifacts are
@@ -753,6 +758,7 @@ _DEMO_DAY_ARTIFACT_TIER_POLICY: dict[str, tuple[str, str | None]] = {
     "anthropic": ("strong", "mid"),
     "openai": ("strong", "mid"),
     "google": ("strong", "mid"),
+    "openrouter": ("strong", "mid"),
 }
 
 

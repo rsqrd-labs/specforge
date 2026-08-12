@@ -262,6 +262,7 @@ See `docs/LOCAL_TESTING_HANDBOOK.md` for a step-by-step guide to generating secr
 | `ANTHROPIC_API_KEY` | Anthropic API key. Leave blank to disable the Anthropic provider. |
 | `OPENAI_API_KEY` | OpenAI API key. Leave blank to disable the OpenAI provider. |
 | `GOOGLE_API_KEY` | Google Gemini API key. Leave blank to disable the Google provider. |
+| `OPENROUTER_API_KEY` | OpenRouter API key (issue #152) — a fourth, optional provider fronting open-weight models. Defaults to `""` and stays unreachable until both a real key is set and `"openrouter"` is added to `LLM_PROVIDER_PRIORITY`. |
 | `ENCRYPTION_MASTER_KEY` | Fernet-compatible key for encrypting user-stored provider keys and OAuth tokens. |
 | `CSRF_SECRET` | HMAC secret for CSRF token signing. |
 | `METRICS_TOKEN` | Bearer token protecting the `/metrics` endpoint. Leave blank to allow unauthenticated scraping (not recommended in production). |
@@ -491,6 +492,10 @@ Key invariants:
 
 - OpenAI, Anthropic, and Google keys are optional per environment, but configured
   providers must use `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `GOOGLE_API_KEY`.
+- OpenRouter (issue #152) is a fourth, optional provider reached through
+  `OPENROUTER_API_KEY`. Day-one scope is open-weight models only (DeepSeek/GLM/
+  Qwen) behind a thin `chat_completions` adapter; it participates in routing
+  only once it is also added to `LLM_PROVIDER_PRIORITY`.
 - Cross-provider fallback is never silent. It requires an explicit
   `allow_cross_provider=True` policy decision and is reported in telemetry.
 - Prompt moat prefixes are versioned and stable so dynamic context can be cached
@@ -528,8 +533,9 @@ Production deployments should also enforce HTTPS, secure cookies, strict CORS, s
 ### Provider Key Rotation
 
 LLM provider clients are cached inside each API worker for connection reuse.
-After rotating `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GOOGLE_API_KEY`,
-restart all API workers so cached clients are recreated with the new secret.
+After rotating `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, or
+`OPENROUTER_API_KEY`, restart all API workers so cached clients are recreated
+with the new secret.
 
 ## Deployment Overview
 

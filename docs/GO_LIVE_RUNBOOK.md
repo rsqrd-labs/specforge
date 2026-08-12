@@ -388,7 +388,11 @@ of the handbook for whichever provider(s) you're using (Anthropic is the
 simplest to start with). Set the key(s) in Railway, redeploy.
 
 **✅ You should now have:** an API key set for at least one of
-`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`.
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`. (There is also an
+optional fourth provider, `OPENROUTER_API_KEY` — an open-weight-model
+fallback tier, issue #152. Skip it for go-live; it needs its own
+promotion gate before it belongs in `LLM_PROVIDER_PRIORITY`, see
+`docs/RUNBOOK.md` §8.5.)
 
 ---
 

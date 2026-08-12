@@ -868,6 +868,31 @@ trade-off: Google's `strong` tier has no active model, so it runs Gemini Flash
 (`mid`). Reordering to `openai,...` with a real `OPENAI_API_KEY` lands on
 GPT-5.5, which is the closer substitute.
 
+**A fourth, optional provider — OpenRouter (issue #152).** `OPENROUTER_API_KEY`
+defaults to unset and is never required to boot; shipping its catalog/adapter
+wiring is inert while `LLM_PROVIDER_PRIORITY` omits `"openrouter"`. Day-one
+scope is open-weight models only (`deepseek/deepseek-v3.2` small,
+`z-ai/glm-5.2` mid, `qwen/qwen3.8-max` strong) reached through a thin
+`chat_completions` adapter over the `openai` SDK pointed at
+`https://openrouter.ai/api/v1`. If a key is set, install it the same way as
+`ANTHROPIC_API_KEY` — a Shared Variable across all three Railway services
+(`backend`, `worker`, `worker-fast`) — but do **not** add `"openrouter"` to
+`LLM_PROVIDER_PRIORITY` in production without first completing the four-item
+promotion gate: (1) the live golden-corpus run
+(`docs/evals/ROUTE_PROMOTION.md`), (2) a fixed-in-advance judge-agreement
+check — the flip moves the critic, the eval judge, the Rung-2 problem
+compressor, and the `pr_check` evaluator onto the openrouter judge model
+(`JUDGE_MODELS["openrouter"]`, currently `deepseek/deepseek-v3.2`) in the same
+instant it moves generation, and none of that is exercised by an artifact-only
+eval, (3) an updated Privacy Policy naming the new sub-processors (the
+day-one models route through DeepSeek/Z.ai/Alibaba upstreams via the
+OpenRouter proxy — not currently disclosed), and (4) confirming the adapter
+pins `provider.data_collection=deny` / `provider.allow_fallbacks=false` on
+every request (it does, by default) so the upstream host actually serving a
+model slug is stable and reproducible run-to-run. Verify with
+`GET /providers/health?model=deepseek/deepseek-v3.2` the same way §8.5's
+Anthropic steps verify `claude-opus-5`.
+
 ---
 
 ## 9. Billing Alerts And Lemon Squeezy Ops

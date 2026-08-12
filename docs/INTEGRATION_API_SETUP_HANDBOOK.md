@@ -326,6 +326,27 @@ OPENAI_API_KEY=sk-...
 GOOGLE_API_KEY=...
 ```
 
+#### OpenRouter (optional — open-weight models, issue #152)
+
+A fourth, optional provider reached through a single OpenAI-compatible
+endpoint fronting open-weight models (DeepSeek, GLM, Qwen, and others).
+Skip this section unless you specifically want an open-weight fallback tier —
+it is not part of the minimal go-live path and defaults to unset.
+
+1. Go to [openrouter.ai](https://openrouter.ai/) and sign up.
+2. Add credits under **Credits**.
+3. Go to **Keys** → **Create Key**. Copy the key (starts with `sk-or-`).
+4. Store it in `OPENROUTER_API_KEY`.
+
+```env
+OPENROUTER_API_KEY=sk-or-...
+```
+
+Setting the key alone does nothing — routing only considers a provider that
+also appears in `LLM_PROVIDER_PRIORITY` (see `docs/RUNBOOK.md` §8.5 before
+adding `"openrouter"` there in production; the flip also moves the judge/
+critic model, not just generation).
+
 Common errors for all providers:
 
 - Provider error during generation: check the key is valid and the account has
@@ -834,6 +855,7 @@ process even though the app otherwise looks fine.
     | `ANTHROPIC_API_KEY` | Your Anthropic key (or leave blank if not using Anthropic) |
     | `OPENAI_API_KEY` | Your OpenAI key (or leave blank if not using OpenAI) |
     | `GOOGLE_API_KEY` | Your Gemini key (or leave blank if not using Gemini) |
+    | `OPENROUTER_API_KEY` | Optional (issue #152) — your OpenRouter key for the open-weight fallback tier, or leave blank. Not part of the minimal go-live path. |
     | `GITHUB_CLIENT_ID` | Your GitHub OAuth App client ID (legacy Phase-13 export, or leave blank) |
     | `GITHUB_CLIENT_SECRET` | Your GitHub OAuth App client secret (or leave blank) |
     | `GITHUB_APP_ID` / `GITHUB_APP_SLUG` / `GITHUB_APP_PRIVATE_KEY` / `GITHUB_APP_WEBHOOK_SECRET` / `GITHUB_APP_CLIENT_ID` / `GITHUB_APP_CLIENT_SECRET` | Phase-21 GitHub App (optional) — see the [GitHub App section](#github-app-phase-21--optional-the-bidirectional-living-system-of-record) above. Leave all blank to skip. |
