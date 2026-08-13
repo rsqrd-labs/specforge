@@ -1368,7 +1368,12 @@ def test_openrouter_artifact_generation_uses_strong_primary_with_mid_deescalatio
     """openrouter (issue #152) gets the SAME frontier-tier shape every other
     provider gets for full-artifact generation — the explicit table row, not
     the mid-first .get() default — while the shared cheap ladder stays on
-    deepseek-v3.2 (small), untouched by the artifact promotion.
+    deepseek-v4-flash (mid), untouched by the artifact promotion.
+
+    The de-escalation target is the ladder FLOOR here rather than a middle
+    rung: this provider's ladder is ("mid", "strong") because every tier must
+    be a pinnable DeepSeek V4 slug for prompt caching to exist at all, so
+    strong -> mid is still a real model change, not a self-retry.
     """
     from services.pipeline import stage_manager as stage_manager_module
 
@@ -1394,18 +1399,18 @@ def test_openrouter_artifact_generation_uses_strong_primary_with_mid_deescalatio
     route = stage_manager_module._route_for_stage_generation("harness", workspace)
 
     assert route.provider == "openrouter"
-    assert route.model == "qwen/qwen3.8-max"
+    assert route.model == "deepseek/deepseek-v4-pro"
     assert route.model_tier == "strong"
     assert route.reason == "requested_tier"
     assert route.selection_reason == "active_same_tier"
     assert stage_manager_module.CORE_GENERATION_TIER_POLICY["openrouter"] == (
-        "small",
         "mid",
+        "strong",
     )
     fallback = stage_manager_module._runtime_fallback_route(route)
     assert fallback is not None
     assert fallback.provider == "openrouter"
-    assert fallback.model == "z-ai/glm-5.2"
+    assert fallback.model == "deepseek/deepseek-v4-flash"
     assert fallback.model_tier == "mid"
     assert fallback.model != route.model
 

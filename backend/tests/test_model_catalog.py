@@ -11,6 +11,7 @@ from services.llm.model_catalog import (
     core_generation_ladder,
     core_generation_tier_policy,
     default_model_for_operation,
+    iter_model_entries,
     model_entry,
     model_request_policy,
     validate_core_generation_ladder,
@@ -28,7 +29,7 @@ def test_catalog_validates_at_startup() -> None:
         ("anthropic", "claude-haiku-4-5-20251001"),
         ("openai", "gpt-5.4-mini"),
         ("google", "gemini-3.6-flash"),
-        ("openrouter", "deepseek/deepseek-v3.2"),
+        ("openrouter", "deepseek/deepseek-v4-flash"),
     ],
 )
 def test_core_generation_defaults_are_cheap_primary_models(
@@ -83,7 +84,7 @@ def test_derived_policy_is_byte_identical_to_shipped_cheap_primary() -> None:
     assert core_generation_tier_policy("anthropic") == ("small", "mid")
     assert core_generation_tier_policy("openai") == ("mini", "mid")
     assert core_generation_tier_policy("google") == ("mid", "strong")
-    assert core_generation_tier_policy("openrouter") == ("small", "mid")
+    assert core_generation_tier_policy("openrouter") == ("mid", "strong")
 
 
 def test_stage_manager_policy_derives_from_catalog_ladder() -> None:
@@ -219,6 +220,11 @@ def test_frontier_adapter_policy_is_explicit() -> None:
         "extended_prompt_cache_retention": True,
         "cached_token_accounting": True,
         "minimum_cacheable_input_tokens": 1024,
+        # Aggregator-only: OpenAI is reached directly, so there is no upstream
+        # host to pin (see ModelCatalogEntry.upstream_providers).
+        "upstream_providers": (),
+        # No operation was passed, so this is not a core-generation call.
+        "is_core_generation": False,
     }
     assert (
         model_request_policy("google", "gemini-3.6-flash")["thinking_level"] == "high"
@@ -320,27 +326,62 @@ def test_core_generation_low_reasoning_flag_off_preserves_catalog_policy(
 # --- issue #152: openrouter provider wiring ----------------------------------
 
 
+_OPENROUTER_ACTIVE_MODELS = (
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-pro",
+)
+
+
 def test_openrouter_declared_as_required_provider_with_a_ladder() -> None:
     assert "openrouter" in REQUIRED_PROVIDERS
-    assert CORE_GENERATION_TIER_LADDER["openrouter"] == ("small", "mid", "strong")
+    # Mirrors GOOGLE's shape, not anthropic/openai's: the floor is `mid`, with
+    # no active `small` entry, because every tier must be a pinnable DeepSeek V4
+    # slug for prompt caching to exist at all.
+    assert CORE_GENERATION_TIER_LADDER["openrouter"] == ("mid", "strong")
 
 
 def test_openrouter_catalog_entries_use_the_cross_provider_output_convention() -> None:
-    for model_id in (
-        "deepseek/deepseek-v3.2",
-        "z-ai/glm-5.2",
-        "qwen/qwen3.8-max",
-    ):
+    for model_id in _OPENROUTER_ACTIVE_MODELS:
         entry = model_entry("openrouter", model_id)
         assert entry.adapter_api == "chat_completions"
         assert entry.status == "active"
         assert entry.default_max_output_tokens == 64000
         assert entry.rollout_notes
-        # Belt-and-braces cache rates (see model_catalog.py's openrouter
-        # comment block): a None rate with non-zero matching tokens makes
-        # estimate_cost_usd() return None and silently zeroes the cost row.
-        assert entry.cached_input_cost_per_million is not None
-        assert entry.cache_write_5m_cost_per_million is not None
+
+
+def test_openrouter_entries_price_every_token_bucket() -> None:
+    """`_normalize_openrouter_usage` populates cache READ *and WRITE* tokens, so
+    every rate they can be multiplied by must be non-None. estimate_cost_usd
+    returns None — recording NO cost for the call — if any bucket with non-zero
+    tokens has a None rate.
+
+    Covers deprecated entries too: a retired model can still be named on
+    historical ledger rows that get re-priced.
+    """
+    for entry in iter_model_entries("openrouter"):
+        for field in (
+            "input_cost_per_million",
+            "cached_input_cost_per_million",
+            "output_cost_per_million",
+            "cache_write_5m_cost_per_million",
+        ):
+            assert getattr(entry, field) is not None, f"{entry.model_id}.{field}"
+        # 1h writes are unreachable: OpenRouter carries no ephemeral_5m/1h
+        # breakdown, so _cache_write_ttl_split attributes 100% to the 5m bucket.
+        assert entry.cache_write_1h_cost_per_million is None
+
+
+def test_every_active_openrouter_entry_pins_an_upstream_host() -> None:
+    """Without `provider.only`, OpenRouter load-balances across every host
+    serving the slug. On deepseek-v4-flash only 1 of 19 hosts supports prefix
+    caching, hosts disagree on real output ceiling by 32x, and catalog rates
+    (which are the pinned host's) stop describing what is billed."""
+    for model_id in _OPENROUTER_ACTIVE_MODELS:
+        entry = model_entry("openrouter", model_id)
+        assert entry.upstream_providers, f"{model_id} is unpinned"
+        assert model_request_policy("openrouter", model_id)["upstream_providers"] == (
+            entry.upstream_providers
+        )
 
 
 def test_openrouter_operation_coverage_matches_the_live_tier_policies() -> None:
@@ -359,43 +400,26 @@ def test_openrouter_operation_coverage_matches_the_live_tier_policies() -> None:
     core_ops = set(CORE_GENERATION_OPERATIONS)
     cheap_ops = {"refine.focused", "refine.section", "storyboard.generate"}
 
-    # small (deepseek-v3.2): sole core-gen default, full cheap ladder, judge.
+    # mid (deepseek-v4-flash) is the LADDER FLOOR: sole core-gen default, the
+    # full cheap ladder, and the judge/summary path. On anthropic/openai those
+    # last two live one tier lower, but this provider has no `small`.
     for operation in core_ops | cheap_ops | {"summary.create", "eval.score"}:
-        resolved = _model_for_operation("openrouter", "small", operation)
-        assert resolved is not None, f"small/{operation} did not resolve"
-    assert _model_for_operation("openrouter", "small", "spec.generate") == (
-        "deepseek/deepseek-v3.2",
-        "active_default",
-    )
-    assert _model_for_operation("openrouter", "small", "eval.score") == (
-        "deepseek/deepseek-v3.2",
-        "active_default",
-    )
-
-    # mid (glm-5.2): retry-down target for core ops, section refine default,
-    # storyboard escalation default. NOT the judge/summary path.
-    for operation in core_ops | cheap_ops:
         resolved = _model_for_operation("openrouter", "mid", operation)
         assert resolved is not None, f"mid/{operation} did not resolve"
-    assert _model_for_operation("openrouter", "mid", "refine.section") == (
-        "z-ai/glm-5.2",
-        "active_default",
-    )
-    assert _model_for_operation("openrouter", "mid", "spec.generate") == (
-        "z-ai/glm-5.2",
-        "active_same_tier",
-    )
-    for operation in ("summary.create", "eval.score"):
-        assert _model_for_operation("openrouter", "mid", operation) is None
+    for operation in ("spec.generate", "eval.score", "refine.section"):
+        assert _model_for_operation("openrouter", "mid", operation) == (
+            "deepseek/deepseek-v4-flash",
+            "active_default",
+        )
 
-    # strong (qwen3.8-max): full-artifact primary + storyboard escalation
-    # slot only — deliberately NOT refine.focused/refine.section (matches
-    # the Opus 5 / GPT-5.5 shape; the mid tier always resolves those first).
+    # strong (deepseek-v4-pro): full-artifact primary + storyboard escalation
+    # slot only — deliberately NOT refine.focused/refine.section (matches the
+    # Opus 5 / GPT-5.5 shape; mid always resolves those first).
     for operation in core_ops | {"storyboard.generate"}:
         resolved = _model_for_operation("openrouter", "strong", operation)
         assert resolved is not None, f"strong/{operation} did not resolve"
     assert _model_for_operation("openrouter", "strong", "spec.generate") == (
-        "qwen/qwen3.8-max",
+        "deepseek/deepseek-v4-pro",
         "active_same_tier",
     )
     for operation in (
@@ -406,22 +430,139 @@ def test_openrouter_operation_coverage_matches_the_live_tier_policies() -> None:
     ):
         assert _model_for_operation("openrouter", "strong", operation) is None
 
+    # No active `small` entry — the ladder floor is deliberately `mid`.
+    for operation in core_ops | cheap_ops | {"summary.create", "eval.score"}:
+        assert _model_for_operation("openrouter", "small", operation) is None
+
 
 def test_openrouter_reasoning_effort_is_gated_on_the_catalog_value() -> None:
-    # deepseek-v3.2 declares no effort knob at all (supports_reasoning=False).
-    policy = model_request_policy("openrouter", "deepseek/deepseek-v3.2")
-    assert policy["supports_reasoning"] is False
-    assert policy["reasoning_effort"] is None
+    for model_id in _OPENROUTER_ACTIVE_MODELS:
+        policy = model_request_policy("openrouter", model_id)
+        assert policy["supports_reasoning"] is True
+        assert policy["reasoning_effort"] == "medium"
 
-    # glm-5.2 / qwen3.8-max both reason and both declare an explicit effort.
-    assert (
-        model_request_policy("openrouter", "z-ai/glm-5.2")["reasoning_effort"]
-        == "medium"
+
+def _cheap_core_default(provider: str):
+    """The provider's cheap-ladder primary that holds the core-gen defaults."""
+    primary_tier = CORE_GENERATION_TIER_LADDER[provider][0]
+    for entry in iter_model_entries(provider):
+        if (
+            entry.status == "active"
+            and entry.tier == primary_tier
+            and "spec.generate" in entry.default_operations
+        ):
+            return entry
+    return None
+
+
+def test_low_reasoning_never_degrades_an_artifact_fallback_tier() -> None:
+    """`_LOW_REASONING_CORE_MODELS` must not contain a model that full-artifact
+    generation can land on.
+
+    The override exists to cheapen the CHEAP ladder's core generation. On
+    anthropic/openai it cannot touch an artifact call by construction: their
+    low-reasoning model sits at `small`/`mini`, strictly below the `mid` their
+    `_CORE_ARTIFACT_TIER_POLICY` de-escalates to.
+
+    openrouter's two-tier ladder collapses that separation — deepseek-v4-flash
+    is the cheap primary AND the artifact fallback — so a row there would run
+    the rescue attempt for a failed artifact at minimum reasoning. Worse, since
+    core stages route through the artifact policy rather than the cheap ladder,
+    that de-escalated retry is the ONLY way flash meets a core operation at all.
+
+    KNOWN VIOLATION, deliberately pinned rather than fixed here: google.
+    Its `strong` tier has no active model, so `_route_for_provider` falls
+    through to `mid` (Gemini 3.6 Flash) for EVERY full-artifact generation —
+    not merely a de-escalated retry — and Flash is low-reasoning registered.
+    Its catalog `thinking_level` is "high"; on a core operation it resolves
+    "low". That is a live quality bug on the Google failover path, predating
+    this test. It is not fixed here because changing it changes which model
+    behaviour actually runs, which rides the Phase-5 golden-corpus gate
+    (docs/evals/CATALOG_HYGIENE.md). Pinning the set keeps it visible and stops
+    anyone joining it by accident.
+    """
+    from services.llm.model_catalog import _LOW_REASONING_CORE_MODELS
+    from services.llm.routing import _model_for_operation
+    from services.pipeline.stage_manager import (
+        _CORE_ARTIFACT_TIER_POLICY,
+        _DEMO_DAY_ARTIFACT_TIER_POLICY,
     )
-    assert (
-        model_request_policy("openrouter", "qwen/qwen3.8-max")["reasoning_effort"]
-        == "medium"
+
+    known_violations = {"google/gemini-3.6-flash (artifact tier mid)"}
+
+    offenders = set()
+    for provider in sorted(REQUIRED_PROVIDERS):
+        artifact_tiers = {
+            tier
+            for table in (_CORE_ARTIFACT_TIER_POLICY, _DEMO_DAY_ARTIFACT_TIER_POLICY)
+            for tier in table.get(provider, ())
+            if tier
+        }
+        for tier in artifact_tiers:
+            resolved = _model_for_operation(provider, tier, "spec.generate")
+            if resolved and (provider, resolved[0]) in _LOW_REASONING_CORE_MODELS:
+                offenders.add(f"{provider}/{resolved[0]} (artifact tier {tier})")
+    assert offenders == known_violations, (
+        f"artifact-serving low-reasoning models changed: {offenders} != "
+        f"{known_violations}. Any NEW entry runs a real full-artifact call at "
+        "minimum reasoning. Removing the google entry requires the golden-corpus "
+        "gate, since it changes which model behaviour actually runs."
     )
+
+
+def test_cheap_core_defaults_with_an_effort_knob_are_low_reasoning_registered() -> None:
+    """A cheap core-gen default that accepts an effort should be registered —
+    unless registering it would violate the artifact-fallback rule above, which
+    is exactly openrouter's case. Encoding both halves keeps the flag from
+    becoming a silent no-op AND from silently degrading an artifact retry.
+    """
+    from services.llm.model_catalog import _LOW_REASONING_CORE_MODELS
+    from services.pipeline.stage_manager import _CORE_ARTIFACT_TIER_POLICY
+
+    for provider in sorted(REQUIRED_PROVIDERS):
+        entry = _cheap_core_default(provider)
+        if entry is None or entry.reasoning_effort is None:
+            continue  # nothing to lower — legitimately absent (Haiku 4.5)
+        registered = (provider, entry.model_id) in _LOW_REASONING_CORE_MODELS
+        # Exempt when the cheap primary's tier is also an artifact tier.
+        exempt = entry.tier in set(_CORE_ARTIFACT_TIER_POLICY.get(provider, ()))
+        assert registered != exempt, (
+            f"{provider}/{entry.model_id}: registered={registered} exempt={exempt}. "
+            "A cheap core-gen default with an effort knob must be low-reasoning "
+            "registered, UNLESS its tier is also a full-artifact tier — in which "
+            "case registering it would degrade artifact generation."
+        )
+
+
+def test_openrouter_keeps_full_effort_on_every_core_generation_path() -> None:
+    """Concretely: neither openrouter model drops to `low` on a core operation,
+    so a de-escalated artifact retry reasons at its catalog effort."""
+    for model_id in _OPENROUTER_ACTIVE_MODELS:
+        for operation in ("spec.generate", "regenerate.full", "harness.generate"):
+            policy = model_request_policy("openrouter", model_id, operation)
+            assert policy["reasoning_effort"] == "medium", (model_id, operation)
+            assert policy["is_core_generation"] is True
+
+
+def test_low_reasoning_override_still_applies_where_it_is_safe() -> None:
+    """The override is not dead. Anthropic's cheap primary (Haiku 4.5, `small`)
+    is registered and sits strictly below the `mid` its artifact policy falls
+    back to, so it is lowered without ever touching an artifact call.
+
+    Haiku declares no effort knob, so only `supports_thinking` models show a
+    visible change — which is the whole reason `model_request_policy` gates on
+    the effort VALUE rather than on `supports_reasoning`.
+    """
+    from services.llm.model_catalog import _LOW_REASONING_CORE_MODELS
+
+    assert ("anthropic", "claude-haiku-4-5-20251001") in _LOW_REASONING_CORE_MODELS
+    haiku = model_request_policy(
+        "anthropic", "claude-haiku-4-5-20251001", "spec.generate"
+    )
+    # No effort knob to lower — the override must not invent one.
+    assert haiku["reasoning_effort"] is None
+    # And the mid tier its artifact policy de-escalates to is untouched.
+    assert ("anthropic", "claude-sonnet-5") not in _LOW_REASONING_CORE_MODELS
 
 
 def test_no_live_call_site_enables_cross_provider_fallback() -> None:

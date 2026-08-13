@@ -36,25 +36,55 @@ catalog-rate estimate — OpenRouter's ~5% platform fee is not folded into
 ``estimate_cost_usd``, which stays authoritative from catalog rates so the
 ledger's cost math stays shaped like every other provider).
 
-Route pinning: every request pins ``provider.data_collection = "deny"`` and
-``provider.allow_fallbacks = false``. OpenRouter serves one model slug from
-multiple upstream hosts that can differ in quantisation, latency, real
-output ceiling and data-retention policy, with fallback between hosts on by
-default. Without pinning, the golden-corpus promotion gate (Phase 2) would
-grade whichever host answered that afternoon while production runs whichever
-host answers next — different evidence for the same claim — and the data
-policy would vary by host. Pinning makes both reproducible.
+Route pinning — the single most load-bearing thing this adapter does.
+OpenRouter serves one model slug from many upstream hosts that differ in
+quantisation (fp4/fp8/unknown), price, cache-read price, real output ceiling,
+latency and data-retention policy, and it load-balances between them by
+default. ``provider.allow_fallbacks = false`` does **NOT** pin on its own —
+OpenRouter's docs are explicit that it "is combined with the ``order`` field
+… to restrict the providers that OpenRouter will prioritize to just your
+chosen list", so with no ``order``/``only`` it merely stops fallback past a
+list that was never supplied. Every request therefore sends an explicit
+``provider.only`` allowlist sourced from the catalog entry's
+``upstream_providers`` (plus ``allow_fallbacks: false`` and
+``data_collection: "deny"``).
 
-Cache-write accounting is deliberately NOT populated in Phase 1: plain
-``_normalize_openai_usage`` delegation (services/llm/usage.py) is the safe
-branch either way — with ``cache_write_input_tokens`` left ``None``,
-``_cache_write_ttl_split`` returns ``(0, 0)`` and the catalog's cache-write
-rate is never consulted, so there is no risk of the None-rate-with-nonzero-
-tokens trap that silently zeroes a cost row. ``cached_input_tokens`` (cache
-READS) is different and IS populated by plain delegation — OpenRouter
-reports ``prompt_tokens_details.cached_tokens`` today — which is why every
-openrouter catalog entry sets a real (conservative, no-discount-assumed)
-``cached_input_cost_per_million`` rather than leaving it ``None``.
+Three things break without that allowlist, and the first is the reason the
+DeepSeek ladder exists at all:
+
+* **Prompt caching would be structurally zero.** On ``deepseek-v4-flash``,
+  ``supports_implicit_caching`` is true for 1 of 19 upstream hosts (DeepSeek's
+  own). An unpinned request lands on a caching host ~5% of the time, and
+  prefix caching is per-host anyway, so consecutive chunks of one stage share
+  nothing.
+* **Cost accounting would be fiction.** Catalog rates are the pinned host's;
+  the alias-level price is a different number (deepseek-v4-pro: $0.435/$0.870
+  pinned vs $1.168/$2.336 at the alias).
+* **The promotion gate would be unreproducible.** The golden corpus would
+  grade whichever host answered that afternoon at whichever quantisation,
+  while production runs whichever answers next.
+
+Reasoning control: core generation sends the catalog's declared effort, but
+the cheap non-core operations (judge/eval, focused+section refine, summary)
+send ``reasoning: {"exclude": true}`` on the non-streaming ``complete()``
+path. Reasoning tokens are billed as output AND counted against
+``max_tokens`` on OpenRouter, and those operations run on budgets of
+1-8K tokens (``output_budget.OUTPUT_TOKEN_BUDGETS``) — a single medium-effort
+reasoning burst consumes the whole budget and returns empty text with
+``finish_reason=length``. That is the failure already documented for Gemini
+at ``output_budget.py``'s ``("refine.focused","google")`` override. It is
+applied to ``complete()`` only, never ``stream()``: reasoning deltas are the
+liveness sentinel the stream watchdog depends on (see above).
+
+Cache accounting: ``services/llm/usage.py::_normalize_openrouter_usage``
+populates BOTH ``cached_input_tokens`` (from
+``prompt_tokens_details.cached_tokens``) and ``cache_write_input_tokens``
+(from ``prompt_tokens_details.cache_write_tokens``). Populating writes is
+only safe because every openrouter catalog entry carries a non-``None``
+``cache_write_5m_cost_per_million``: a ``None`` rate with non-zero write
+tokens makes ``estimate_cost_usd()`` return ``None`` and the ledger records
+no cost at all. Explicit ``cache_control`` breakpoints are deliberately not
+sent — DeepSeek caching is automatic and needs none.
 """
 
 from __future__ import annotations
@@ -83,9 +113,11 @@ _BASE_URL = "https://openrouter.ai/api/v1"
 # other adapter: connect/write short (fast-fail), read long (streaming).
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=5.0)
 
-# Pinned upstream route (see module docstring): no silent fallback between
-# hosts serving the same model slug, and no upstream data retention.
-_PINNED_PROVIDER_ROUTE = {"data_collection": "deny", "allow_fallbacks": False}
+# Base upstream-route policy (see module docstring). The ``only`` allowlist is
+# added per-model from the catalog entry's ``upstream_providers``; these two
+# fields alone do NOT pin anything — ``allow_fallbacks`` is a no-op without an
+# explicit list, and ``data_collection`` is a policy filter, not a selector.
+_BASE_PROVIDER_ROUTE = {"data_collection": "deny", "allow_fallbacks": False}
 
 
 def _wrap_openrouter_error(exc: openai.OpenAIError) -> ProviderError:
@@ -211,6 +243,11 @@ class OpenRouterAdapter(BaseLLMAdapter):
                     system=system,
                     user=user,
                     max_tokens=max_tokens,
+                    # Non-streaming path only. Suppressing reasoning here is
+                    # what makes the small judge/refine/summary budgets viable;
+                    # doing it on stream() would remove the watchdog's liveness
+                    # sentinel (see the module docstring).
+                    suppress_reasoning=self._suppress_reasoning(),
                 ),
             )
             choice = response.choices[0]
@@ -234,20 +271,17 @@ class OpenRouterAdapter(BaseLLMAdapter):
         system: str,
         user: str,
         max_tokens: int,
+        suppress_reasoning: bool = False,
     ) -> dict:
         extra_body: dict = {
             # Attaches cost/cost_details to the final usage chunk — see the
-            # module docstring's usage/cost accounting section.
+            # module docstring's cache-accounting section.
             "usage": {"include": True},
-            "provider": dict(_PINNED_PROVIDER_ROUTE),
+            "provider": self._provider_route(),
         }
-        effort = self._request_policy["reasoning_effort"]
-        if effort:
-            # Gate on the effort VALUE, not on supports_reasoning: this must
-            # never send the field to a model whose catalog entry declares
-            # no effort knob (the Haiku 4.5 precedent — deepseek-v3.2 mirrors
-            # that shape today with supports_reasoning=False).
-            extra_body["reasoning"] = {"effort": effort}
+        reasoning = self._reasoning_field(suppress_reasoning=suppress_reasoning)
+        if reasoning is not None:
+            extra_body["reasoning"] = reasoning
         request: dict = {
             "model": self.model,
             "messages": [
@@ -258,6 +292,48 @@ class OpenRouterAdapter(BaseLLMAdapter):
             "extra_body": extra_body,
         }
         return request
+
+    def _provider_route(self) -> dict:
+        """The upstream-host routing block for this model (see module docstring).
+
+        ``only`` is omitted entirely when the catalog declares no
+        ``upstream_providers``. That matters: an empty allowlist is not "no
+        preference" to OpenRouter, it is "no provider meets your routing
+        requirements" — a permanent 503 on every call.
+        """
+        route = dict(_BASE_PROVIDER_ROUTE)
+        allowlist = self._request_policy.get("upstream_providers") or ()
+        if allowlist:
+            route["only"] = list(allowlist)
+        return route
+
+    def _reasoning_field(self, *, suppress_reasoning: bool) -> dict | None:
+        """The ``reasoning`` request field, or None to omit it entirely.
+
+        Suppression wins over effort: the cheap non-core operations run on
+        output budgets far too small to absorb a reasoning burst (reasoning
+        tokens bill as output AND count against ``max_tokens`` on OpenRouter),
+        so they ask the model not to emit any. Callers only set this on the
+        non-streaming path — see ``stream()``.
+        """
+        if suppress_reasoning and self._request_policy["supports_reasoning"]:
+            return {"exclude": True}
+        effort = self._request_policy["reasoning_effort"]
+        if effort:
+            # Gate on the effort VALUE, not on supports_reasoning: this must
+            # never send an effort to a model whose catalog entry declares no
+            # effort knob (the Haiku 4.5 precedent).
+            return {"effort": effort}
+        return None
+
+    def _suppress_reasoning(self) -> bool:
+        """True for the cheap non-core operations (judge/eval, refine, summary).
+
+        Deliberately derived from the catalog's own core-operation set via
+        ``model_request_policy`` rather than an operation list held here, so it
+        cannot drift from ``CORE_GENERATION_OPERATIONS``.
+        """
+        return not self._request_policy["is_core_generation"]
 
 
 def _capture_resolved_model(

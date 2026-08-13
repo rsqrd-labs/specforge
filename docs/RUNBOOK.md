@@ -870,28 +870,49 @@ GPT-5.5, which is the closer substitute.
 
 **A fourth, optional provider — OpenRouter (issue #152).** `OPENROUTER_API_KEY`
 defaults to unset and is never required to boot; shipping its catalog/adapter
-wiring is inert while `LLM_PROVIDER_PRIORITY` omits `"openrouter"`. Day-one
-scope is open-weight models only (`deepseek/deepseek-v3.2` small,
-`z-ai/glm-5.2` mid, `qwen/qwen3.8-max` strong) reached through a thin
-`chat_completions` adapter over the `openai` SDK pointed at
-`https://openrouter.ai/api/v1`. If a key is set, install it the same way as
-`ANTHROPIC_API_KEY` — a Shared Variable across all three Railway services
-(`backend`, `worker`, `worker-fast`) — but do **not** add `"openrouter"` to
-`LLM_PROVIDER_PRIORITY` in production without first completing the four-item
-promotion gate: (1) the live golden-corpus run
-(`docs/evals/ROUTE_PROMOTION.md`), (2) a fixed-in-advance judge-agreement
-check — the flip moves the critic, the eval judge, the Rung-2 problem
-compressor, and the `pr_check` evaluator onto the openrouter judge model
-(`JUDGE_MODELS["openrouter"]`, currently `deepseek/deepseek-v3.2`) in the same
-instant it moves generation, and none of that is exercised by an artifact-only
-eval, (3) an updated Privacy Policy naming the new sub-processors (the
-day-one models route through DeepSeek/Z.ai/Alibaba upstreams via the
-OpenRouter proxy — not currently disclosed), and (4) confirming the adapter
-pins `provider.data_collection=deny` / `provider.allow_fallbacks=false` on
-every request (it does, by default) so the upstream host actually serving a
-model slug is stable and reproducible run-to-run. Verify with
-`GET /providers/health?model=deepseek/deepseek-v3.2` the same way §8.5's
-Anthropic steps verify `claude-opus-5`.
+wiring is inert while `LLM_PROVIDER_PRIORITY` omits `"openrouter"`. The ladder
+is **all-DeepSeek-V4** — `deepseek/deepseek-v4-flash` (`mid`, the cheap primary
+and judge) escalating to `deepseek/deepseek-v4-pro` (`strong`, full-artifact
+generation) — reached through a thin `chat_completions` adapter over the
+`openai` SDK pointed at `https://openrouter.ai/api/v1`. If a key is set, install
+it the same way as `ANTHROPIC_API_KEY` — a Shared Variable across all three
+Railway services (`backend`, `worker`, `worker-fast`) — but do **not** add
+`"openrouter"` to `LLM_PROVIDER_PRIORITY` in production without completing the
+promotion gate in `docs/evals/ROUTE_PROMOTION.md`.
+
+*Why every tier is DeepSeek, and why the route is pinned.* OpenRouter serves one
+model slug from many upstream hosts, and `provider.only` in the request is the
+only thing that pins which one answers (`allow_fallbacks: false` alone is a
+documented no-op without it). That pin is load-bearing for three separate
+reasons, all verified against the live endpoints API: prompt caching exists on
+**1 of 19** hosts serving `deepseek-v4-flash` (DeepSeek's own) and on **0 of 32**
+serving the retired `z-ai/glm-5.2`; hosts disagree on real
+`max_completion_tokens` by up to **32x** against the 32,768 the pipeline sends;
+and catalog rates are the *pinned host's*, which differ from the model alias's
+(`deepseek-v4-pro` is $0.435/$0.870 pinned, $1.168/$2.336 at the alias). Do not
+"simplify" the pin away.
+
+*Failure modes specific to this provider.*
+
+* **Permanent 503, every generation.** `data_collection: "deny"` plus
+  `only: ["deepseek"]` can narrow the pool to zero, which OpenRouter answers
+  with "no available model provider meets your routing requirements". Detect it
+  with `GET /providers/health?model=deepseek/deepseek-v4-pro` (admin) — the
+  probe carries the same pin a generation does, and `probe_error` on the
+  response distinguishes an empty pool from a bad key. Run this **before** the
+  env flip, the same way §8.5's Anthropic steps verify `claude-opus-5`.
+* **A 502 opens the circuit, and that is correct here.** OpenRouter reports
+  upstream failure as 502, which is not in `RATE_LIMIT_STATUS_CODES`, so it
+  counts toward the breaker and the fleet sheds to the next configured provider
+  after 3 failures in 600s. Because the route is pinned to a single host, a 502
+  *is* a provider outage rather than one flaky host out of many — the breaker is
+  the right response. **If the pin is ever removed, revisit this**: unpinned, a
+  single bad host out of 19 would take the whole provider down.
+* **Silent catalog drift.** Rates, output ceilings and caching support all move
+  under a floating slug. `uv run python ../scripts/check_openrouter_catalog_drift.py`
+  diffs the catalog against the *pinned endpoint* and exits non-zero on drift.
+  Run it at the quarterly `CATALOG_HYGIENE.md` review; it is deliberately not in
+  CI (network dependency, and a scheduled job bills ~1 minute per firing).
 
 ---
 

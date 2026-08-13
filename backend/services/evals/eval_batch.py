@@ -272,6 +272,14 @@ async def _finish_from_item(db: Any, row: LLMBatchJob, item: Any) -> str:
             content_generation_id=row.context.get("content_generation_id"),
             generation_provider=row.context.get("generation_provider"),
             generation_model=row.context.get("generation_model"),
+            # Judge provenance (issue #152) — read from the checkpoint rather
+            # than resolved fresh: a batch can take hours, and the judge that
+            # actually scored this row is the one recorded at submit time, not
+            # whatever LLM_PROVIDER_PRIORITY resolves to at collection time.
+            # (The _fallback_score path below goes through run_eval, which
+            # records provenance from these same two context keys.)
+            judge_provider=row.context.get("provider"),
+            judge_model=row.context.get("judge_model"),
             mode=row.context.get("mode") or "standard",
             # The harness coverage denominator is the upstream SPEC's
             # requirement set, so the batch completion path must replay it too

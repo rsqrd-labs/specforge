@@ -284,3 +284,77 @@ def test_cache_write_without_write_rate_returns_none() -> None:
 def test_estimate_tokens_is_deterministic() -> None:
     assert estimate_tokens("openai", "gpt-4o-mini", "abcd") == 1
     assert estimate_tokens("openai", "gpt-4o-mini", "abcde") == 2
+
+
+# --- openrouter (issue #152) -------------------------------------------------
+
+
+def test_normalizes_openrouter_usage_with_cache_reads_and_writes() -> None:
+    """OpenRouter reports BOTH cached_tokens (reads) and cache_write_tokens
+    under prompt_tokens_details. The OpenAI normaliser reads only the first, so
+    delegating to it left every write token priced as uncached input."""
+    usage = normalize_provider_usage(
+        "openrouter",
+        {
+            "prompt_tokens": 10_000,
+            "completion_tokens": 2_000,
+            "prompt_tokens_details": {
+                "cached_tokens": 6_000,
+                "cache_write_tokens": 1_000,
+            },
+            "completion_tokens_details": {"reasoning_tokens": 500},
+        },
+    )
+
+    # prompt_tokens INCLUDES both cache buckets (the OpenAI convention, not
+    # Anthropic's disjoint one), so estimate_cost_usd subtracts them off.
+    assert usage.input_tokens == 10_000
+    assert usage.cached_input_tokens == 6_000
+    assert usage.cache_write_input_tokens == 1_000
+    assert usage.output_tokens == 2_000
+    assert usage.reasoning_tokens == 500
+    assert usage.usage_estimation_method == "provider_reported"
+
+
+def test_openrouter_cache_hit_is_visibly_cheaper_in_the_ledger() -> None:
+    """The point of the whole pinning exercise: a cache hit must show up as a
+    lower recorded cost. The retired entries set cached_input == input, so a
+    perfect hit cost exactly the same as a miss and the ledger could not
+    measure the thing the provider switch was for."""
+    model = "deepseek/deepseek-v4-flash"
+    hit = normalize_provider_usage(
+        "openrouter",
+        {
+            "prompt_tokens": 10_000,
+            "completion_tokens": 2_000,
+            "prompt_tokens_details": {"cached_tokens": 6_000},
+        },
+    )
+    miss = normalize_provider_usage(
+        "openrouter", {"prompt_tokens": 10_000, "completion_tokens": 2_000}
+    )
+
+    hit_cost = estimate_cost_usd("openrouter", model, hit)
+    miss_cost = estimate_cost_usd("openrouter", model, miss)
+    assert hit_cost is not None and miss_cost is not None
+    assert hit_cost < miss_cost
+    # uncached 4_000*0.14 + cached 6_000*0.0028 + output 2_000*0.28, per million
+    assert hit_cost == Decimal("0.00056") + Decimal("0.0000168") + Decimal("0.00056")
+
+
+def test_openrouter_cache_writes_are_priced_not_dropped() -> None:
+    """Populating cache_write_input_tokens is only safe because every openrouter
+    entry carries a non-None cache_write_5m rate — otherwise estimate_cost_usd
+    returns None and the ledger records NO cost at all (the trap the original
+    adapter avoided by never populating writes)."""
+    usage = normalize_provider_usage(
+        "openrouter",
+        {
+            "prompt_tokens": 5_000,
+            "completion_tokens": 1_000,
+            "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 2_000},
+        },
+    )
+
+    for model in ("deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"):
+        assert estimate_cost_usd("openrouter", model, usage) is not None

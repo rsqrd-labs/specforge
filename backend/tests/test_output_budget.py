@@ -67,9 +67,28 @@ def test_no_override_shrinks_a_budget_without_the_evidence_gate() -> None:
         )
 
 
-def test_google_focused_refine_is_the_only_shipped_override() -> None:
-    # Pin the shipped set so a future addition is a deliberate, reviewed edit.
-    assert OUTPUT_TOKEN_BUDGET_OVERRIDES == {("refine.focused", "google"): 4096}
+def test_shipped_overrides_are_pinned() -> None:
+    """Pin the shipped set so a future addition is a deliberate, reviewed edit.
+
+    Every entry is an INCREASE, and all of them exist for the same mechanism:
+    the model bills reasoning/thought tokens against ``max_output_tokens``, so
+    at the cross-provider default a single reasoning burst consumes the whole
+    budget and the call returns empty text at finish_reason=length.
+
+    * google/refine.focused — Gemini 3.6 Flash at thinking_level="high".
+    * openrouter/* — the whole DeepSeek V4 ladder accepts reasoning_effort, and
+      the judge/refine/summary operations are NOT core generation, so
+      ``core_generation_low_reasoning`` cannot lower their effort. The adapter
+      additionally sends ``reasoning: {"exclude": true}`` on its non-streaming
+      ``complete()`` path for exactly these operations, which is what keeps
+      these numbers modest rather than speculative.
+    """
+    assert OUTPUT_TOKEN_BUDGET_OVERRIDES == {
+        ("refine.focused", "google"): 4096,
+        ("refine.focused", "openrouter"): 4096,
+        ("summary.create", "openrouter"): 8192,
+        ("eval.score", "openrouter"): 4096,
+    }
 
 
 def test_build_eval_request_threads_provider_override(monkeypatch) -> None:

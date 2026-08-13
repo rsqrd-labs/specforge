@@ -7,6 +7,7 @@ This module contains no direct LLM HTTP calls.  HTTP timeout policy
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from dataclasses import dataclass
 from typing import Literal
@@ -157,6 +158,15 @@ async def check_provider_health(
     ``claude-opus-5``, the model full-artifact generation depends on.  The
     caller is responsible for validating the id against the catalog — an
     arbitrary caller-supplied string must never reach a provider.
+
+    The probe goes through the real adapter, so on **openrouter** it carries the
+    catalog's upstream-host pin (``provider.only``) exactly as a generation
+    would.  That makes this the only pre-flip detection for the one failure this
+    deployment cannot discover from code: if ``data_collection: "deny"`` filters
+    out every pinned host, OpenRouter answers a permanent **503 "no available
+    model provider meets your routing requirements"** and every generation fails
+    identically.  ``probe_error`` carries the provider's own message back so a
+    503-empty-pool is distinguishable from a 401-bad-key without shell access.
     """
     if provider not in PROVIDER_DISPLAY:
         raise ValueError(f"Unknown provider: {provider!r}")
@@ -185,9 +195,30 @@ async def check_provider_health(
         )
     except Exception as exc:
         record_provider_failure(provider, exc)
+        snapshot = provider_snapshot(provider)
+        snapshot["probe_error"] = _probe_error_detail(exc)
+        return snapshot
     else:
         record_provider_success(provider)
     return provider_snapshot(provider)
+
+
+def _probe_error_detail(exc: BaseException) -> str:
+    """A bounded, operator-readable reason for a failed probe.
+
+    Truncated because a provider error body can be large, and this is returned
+    over an admin HTTP route. Never includes the exception's ``repr`` of any
+    request object, so a key cannot leak through it.
+    """
+    status_code = None
+    with contextlib.suppress(Exception):
+        from services.llm.base import classify_provider_status  # noqa: PLC0415
+
+        status_code = classify_provider_status(exc)
+    message = str(exc).strip() or type(exc).__name__
+    if len(message) > 300:
+        message = f"{message[:300]}…"
+    return f"{status_code}: {message}" if status_code else message
 
 
 def record_provider_success(provider: str) -> None:

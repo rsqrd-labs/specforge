@@ -3,9 +3,11 @@
 Mirrors test_openai_adapter.py's guard coverage (the chat-completions path
 this adapter is modelled on) plus OpenRouter-specific behavior: usage/cost
 accounting (stream_options + usage.include, since — unlike OpenAI's dead
-chat-completions path — this IS the live path), route pinning
-(data_collection=deny, allow_fallbacks=false), reasoning.effort gating on
-the catalog value, and BatchUnsupportedError on all three batch methods.
+chat-completions path — this IS the live path), upstream-host pinning
+(provider.only from the catalog, plus data_collection=deny and
+allow_fallbacks=false), reasoning gating — effort from the catalog on core
+generation, exclude=true on the cheap non-core `complete()` path and NEVER on
+a stream — and BatchUnsupportedError on all three batch methods.
 """
 
 from __future__ import annotations
@@ -55,14 +57,22 @@ async def _fake_stream(chunks: list[Any]) -> AsyncIterator[Any]:
 def _make_adapter(
     chunks: list[Any] | None = None,
     *,
-    model: str = "deepseek/deepseek-v3.2",
+    model: str = "deepseek/deepseek-v4-flash",
     reasoning_effort: str | None = None,
+    upstream_providers: tuple[str, ...] = ("deepseek",),
+    supports_reasoning: bool = True,
+    is_core_generation: bool = True,
 ) -> Any:
     from services.llm.openrouter_adapter import OpenRouterAdapter
 
     adapter = OpenRouterAdapter.__new__(OpenRouterAdapter)
     adapter.model = model
-    adapter._request_policy = {"reasoning_effort": reasoning_effort}
+    adapter._request_policy = {
+        "reasoning_effort": reasoning_effort,
+        "upstream_providers": upstream_providers,
+        "supports_reasoning": supports_reasoning,
+        "is_core_generation": is_core_generation,
+    }
     adapter.last_completion = None
 
     mock_create = AsyncMock()
@@ -237,26 +247,109 @@ async def test_stream_request_includes_usage_accounting_and_pinned_route() -> No
         pass
 
     kwargs = adapter._client.chat.completions.create.await_args.kwargs
-    assert kwargs["model"] == "deepseek/deepseek-v3.2"
+    assert kwargs["model"] == "deepseek/deepseek-v4-flash"
     assert kwargs["stream"] is True
     assert kwargs["stream_options"] == {"include_usage": True}
     assert kwargs["extra_body"]["usage"] == {"include": True}
+    # `only` is the field that actually pins the upstream host. allow_fallbacks
+    # alone is a documented no-op without it, which is what made prompt caching
+    # structurally impossible (1 of 19 hosts caches) before this was added.
     assert kwargs["extra_body"]["provider"] == {
         "data_collection": "deny",
         "allow_fallbacks": False,
+        "only": ["deepseek"],
     }
-    # No reasoning field when the catalog entry sets no effort (deepseek-v3.2).
+    # No reasoning field when the catalog entry sets no effort.
     assert "reasoning" not in kwargs["extra_body"]
 
 
 @pytest.mark.asyncio
+async def test_upstream_allowlist_is_omitted_when_the_catalog_declares_none() -> None:
+    """An EMPTY `only` is not "no preference" to OpenRouter — it is "no provider
+    meets your routing requirements", a permanent 503 on every call. A catalog
+    entry with no `upstream_providers` must send no `only` key at all."""
+    adapter = _make_adapter([_chunk("hi")], upstream_providers=())
+
+    async for _ in adapter.stream("sys", "user", 4096):
+        pass
+
+    provider_block = adapter._client.chat.completions.create.await_args.kwargs[
+        "extra_body"
+    ]["provider"]
+    assert "only" not in provider_block
+    assert provider_block == {"data_collection": "deny", "allow_fallbacks": False}
+
+
+@pytest.mark.asyncio
 async def test_reasoning_effort_sent_only_when_catalog_declares_it() -> None:
+    adapter = _make_adapter([_chunk("hi")], reasoning_effort="medium")
+
+    async for _ in adapter.stream("sys", "user", 4096):
+        pass
+
+    kwargs = adapter._client.chat.completions.create.await_args.kwargs
+    assert kwargs["extra_body"]["reasoning"] == {"effort": "medium"}
+
+
+@pytest.mark.asyncio
+async def test_streaming_never_suppresses_reasoning_even_for_non_core_ops() -> None:
+    """Reasoning deltas are the stream watchdog's liveness sentinel (issue #19):
+    they arrive as real `data:` events with delta.content=None and reset the
+    idle timer. OpenRouter's `: OPENROUTER PROCESSING` keepalives are dropped by
+    the openai SDK's decoder, so suppressing reasoning on a stream would leave
+    NOTHING resetting the 180s idle bound."""
     adapter = _make_adapter(
-        [_chunk("hi")], model="z-ai/glm-5.2", reasoning_effort="medium"
+        [_chunk("hi")], reasoning_effort="medium", is_core_generation=False
     )
 
     async for _ in adapter.stream("sys", "user", 4096):
         pass
+
+    kwargs = adapter._client.chat.completions.create.await_args.kwargs
+    assert kwargs["extra_body"]["reasoning"] == {"effort": "medium"}
+
+
+@pytest.mark.asyncio
+async def test_complete_suppresses_reasoning_for_cheap_non_core_operations() -> None:
+    """Reasoning tokens bill as output AND count against max_tokens on
+    OpenRouter. eval.score/refine.focused/summary.create run on 4-8K budgets, so
+    a medium-effort burst returns empty text at finish_reason=length — and the
+    critic is fail-open, so that failure is silent."""
+    adapter = _make_adapter(reasoning_effort="medium", is_core_generation=False)
+    adapter._client.chat.completions.create = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="{}"), finish_reason="stop"
+                )
+            ],
+            usage=None,
+            model="deepseek/deepseek-v4-flash",
+        )
+    )
+
+    await adapter.complete("sys", "user", 4096)
+
+    kwargs = adapter._client.chat.completions.create.await_args.kwargs
+    assert kwargs["extra_body"]["reasoning"] == {"exclude": True}
+
+
+@pytest.mark.asyncio
+async def test_complete_keeps_declared_effort_for_core_generation() -> None:
+    adapter = _make_adapter(reasoning_effort="medium", is_core_generation=True)
+    adapter._client.chat.completions.create = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="x"), finish_reason="stop"
+                )
+            ],
+            usage=None,
+            model="deepseek/deepseek-v4-flash",
+        )
+    )
+
+    await adapter.complete("sys", "user", 4096)
 
     kwargs = adapter._client.chat.completions.create.await_args.kwargs
     assert kwargs["extra_body"]["reasoning"] == {"effort": "medium"}
@@ -269,7 +362,7 @@ async def test_reasoning_effort_sent_only_when_catalog_declares_it() -> None:
 
 @pytest.mark.asyncio
 async def test_complete_extracts_message_content_and_captures_usage() -> None:
-    adapter = _make_adapter(model="qwen/qwen3.8-max", reasoning_effort="medium")
+    adapter = _make_adapter(model="deepseek/deepseek-v4-pro", reasoning_effort="medium")
     response = SimpleNamespace(
         choices=[
             SimpleNamespace(
@@ -278,7 +371,7 @@ async def test_complete_extracts_message_content_and_captures_usage() -> None:
             )
         ],
         usage=SimpleNamespace(prompt_tokens=12, completion_tokens=3, cost=0.0005),
-        model="qwen/qwen3.8-max",
+        model="deepseek/deepseek-v4-pro",
     )
     adapter._client.chat.completions.create = AsyncMock(return_value=response)
 
@@ -290,7 +383,7 @@ async def test_complete_extracts_message_content_and_captures_usage() -> None:
     assert "stream" not in kwargs
     assert adapter.last_completion is not None
     assert adapter.last_completion.usage["cost"] == 0.0005
-    assert adapter.last_completion.raw["resolved_model"] == "qwen/qwen3.8-max"
+    assert adapter.last_completion.raw["resolved_model"] == "deepseek/deepseek-v4-pro"
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +397,7 @@ def test_adapter_targets_the_openrouter_base_url(
     from services.llm.openrouter_adapter import OpenRouterAdapter
 
     monkeypatch.setattr("config.settings.openrouter_api_key", "sk-or-test")
-    adapter = OpenRouterAdapter("deepseek/deepseek-v3.2", api_key="sk-or-test")
+    adapter = OpenRouterAdapter("deepseek/deepseek-v4-flash", api_key="sk-or-test")
 
     assert str(adapter._client.base_url).rstrip("/") == "https://openrouter.ai/api/v1"
 

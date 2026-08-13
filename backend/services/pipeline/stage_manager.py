@@ -1890,6 +1890,48 @@ def _chunk_output_budget(
     return min(32_768, model_max_output_tokens(route.provider, route.model))
 
 
+# Measured visible-output throughput per provider, in characters per second.
+#
+# Every chunk length target in ``_chunk_length_target`` is a WALL-CLOCK budget
+# expressed in characters, and this table is the exchange rate that converts one
+# into the other. It was an unnamed literal duplicated in two tests before issue
+# #152 made a provider swap real; naming it here is what lets CI see which
+# providers the shipped targets have actually been sized against.
+#
+# ``None`` means UNMEASURED — the route is live but nobody has timed a real
+# chunk on it. That is not a blocker (the targets are conservative for the one
+# provider that was measured), but it IS debt, and
+# ``test_unmeasured_generation_providers_are_declared`` fails when a provider is
+# added without either a measurement or an explicit entry here, so the gap can
+# never become invisible again.
+#
+# anthropic: 145 chars/s — ~38 visible tok/s at ~3.5 chars/tok, measured on
+#   generation 65fe5f10 (2026-07-30) with Opus 5 at ``effort=medium``. Opus 5
+#   has since moved to ``effort=high`` (2026-08-06) WITHOUT a re-measurement, so
+#   even this number describes a setting the model no longer runs at.
+_MEASURED_CHARS_PER_SECOND: dict[str, float | None] = {
+    "anthropic": 145.0,
+    "openai": None,
+    "google": None,
+    "openrouter": None,
+}
+
+
+def binding_chars_per_second() -> float:
+    """The throughput the shared chunk targets must fit.
+
+    One set of character targets is sent to every provider, so the binding
+    constraint is the SLOWEST measured route — a target that fits a fast model
+    and overruns a slow one still loses the slow one's partial output to the
+    watchdog. Unmeasured providers cannot participate in a minimum, which is
+    precisely why they are tracked as debt rather than assumed equal.
+    """
+    measured = [value for value in _MEASURED_CHARS_PER_SECOND.values() if value]
+    if not measured:  # pragma: no cover - the anthropic entry is always present
+        raise RuntimeError("No provider throughput measurement is available.")
+    return min(measured)
+
+
 def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
     """Return the character-length guidance appended to a chunk's user prompt.
 
@@ -2129,8 +2171,13 @@ def _should_cache_system_prompt(
     $0.0246 — a pure ~25% surcharge on the cached span, every generation.
 
     Scoped deliberately narrowly:
-      * **anthropic only** — ``cache_system`` is a no-op on OpenAI/Google, whose
-        prefix caching is automatic and carries no write premium.
+      * **anthropic only** — ``cache_system`` is a no-op on OpenAI/Google/
+        OpenRouter, whose prefix caching is automatic and carries no write
+        premium. Returning False for them is not merely cosmetic: the caller
+        (``_stream_artifact_chunk``) ties ``user_prefix_cache_hint`` to this
+        flag, and that context var is read ONLY by ``anthropic_adapter``. On
+        every other provider a True answer builds a hint that is computed,
+        entered as a context manager, and discarded unread on every chunk.
       * **demo_day only** — standard mode's single-chunk ``full`` spec (see
         ``_chunk_specs_for_stage``) has the identical never-read property, but
         it is the fallback shape rather than the normal path, and standard-mode

@@ -96,8 +96,33 @@ OUTPUT_TOKEN_BUDGETS: dict[str, int] = {
 # empty text. 4096 leaves the thinking headroom that a focused patch needs while
 # staying far below the model's 64000 ceiling. Anthropic/OpenAI keep the 768
 # default: their focused-refine models are not billed this way.
+#
+# The openrouter entries below are the same class of INCREASE, for the same
+# mechanism. OpenRouter's docs are explicit that "reasoning tokens are
+# considered output tokens and charged accordingly" and that "max_tokens must
+# be strictly higher than the reasoning budget to ensure there are tokens
+# available for the final response after thinking" — so every reasoning-capable
+# model on that provider has Gemini's shape, and the entire openrouter ladder
+# (DeepSeek V4 Flash and Pro) accepts reasoning_effort.
+#
+# These three operations are the cheap NON-core paths, so
+# `core_generation_low_reasoning` cannot help them: `model_request_policy`
+# lowers effort only when the operation is in CORE_GENERATION_OPERATIONS. The
+# adapter therefore sends `reasoning: {"exclude": true}` on its non-streaming
+# `complete()` path for exactly these operations (openrouter_adapter
+# ._suppress_reasoning), which is what keeps the numbers below modest rather
+# than speculative — they carry the payload plus a safety margin for a model
+# that emits some reasoning anyway, not a full medium-effort burst.
+#
+# eval.score is the one that must not be tight: the critic is FAIL-OPEN, so a
+# judge truncated at finish_reason=length returns empty text, the error is
+# swallowed, and quality scoring silently stops while every generation keeps
+# succeeding. There is no alert for that.
 OUTPUT_TOKEN_BUDGET_OVERRIDES: dict[tuple[str, str], int] = {
     ("refine.focused", "google"): 4096,
+    ("refine.focused", "openrouter"): 4096,
+    ("summary.create", "openrouter"): 8192,
+    ("eval.score", "openrouter"): 4096,
 }
 
 # Conservative absolute floors below which the *recommender* will never drop a

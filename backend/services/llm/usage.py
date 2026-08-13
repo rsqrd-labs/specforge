@@ -6,7 +6,7 @@ timeout= enforcement is delegated to each concrete adapter implementation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -55,17 +55,7 @@ def normalize_provider_usage(provider: str, raw_usage: Any) -> NormalizedUsage:
     if provider == "google":
         return _normalize_google_usage(usage)
     if provider == "openrouter":
-        # Plain OpenAI-shape delegation (issue #152 Phase 1). OpenRouter's
-        # chat-completions usage object nests cached-read tokens under
-        # prompt_tokens_details.cached_tokens — the same field
-        # _normalize_openai_usage already reads — so cache READS are
-        # captured correctly from day one. cache_write_input_tokens is
-        # deliberately left unpopulated here: this is the safe branch either
-        # way (see services/llm/openrouter_adapter.py's module docstring) —
-        # it never risks the None-rate/nonzero-tokens trap in
-        # estimate_cost_usd below, at the cost of a small under-count if
-        # OpenRouter ever reports genuine cache-write tokens.
-        return _normalize_openai_usage(usage)
+        return _normalize_openrouter_usage(usage)
 
     return NormalizedUsage(
         input_tokens=_int_or_none(usage.get("input_tokens")),
@@ -207,6 +197,37 @@ def _normalize_openai_usage(usage: dict) -> NormalizedUsage:
         provider_usage_raw=usage,
         usage_estimation_method="provider_reported",
         reasoning_tokens=_first_int(output_details, "reasoning_tokens"),
+    )
+
+
+def _normalize_openrouter_usage(usage: dict) -> NormalizedUsage:
+    """OpenRouter's chat-completions usage, including cache WRITE tokens.
+
+    Built on ``_normalize_openai_usage`` for the shared OpenAI-compatible shape
+    (``prompt_tokens`` / ``completion_tokens`` / ``prompt_tokens_details
+    .cached_tokens``) and then adds the one field OpenRouter reports and OpenAI
+    does not: ``prompt_tokens_details.cache_write_tokens``. Keeping this a
+    separate function rather than extending the OpenAI normaliser is deliberate
+    — the two payload contracts are set by different vendors and must be free
+    to diverge.
+
+    Populating writes is only safe while every openrouter catalog entry carries
+    a non-``None`` ``cache_write_5m_cost_per_million``: with a ``None`` rate and
+    non-zero write tokens, ``estimate_cost_usd`` below returns ``None`` and the
+    ledger records NO cost for the call. ``test_openrouter_entries_price_every
+    _token_bucket`` pins that invariant.
+
+    Like OpenAI (and unlike Anthropic), ``prompt_tokens`` already INCLUDES both
+    cached-read and cache-write tokens, so ``estimate_cost_usd`` subtracts them
+    off to derive the uncached remainder rather than summing.
+    """
+    base = _normalize_openai_usage(usage)
+    details = _to_dict(usage.get("prompt_tokens_details"))
+    return replace(
+        base,
+        cache_write_input_tokens=_first_int(
+            details, "cache_write_tokens", "cache_creation_tokens"
+        ),
     )
 
 
