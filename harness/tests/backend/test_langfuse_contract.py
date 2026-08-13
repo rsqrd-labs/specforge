@@ -268,6 +268,7 @@ def test_provider_adapters_do_not_import_langfuse() -> None:
         "anthropic_adapter.py",
         "openai_adapter.py",
         "google_adapter.py",
+        "openrouter_adapter.py",
     ):
         source = read_backend_file("services", "llm", filename)
         assert "langfuse" not in source.lower(), (

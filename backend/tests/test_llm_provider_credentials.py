@@ -265,6 +265,11 @@ def test_unknown_model_is_rejected_before_any_provider_call() -> None:
 def test_known_models_resolve_to_their_owning_provider() -> None:
     assert _provider_for_model("claude-opus-5") == "anthropic"
     assert _provider_for_model("gpt-5.5") == "openai"
+    # openrouter model ids carry a "/" (issue #152) — the one shape this
+    # lookup had never seen before. RUNBOOK.md §8.5 documents
+    # `GET /providers/health?model=deepseek/deepseek-v3.2` as the openrouter
+    # verification step, so this must actually resolve.
+    assert _provider_for_model("deepseek/deepseek-v3.2") == "openrouter"
 
 
 @pytest.mark.asyncio
@@ -289,11 +294,20 @@ async def test_provider_health_probes_every_provider(monkeypatch) -> None:
 
     payload = await get_provider_health(model=None, _admin=_FakeUser("a@b.c"))
 
-    assert [p for p, _ in probed] == ["anthropic", "openai", "google"]
+    # Every REGISTERED provider is probed regardless of llm_provider_priority
+    # (pinned to only three above) — the diagnostic endpoint must surface an
+    # unconfigured/off-priority provider's status too, e.g. openrouter
+    # (issue #152) before an operator ever adds it to the priority list.
+    from services.llm.provider_status import provider_ids
+
+    assert [p for p, _ in probed] == list(provider_ids())
+    assert "openrouter" in [p for p, _ in probed]
     # No explicit model => each provider probes its own judge default.
     assert all(model is None for _, model in probed)
     assert payload["priority"] == ["anthropic", "openai", "google"]
-    assert len(payload["providers"]) == 3
+    # "providers" reports every REGISTERED provider's status, not just the
+    # ones in the active priority list — openrouter shows up here too.
+    assert len(payload["providers"]) == len(provider_ids())
 
 
 @pytest.mark.asyncio

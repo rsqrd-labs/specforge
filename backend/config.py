@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     anthropic_api_key: str
     openai_api_key: str
     google_api_key: str
+    # OpenRouter (issue #152): a fourth, OPTIONAL provider reached through a
+    # thin chat_completions adapter over the openai SDK. Unlike the three
+    # required keys above, this defaults to "" — a required-with-no-default
+    # field would break every existing .env and CI environment the moment
+    # openrouter joins REQUIRED_PROVIDERS. An empty value is treated as
+    # unset by is_provider_configured, exactly like a "placeholder-" key.
+    openrouter_api_key: str = ""
     # Server-owned LLM provider precedence. This is deliberately never exposed
     # through a user API: product traffic is routed by backend policy.
     #
@@ -43,7 +50,7 @@ class Settings(BaseSettings):
     @classmethod
     def validate_llm_provider_priority(cls, value: str) -> str:
         providers = [item.strip().lower() for item in value.split(",") if item.strip()]
-        allowed = {"anthropic", "openai", "google"}
+        allowed = {"anthropic", "openai", "google", "openrouter"}
         if not providers:
             raise ValueError("LLM_PROVIDER_PRIORITY must contain at least one provider")
         if len(providers) != len(set(providers)):

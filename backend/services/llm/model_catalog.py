@@ -11,12 +11,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-ProviderId = Literal["anthropic", "openai", "google"]
+ProviderId = Literal["anthropic", "openai", "google", "openrouter"]
 ModelTier = Literal["strong", "mid", "mini", "small", "judge", "embedding"]
 ModelStatus = Literal["active", "preview", "deprecated"]
 AdapterApi = Literal["messages", "responses", "chat_completions", "generate_content"]
 
-REQUIRED_PROVIDERS = frozenset({"anthropic", "openai", "google"})
+# openrouter (issue #152) is a fourth provider reached through a thin
+# chat_completions adapter over the openai SDK, pointed at
+# https://openrouter.ai/api/v1. Day-one scope is open-weight models only
+# (DeepSeek/GLM/Qwen) — frontier traffic stays on the native Anthropic
+# adapter. Adding it here is inert until an operator opts in by adding
+# "openrouter" to LLM_PROVIDER_PRIORITY and setting OPENROUTER_API_KEY; no
+# call site defaults to it and platform_provider_priority() is entirely
+# env-driven.
+REQUIRED_PROVIDERS = frozenset({"anthropic", "openai", "google", "openrouter"})
 MODEL_TIERS = frozenset({"strong", "mid", "mini", "small", "judge", "embedding"})
 GENERATION_OPERATIONS = frozenset(
     {
@@ -46,6 +54,11 @@ _LOW_REASONING_CORE_MODELS = {
     ("anthropic", "claude-haiku-4-5-20251001"),
     ("openai", "gpt-5.4-mini"),
     ("google", "gemini-3.6-flash"),
+    # openrouter's cheap core-gen default (deepseek/deepseek-v3.2) declares no
+    # reasoning_effort at all (supports_reasoning=False), so there is nothing
+    # for core_generation_low_reasoning to lower — a deliberate day-one no-op,
+    # not an omission. The moment the ladder primary gains an effort knob this
+    # stops being free and needs a row here (issue #152).
 }
 
 # --- Core-generation tier ladder (issue #26 Phase 5b) -------------------------
@@ -77,6 +90,9 @@ _LOW_REASONING_CORE_MODELS = {
 #     on Flash is surfaced, not retried. ``_runtime_fallback_route`` handles the
 #     unresolvable escalation by returning None (it catches ``LLMRoutingError``),
 #     so this degrades cleanly instead of raising.
+#   * openrouter (issue #152): ``small`` (deepseek-v3.2) is the sole viable
+#     core-gen default, mirroring the anthropic/openai shape — start one tier
+#     below mid, escalate glm-5.2 (mid) → qwen3.8-max (strong).
 #
 # Lowering any provider's floor (e.g. Google → ``small``) changes which model
 # actually runs and therefore requires the Phase-5 golden-corpus live gate
@@ -85,6 +101,7 @@ CORE_GENERATION_TIER_LADDER: dict[str, tuple[str, ...]] = {
     "anthropic": ("small", "mid", "strong"),
     "openai": ("mini", "mid", "strong"),
     "google": ("mid", "strong"),
+    "openrouter": ("small", "mid", "strong"),
 }
 
 # Capability ordering used only to assert each ladder is monotonically
@@ -110,6 +127,20 @@ PROVIDER_CAPABILITIES: dict[str, dict[str, bool]] = {
         "supports_streaming": True,
         "supports_prompt_cache_accounting": True,
         "supports_batch": True,
+        "supports_usage_tokens": True,
+    },
+    "openrouter": {
+        "supports_streaming": True,
+        # OpenRouter reports prompt_tokens_details.cached_tokens on every
+        # chat-completions response for models that support automatic prefix
+        # caching, and the adapter's normalisation reads it — accounting is
+        # real. This is distinct from *writing* explicit cache_control
+        # breakpoints (a Phase 2+ enhancement, not wired in Phase 1).
+        "supports_prompt_cache_accounting": True,
+        # No Message Batches integration in Phase 1 (issue #152 Phase 3 exit
+        # criterion #4). eval_batch._REAL_BATCH_PROVIDERS excludes openrouter,
+        # so batch evals fall back to the synchronous path automatically.
+        "supports_batch": False,
         "supports_usage_tokens": True,
     },
 }
@@ -825,6 +856,145 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         rollout_notes="Deprecated legacy validation compatibility only.",
         routing_priority=500,
     ),
+    # --- openrouter (issue #152) --------------------------------------------
+    # A fourth provider reached through a thin chat_completions adapter over
+    # the openai SDK, base_url=https://openrouter.ai/api/v1. Day-one scope is
+    # open-weight models only; the three tiers below are the shipped ladder.
+    # Pricing pulled live from GET https://openrouter.ai/api/v1/models on
+    # 2026-08-12 (see the issue for the full audit). cached_input and
+    # cache_write rates are NOT independently verified for these models via
+    # OpenRouter (no published cache-discount schedule at review time), so
+    # both are set to the base input rate rather than left None — the same
+    # belt-and-braces trade already used for the OpenAI/Google entries'
+    # missing cache premiums. Leaving a rate None while the corresponding
+    # token count is non-zero makes estimate_cost_usd() return None and the
+    # ledger records NO cost for that call (usage.py); overpricing a
+    # potential discount is a far safer failure mode than a silent zero-cost
+    # row. cache_write_1h_cost_per_million stays None: OpenRouter's usage
+    # payload carries no Anthropic-style ephemeral_5m/1h breakdown, so
+    # _cache_write_ttl_split always attributes 100% of any write tokens to
+    # the 5m bucket and the 1h rate can never be consulted.
+    ModelCatalogEntry(
+        provider="openrouter",
+        model_id="deepseek/deepseek-v3.2",
+        display_name="DeepSeek V3.2 (OpenRouter)",
+        tier="small",
+        status="active",
+        adapter_api="chat_completions",
+        input_cost_per_million=0.269,
+        cached_input_cost_per_million=0.269,
+        cache_write_5m_cost_per_million=0.269,
+        output_cost_per_million=0.40,
+        max_context_tokens=163_840,
+        # Real ceiling is 65,536. 64000 matches the cross-provider core-gen
+        # convention (see the Opus 5 / GPT-5.5 entries) — comfortably below
+        # the real cap, so a >cap max_tokens can never 400, and the doubling
+        # limit-stop repair still has genuine headroom.
+        default_max_output_tokens=64000,
+        # Shape mirrors Haiku 4.5 / GPT-5.4 Mini exactly: the sole active
+        # core-gen default for this provider (validate_model_catalog's
+        # "exactly one active default per (provider, core op)" invariant),
+        # plus the shared cheap ladder's non-core operations.
+        recommended_operations=(
+            *CORE_GENERATION_OPERATIONS,
+            "refine.focused",
+            "refine.section",
+            "summary.create",
+            "eval.score",
+            "storyboard.generate",
+        ),
+        default_operations=(
+            *CORE_GENERATION_OPERATIONS,
+            "refine.focused",
+            "refine.section",
+            "summary.create",
+            "eval.score",
+            "storyboard.generate",
+        ),
+        # Does not accept a reasoning/effort request field on OpenRouter.
+        supports_reasoning=False,
+        reasoning_effort=None,
+        rollout_notes=(
+            "Primary openrouter core ASDD generation default and judge/eval "
+            "model — cheapest viable open-weight model on the ladder. Inert "
+            "until an operator adds 'openrouter' to LLM_PROVIDER_PRIORITY."
+        ),
+        routing_priority=30,
+    ),
+    ModelCatalogEntry(
+        provider="openrouter",
+        model_id="z-ai/glm-5.2",
+        display_name="GLM-5.2 (OpenRouter)",
+        tier="mid",
+        status="active",
+        adapter_api="chat_completions",
+        input_cost_per_million=0.489,
+        cached_input_cost_per_million=0.489,
+        cache_write_5m_cost_per_million=0.489,
+        output_cost_per_million=1.536,
+        max_context_tokens=1_048_576,
+        # Real ceiling is 131,072; 64000 cross-provider convention as above.
+        default_max_output_tokens=64000,
+        # Shape mirrors Sonnet 5 / GPT-5.4: the retry-down target for
+        # full-artifact generation, the section-refinement default, and the
+        # storyboard quality-failure escalation target.
+        recommended_operations=(
+            *CORE_GENERATION_OPERATIONS,
+            "refine.focused",
+            "refine.section",
+            "storyboard.generate",
+        ),
+        default_operations=("refine.section", "storyboard.generate"),
+        supports_reasoning=True,
+        reasoning_effort="medium",
+        rollout_notes=(
+            "openrouter mid tier: the qwen3.8-max retry-down target for "
+            "full-artifact generation, section-refinement default, and "
+            "storyboard quality-failure escalation target."
+        ),
+        routing_priority=20,
+    ),
+    ModelCatalogEntry(
+        provider="openrouter",
+        model_id="qwen/qwen3.8-max",
+        display_name="Qwen3.8 Max (OpenRouter)",
+        tier="strong",
+        status="active",
+        adapter_api="chat_completions",
+        input_cost_per_million=2.00,
+        cached_input_cost_per_million=2.00,
+        cache_write_5m_cost_per_million=2.00,
+        output_cost_per_million=6.00,
+        max_context_tokens=1_000_000,
+        # Real ceiling is 131,072; 64000 cross-provider convention as above.
+        default_max_output_tokens=64000,
+        # RECOMMENDED but NOT a default — same shape as Opus 5 / GPT-5.5:
+        # wins the strong tier via selection_reason="active_same_tier",
+        # leaving default_operations empty so deepseek-v3.2 stays the sole
+        # core-gen default holder. Deliberately does NOT recommend
+        # refine.focused/refine.section (neither does Opus 5 or GPT-5.5) —
+        # those stay on the cheap ladder; the (mid, strong) Demo Day/reverted
+        # policy never actually reaches strong for them because glm-5.2 (mid)
+        # always resolves first, exactly as it does for the two existing
+        # providers.
+        recommended_operations=(*CORE_GENERATION_OPERATIONS, "storyboard.generate"),
+        default_operations=(),
+        supports_reasoning=True,
+        # MEDIUM, not high — this is a brand-new, entirely unmeasured route
+        # against the shared 270s stage_provider_call_timeout_seconds cap.
+        # Same reasoning as GPT-5.5 (a fallback-tier frontier route that must
+        # not risk a high-effort timeout with no wall-clock data to justify
+        # it): raise only after a real per-chunk measurement, the same way
+        # Opus 5's effort was raised.
+        reasoning_effort="medium",
+        rollout_notes=(
+            "openrouter full-artifact generation primary (day-one scope: "
+            "reached only once an operator opts 'openrouter' into "
+            "LLM_PROVIDER_PRIORITY). Resolves via active_same_tier. A hard "
+            "runtime failure retries down once on glm-5.2 (mid)."
+        ),
+        routing_priority=1,
+    ),
 )
 
 
@@ -1093,11 +1263,15 @@ def _validate_entry(entry: ModelCatalogEntry) -> None:
 
 
 def _adapter_apis_for_provider(provider: str) -> set[str]:
-    return {
+    table = {
         "anthropic": {"messages"},
         "openai": {"responses", "chat_completions"},
         "google": {"generate_content"},
-    }[provider]
+        "openrouter": {"chat_completions"},
+    }
+    if provider not in table:
+        raise RuntimeError(f"No adapter API table entry for provider {provider!r}")
+    return table[provider]
 
 
 def _require_provider(provider: str) -> None:

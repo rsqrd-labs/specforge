@@ -27,6 +27,7 @@ _PROVIDER_KEY_SETTINGS = {
     "anthropic": "anthropic_api_key",
     "openai": "openai_api_key",
     "google": "google_api_key",
+    "openrouter": "openrouter_api_key",
 }
 _PLACEHOLDER_PREFIXES = ("placeholder-",)
 _RECENT_FAILURE_WINDOW_SECONDS = 600

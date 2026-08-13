@@ -54,6 +54,18 @@ def normalize_provider_usage(provider: str, raw_usage: Any) -> NormalizedUsage:
         return _normalize_anthropic_usage(usage)
     if provider == "google":
         return _normalize_google_usage(usage)
+    if provider == "openrouter":
+        # Plain OpenAI-shape delegation (issue #152 Phase 1). OpenRouter's
+        # chat-completions usage object nests cached-read tokens under
+        # prompt_tokens_details.cached_tokens — the same field
+        # _normalize_openai_usage already reads — so cache READS are
+        # captured correctly from day one. cache_write_input_tokens is
+        # deliberately left unpopulated here: this is the safe branch either
+        # way (see services/llm/openrouter_adapter.py's module docstring) —
+        # it never risks the None-rate/nonzero-tokens trap in
+        # estimate_cost_usd below, at the cost of a small under-count if
+        # OpenRouter ever reports genuine cache-write tokens.
+        return _normalize_openai_usage(usage)
 
     return NormalizedUsage(
         input_tokens=_int_or_none(usage.get("input_tokens")),

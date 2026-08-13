@@ -109,3 +109,61 @@ a core-gen default, or taking up the deferred cheapest-provider-first lever —
 rides this same golden-corpus gate. The ladder, the CI-enforced hygiene
 invariants, and the quarterly/on-release review process are documented in
 [`CATALOG_HYGIENE.md`](CATALOG_HYGIENE.md).
+
+## openrouter provider promotion (issue #152)
+
+Shipping the openrouter catalog entries, adapter, and per-provider table rows
+is inert by itself: nothing routes there until `LLM_PROVIDER_PRIORITY` is
+edited to include `"openrouter"` and `OPENROUTER_API_KEY` is set to a real
+key. That env flip is a **separate, gated promotion** — the four items below,
+not just the golden-corpus run every other route change requires — because it
+moves more than generation.
+
+1. **Live golden-corpus run.** Same procedure as the rest of this document:
+   run the expanded golden corpus through real openrouter calls
+   (`deepseek/deepseek-v3.2` small, `z-ai/glm-5.2` mid, `qwen/qwen3.8-max`
+   strong) from an operator-approved branch and attach the saved report.
+
+2. **Judge-agreement check — required before step 1's quality numbers can be
+   trusted, not after.** `provider_config.JUDGE_MODELS["openrouter"]` resolves
+   to `deepseek/deepseek-v3.2`. Because `call_judge_model`'s routing is
+   `judge_provider = provider if provider in JUDGE_MODELS else
+   _DEFAULT_JUDGE_PROVIDER` (`gateway.py`), the flip moves the **critic**
+   (`services/pipeline/critic.py`), the **eval judge** itself, the **Rung-2
+   problem compressor** (whose output becomes the problem statement for all
+   four stages), and the GitHub **`pr_check`** evaluator onto the openrouter
+   judge model in the same instant it moves core generation — on artifacts
+   that did not change. Score ≥30 stored artifacts spanning all four stages
+   and both modes (standard + Demo Day) under both
+   `JUDGE_MODELS["anthropic"]` (Haiku 4.5) and `JUDGE_MODELS["openrouter"]`
+   (deepseek-v3.2) before the golden-corpus run's quality numbers are
+   accepted. **Accept only if** mean `|Δ overall_score|` ≤ 0.03 and no scored
+   artifact crosses a `QualityBadge` colour boundary. These numbers are a
+   starting proposal, fixed **before** the run — not chosen after looking at
+   the data.
+
+3. **Privacy Policy update, merged first.**
+   `frontend/src/pages/LegalPrivacy.tsx` currently names only Anthropic,
+   OpenAI, and Google as AI model providers. The day-one openrouter ladder
+   routes through DeepSeek/Z.ai/Alibaba upstreams via the OpenRouter proxy —
+   undisclosed sub-processors today. Update the policy (and its
+   `LegalPrivacy.test.tsx` coverage) to name openrouter and its upstream
+   models before the env flip ships to production — shipping the adapter
+   inert changes nothing here; the flip is what starts transmitting user
+   content to them.
+
+4. **Pinned upstream route (already shipped in code, verify it stays that
+   way).** `services/llm/openrouter_adapter.py` sends
+   `provider: {"data_collection": "deny", "allow_fallbacks": false}` on every
+   request. Without this, OpenRouter can silently answer a model slug from a
+   different upstream host on every call — different quantisation, latency,
+   real output ceiling, and data-retention policy — which would make the
+   golden-corpus run ungraded evidence for "the model that answers next
+   time." Record the resolved upstream (`last_completion.raw[
+   "resolved_upstream_provider"]`, carried through to
+   `llm_cost_events.provider_usage_raw`) in the promotion report so a future
+   reviewer can confirm which host actually served the corpus.
+
+Two of these four are not code, which is exactly why they are called out here
+rather than assumed: a clean `pytest` run and a passing dry-run eval do not
+touch the Privacy Policy or produce the judge-agreement numbers.

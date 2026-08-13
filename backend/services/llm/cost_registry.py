@@ -180,11 +180,15 @@ def _validate_model(provider: str, model: str, config: dict[str, Any]) -> None:
         )
 
     adapter_api = config["adapter_api"]
-    supported_adapter_apis = {
+    adapter_api_table = {
         "anthropic": {"messages"},
         "openai": {"responses", "chat_completions"},
         "google": {"generate_content"},
-    }[provider]
+        "openrouter": {"chat_completions"},
+    }
+    if provider not in adapter_api_table:
+        raise RuntimeError(f"No adapter API table entry for provider {provider!r}")
+    supported_adapter_apis = adapter_api_table[provider]
     if adapter_api not in supported_adapter_apis:
         raise RuntimeError(
             f"{provider}/{model} uses unsupported adapter API: {adapter_api!r}"

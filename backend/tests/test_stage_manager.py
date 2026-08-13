@@ -1362,6 +1362,54 @@ def test_openai_artifact_generation_uses_strong_primary_with_mid_deescalation(
     assert fallback.model != route.model
 
 
+def test_openrouter_artifact_generation_uses_strong_primary_with_mid_deescalation(
+    monkeypatch,
+) -> None:
+    """openrouter (issue #152) gets the SAME frontier-tier shape every other
+    provider gets for full-artifact generation — the explicit table row, not
+    the mid-first .get() default — while the shared cheap ladder stays on
+    deepseek-v3.2 (small), untouched by the artifact promotion.
+    """
+    from services.pipeline import stage_manager as stage_manager_module
+
+    monkeypatch.setattr(stage_manager_module.settings, "core_cheap_primary", True)
+    monkeypatch.setattr(
+        stage_manager_module.settings,
+        "llm_provider_priority",
+        "openrouter,anthropic,openai,google",
+    )
+    # OPENROUTER_API_KEY is not set in the local test .env (unlike the other
+    # three providers), so is_provider_configured would skip it in the
+    # platform-priority loop without this — mirrors the anthropic/refine
+    # tests below, which patch the same two functions for the same reason.
+    monkeypatch.setattr(
+        "services.llm.provider_status.is_provider_configured", lambda _provider: True
+    )
+    monkeypatch.setattr(
+        "services.llm.provider_status.can_route", lambda _provider: True
+    )
+
+    workspace = _make_workspace()
+
+    route = stage_manager_module._route_for_stage_generation("harness", workspace)
+
+    assert route.provider == "openrouter"
+    assert route.model == "qwen/qwen3.8-max"
+    assert route.model_tier == "strong"
+    assert route.reason == "requested_tier"
+    assert route.selection_reason == "active_same_tier"
+    assert stage_manager_module.CORE_GENERATION_TIER_POLICY["openrouter"] == (
+        "small",
+        "mid",
+    )
+    fallback = stage_manager_module._runtime_fallback_route(route)
+    assert fallback is not None
+    assert fallback.provider == "openrouter"
+    assert fallback.model == "z-ai/glm-5.2"
+    assert fallback.model_tier == "mid"
+    assert fallback.model != route.model
+
+
 _REGULATED_PROBLEM = (
     "Design a clinic portal that stores PHI and integrates with an EHR under HIPAA."
 )

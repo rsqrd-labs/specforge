@@ -33,7 +33,7 @@
     },
     "provider": {
       "type": "string",
-      "enum": ["openai", "anthropic", "google"]
+      "enum": ["openai", "anthropic", "google", "openrouter"]
     },
     "model": { "type": "string", "minLength": 1 },
     "model_tier": {

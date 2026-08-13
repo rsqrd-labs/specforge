@@ -28,6 +28,7 @@ def test_catalog_validates_at_startup() -> None:
         ("anthropic", "claude-haiku-4-5-20251001"),
         ("openai", "gpt-5.4-mini"),
         ("google", "gemini-3.6-flash"),
+        ("openrouter", "deepseek/deepseek-v3.2"),
     ],
 )
 def test_core_generation_defaults_are_cheap_primary_models(
@@ -82,6 +83,7 @@ def test_derived_policy_is_byte_identical_to_shipped_cheap_primary() -> None:
     assert core_generation_tier_policy("anthropic") == ("small", "mid")
     assert core_generation_tier_policy("openai") == ("mini", "mid")
     assert core_generation_tier_policy("google") == ("mid", "strong")
+    assert core_generation_tier_policy("openrouter") == ("small", "mid")
 
 
 def test_stage_manager_policy_derives_from_catalog_ladder() -> None:
@@ -312,4 +314,141 @@ def test_core_generation_low_reasoning_flag_off_preserves_catalog_policy(
             "thinking_level"
         ]
         == "high"
+    )
+
+
+# --- issue #152: openrouter provider wiring ----------------------------------
+
+
+def test_openrouter_declared_as_required_provider_with_a_ladder() -> None:
+    assert "openrouter" in REQUIRED_PROVIDERS
+    assert CORE_GENERATION_TIER_LADDER["openrouter"] == ("small", "mid", "strong")
+
+
+def test_openrouter_catalog_entries_use_the_cross_provider_output_convention() -> None:
+    for model_id in (
+        "deepseek/deepseek-v3.2",
+        "z-ai/glm-5.2",
+        "qwen/qwen3.8-max",
+    ):
+        entry = model_entry("openrouter", model_id)
+        assert entry.adapter_api == "chat_completions"
+        assert entry.status == "active"
+        assert entry.default_max_output_tokens == 64000
+        assert entry.rollout_notes
+        # Belt-and-braces cache rates (see model_catalog.py's openrouter
+        # comment block): a None rate with non-zero matching tokens makes
+        # estimate_cost_usd() return None and silently zeroes the cost row.
+        assert entry.cached_input_cost_per_million is not None
+        assert entry.cache_write_5m_cost_per_million is not None
+
+
+def test_openrouter_operation_coverage_matches_the_live_tier_policies() -> None:
+    """Every operation a live policy can resolve at a given openrouter tier
+    must actually find a model there — the silent-continue trap
+    (routing._model_for_operation returns None -> resolve_platform_route_by_
+    provider quietly tries the next PROVIDER instead of raising).
+
+    Asserts _model_for_operation directly rather than through
+    resolve_platform_route_by_provider/get_llm: is_provider_configured() is
+    False for openrouter in CI (no OPENROUTER_API_KEY), so routing through
+    the configured-gated resolvers would pass for the wrong reason.
+    """
+    from services.llm.routing import _model_for_operation
+
+    core_ops = set(CORE_GENERATION_OPERATIONS)
+    cheap_ops = {"refine.focused", "refine.section", "storyboard.generate"}
+
+    # small (deepseek-v3.2): sole core-gen default, full cheap ladder, judge.
+    for operation in core_ops | cheap_ops | {"summary.create", "eval.score"}:
+        resolved = _model_for_operation("openrouter", "small", operation)
+        assert resolved is not None, f"small/{operation} did not resolve"
+    assert _model_for_operation("openrouter", "small", "spec.generate") == (
+        "deepseek/deepseek-v3.2",
+        "active_default",
+    )
+    assert _model_for_operation("openrouter", "small", "eval.score") == (
+        "deepseek/deepseek-v3.2",
+        "active_default",
+    )
+
+    # mid (glm-5.2): retry-down target for core ops, section refine default,
+    # storyboard escalation default. NOT the judge/summary path.
+    for operation in core_ops | cheap_ops:
+        resolved = _model_for_operation("openrouter", "mid", operation)
+        assert resolved is not None, f"mid/{operation} did not resolve"
+    assert _model_for_operation("openrouter", "mid", "refine.section") == (
+        "z-ai/glm-5.2",
+        "active_default",
+    )
+    assert _model_for_operation("openrouter", "mid", "spec.generate") == (
+        "z-ai/glm-5.2",
+        "active_same_tier",
+    )
+    for operation in ("summary.create", "eval.score"):
+        assert _model_for_operation("openrouter", "mid", operation) is None
+
+    # strong (qwen3.8-max): full-artifact primary + storyboard escalation
+    # slot only — deliberately NOT refine.focused/refine.section (matches
+    # the Opus 5 / GPT-5.5 shape; the mid tier always resolves those first).
+    for operation in core_ops | {"storyboard.generate"}:
+        resolved = _model_for_operation("openrouter", "strong", operation)
+        assert resolved is not None, f"strong/{operation} did not resolve"
+    assert _model_for_operation("openrouter", "strong", "spec.generate") == (
+        "qwen/qwen3.8-max",
+        "active_same_tier",
+    )
+    for operation in (
+        "refine.focused",
+        "refine.section",
+        "summary.create",
+        "eval.score",
+    ):
+        assert _model_for_operation("openrouter", "strong", operation) is None
+
+
+def test_openrouter_reasoning_effort_is_gated_on_the_catalog_value() -> None:
+    # deepseek-v3.2 declares no effort knob at all (supports_reasoning=False).
+    policy = model_request_policy("openrouter", "deepseek/deepseek-v3.2")
+    assert policy["supports_reasoning"] is False
+    assert policy["reasoning_effort"] is None
+
+    # glm-5.2 / qwen3.8-max both reason and both declare an explicit effort.
+    assert (
+        model_request_policy("openrouter", "z-ai/glm-5.2")["reasoning_effort"]
+        == "medium"
+    )
+    assert (
+        model_request_policy("openrouter", "qwen/qwen3.8-max")["reasoning_effort"]
+        == "medium"
+    )
+
+
+def test_no_live_call_site_enables_cross_provider_fallback() -> None:
+    """Adding openrouter to PROVIDER_CAPABILITY_REGISTRY makes it reachable
+    from resolve_llm_route's cross-provider branch (routing.py), which
+    iterates ALL registered providers with no is_provider_configured/
+    can_route guard — unlike the two platform resolvers. That branch is only
+    entered when a caller passes allow_cross_provider=True. Phase 1 must stay
+    behaviourally inert while LLM_PROVIDER_PRIORITY omits "openrouter"; this
+    pins that no call site anywhere in the backend flips that default so
+    something can reach openrouter through that unguarded seam.
+
+    Walks the whole services/ and routers/ tree rather than a fixed file
+    list — a hardcoded list of "the current call sites" is exactly the
+    vacuous-check shape the openrouter issue's own reviews flagged elsewhere
+    (a new call site added later would pass a fixed-list version of this
+    test while silently breaking the invariant).
+    """
+    from conftest import BACKEND_ROOT  # noqa: PLC0415
+
+    offenders = []
+    for directory in ("services", "routers"):
+        for path in (BACKEND_ROOT / directory).rglob("*.py"):
+            if "allow_cross_provider=True" in path.read_text(encoding="utf-8"):
+                offenders.append(path.relative_to(BACKEND_ROOT))
+    assert not offenders, (
+        f"{offenders} enable cross-provider fallback, which would make "
+        "openrouter reachable through routing.resolve_llm_route without "
+        "an is_provider_configured/can_route guard."
     )

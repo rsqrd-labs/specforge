@@ -117,6 +117,15 @@ PROVIDER_GATE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
         "summary.create": {"baseline_tier": "mini", "candidate_tiers": ["mini"]},
         "eval.score": {"baseline_tier": "mini", "candidate_tiers": ["mini"]},
     },
+    # Mirrors the anthropic shape: deepseek-v3.2 (small) is openrouter's cheap
+    # core-gen default and carries refine.focused/summary.create/eval.score,
+    # so a future `run_llm_route_eval.py --provider openrouter` resolves
+    # instead of dying on the base table's mini/mid baseline (issue #152).
+    "openrouter": {
+        "refine.focused": {"baseline_tier": "small", "candidate_tiers": ["small"]},
+        "summary.create": {"baseline_tier": "small", "candidate_tiers": ["small"]},
+        "eval.score": {"baseline_tier": "small", "candidate_tiers": ["small"]},
+    },
 }
 
 
