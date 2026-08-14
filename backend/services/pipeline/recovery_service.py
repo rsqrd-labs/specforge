@@ -26,9 +26,7 @@ logger = logging.getLogger(__name__)
 # tasks but can now race a healthy queued arq job and refund it before execution.
 # The absolute run deadline remains the hard settlement bound; stale-heartbeat
 # recovery is therefore no shorter than that deadline.
-_RUN_HEARTBEAT_GRACE_SECONDS = max(
-    120, settings.stage_generation_deadline_seconds
-)
+_RUN_HEARTBEAT_GRACE_SECONDS = max(120, settings.stage_generation_deadline_seconds)
 # _POLL_INTERVAL_SECONDS, _RECOVERY_LOCK_KEY, and _RECOVERY_LOCK_TTL are
 # canonical in stage_manager.py and imported above.  H-3 — T-179.
 

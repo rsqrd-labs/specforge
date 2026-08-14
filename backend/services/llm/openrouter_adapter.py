@@ -130,10 +130,9 @@ def _wrap_openrouter_error(exc: openai.OpenAIError) -> ProviderError:
         "error_type": error_type,
         "provider_code": provider_code,
     }
-    is_rate_limited = (
-        isinstance(exc, getattr(openai, "RateLimitError", ()))
-        or status in {429, 529}
-    )
+    is_rate_limited = isinstance(
+        exc, getattr(openai, "RateLimitError", ())
+    ) or status in {429, 529}
     if is_rate_limited:
         return ProviderRateLimitError(
             "openrouter",

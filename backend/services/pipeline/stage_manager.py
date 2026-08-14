@@ -3158,9 +3158,11 @@ class StageManager:
                 retry_reserve = float(settings.stage_retry_min_remaining_seconds)
                 attempt_hard_cap = min(
                     float(settings.stage_provider_call_timeout_seconds),
-                    max(1.0, remaining - retry_reserve)
-                    if remaining > retry_reserve * 2
-                    else remaining,
+                    (
+                        max(1.0, remaining - retry_reserve)
+                        if remaining > retry_reserve * 2
+                        else remaining
+                    ),
                 )
                 # Recomputed on EVERY attempt (including a fallback retry) from
                 # whatever run budget genuinely remains right now. A deadline
@@ -4248,9 +4250,7 @@ class StageManager:
                                 else {}
                             )
                             if gate_payload:
-                                yield json.dumps(
-                                    {"quality_gate_failed": gate_payload}
-                                )
+                                yield json.dumps({"quality_gate_failed": gate_payload})
                         yield self._terminal_event(run)
                     return
 
@@ -4276,9 +4276,7 @@ class StageManager:
                             elapsed_seconds=max(
                                 0,
                                 int(
-                                    (
-                                        datetime.now(UTC) - run.started_at
-                                    ).total_seconds()
+                                    (datetime.now(UTC) - run.started_at).total_seconds()
                                 ),
                             ),
                         )
@@ -4436,9 +4434,7 @@ class StageManager:
                     stage.type,
                 )
 
-        preflight_heartbeat = asyncio.create_task(
-            _stage_db_heartbeat(stage_id, run_id)
-        )
+        preflight_heartbeat = asyncio.create_task(_stage_db_heartbeat(stage_id, run_id))
         preflight_task = asyncio.create_task(
             _prepare_prompt(), name=f"stage-worker-preflight:{run_id}"
         )

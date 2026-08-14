@@ -263,9 +263,7 @@ async def test_worker_readmission_does_not_double_count_provider_rpm(
     monkeypatch.setattr(settings, "provider_max_generations_per_minute", 1)
     redis = _ZSetRedis()
 
-    api_admission = await admit_generation(
-        redis, user_id="u1", provider="anthropic"
-    )
+    api_admission = await admit_generation(redis, user_id="u1", provider="anthropic")
     worker_admission = await admit_generation(
         redis,
         user_id="u1",
@@ -289,9 +287,7 @@ async def test_durable_handoff_keeps_global_leases_until_worker_finishes(
     monkeypatch.setattr(settings, "provider_max_generations_per_minute", 0)
     redis = _ZSetRedis()
 
-    api_admission = await admit_generation(
-        redis, user_id="u1", provider="anthropic"
-    )
+    api_admission = await admit_generation(redis, user_id="u1", provider="anthropic")
     handoff = api_admission.handoff_payload()
     api_admission.complete_handoff()
 

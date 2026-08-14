@@ -1190,9 +1190,7 @@ def _patch_pipeline_session(monkeypatch):
     monkeypatch.setattr(
         StageManager, "_enqueue_generation_job", _execute_enqueued_inline
     )
-    monkeypatch.setattr(
-        stage_manager_module, "_GENERATION_OBSERVER_POLL_SECONDS", 0
-    )
+    monkeypatch.setattr(stage_manager_module, "_GENERATION_OBSERVER_POLL_SECONDS", 0)
     # Routing tests must be deterministic and never depend on whichever local
     # provider keys/circuit state happen to exist on the developer machine.
     monkeypatch.setattr(provider_status, "is_provider_configured", lambda _p: True)
@@ -1748,8 +1746,9 @@ async def test_generate_success_deducts_credits_and_saves_version() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generation_queue_failure_refunds_and_returns_diagnostic_terminal(
-) -> None:
+async def test_generation_queue_failure_refunds_and_returns_diagnostic_terminal() -> (
+    None
+):
     from services.queue import QueueUnavailableError
 
     workspace_id = uuid4()

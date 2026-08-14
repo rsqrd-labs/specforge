@@ -134,6 +134,8 @@ async def stage_generate(ctx: dict[str, Any], payload: dict[str, Any]) -> None:
             slice_seconds=_GENERATION_JOB_SLICE_SECONDS,
         )
         raise Retry(defer=0) from exc
+
+
 # Periodic drift reconciliation interval (minutes).
 _DRIFT_CRON_MINUTES = {0, 15, 30, 45}
 # Daily webhook-idempotency retention purge — off-peak, off the top of the hour
