@@ -620,14 +620,26 @@ jobs:
         run: |
           uv run alembic upgrade head
           echo "E2E_ACCESS_TOKEN=$(uv run python -m scripts.seed_frontend_e2e)" >> "$GITHUB_ENV"
+          nohup uv run python -m scripts.run_frontend_e2e_generation_worker > /tmp/thought2build-e2e-generation-worker.log 2>&1 &
+          generation_worker_pid=$!
           nohup uv run python -m scripts.run_frontend_e2e_server > /tmp/thought2build-e2e-api.log 2>&1 &
+          api_pid=$!
           for attempt in $(seq 1 30); do
+            if ! kill -0 "$generation_worker_pid" 2>/dev/null; then
+              cat /tmp/thought2build-e2e-generation-worker.log
+              exit 1
+            fi
+            if ! kill -0 "$api_pid" 2>/dev/null; then
+              cat /tmp/thought2build-e2e-api.log
+              exit 1
+            fi
             if curl --fail --silent http://127.0.0.1:8000/health >/dev/null; then
               exit 0
             fi
             sleep 1
           done
           cat /tmp/thought2build-e2e-api.log
+          cat /tmp/thought2build-e2e-generation-worker.log
           exit 1
 
       - name: Audit
