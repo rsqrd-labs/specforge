@@ -70,10 +70,10 @@ usage — it's not an extra fee on top. Everything above $5 is billed on
 per GB-month), *not* CPU — an idle async app burns almost no CPU between
 requests, so CPU is a small slice of the bill.
 
-For this launch (backend + `worker` + `worker-fast` + Postgres + Redis, no
-real traffic yet) expect roughly **$22–28/month** left alone, dropping to
-**~$18–23/month** with the three no-downside levers this runbook already bakes
-in:
+For this launch (backend + `worker` + `worker-fast` + `worker-generation` +
+Postgres + Redis, no real traffic yet) expect the generation lane to add one
+worker service to the prior estimate. Apply the three low-risk levers this
+runbook bakes in:
 
 | Lever | Where it's applied | Saves |
 |---|---|---|
@@ -82,11 +82,11 @@ in:
 | Postgres memory config trimmed for a tiny DB | Phase 1, step 7 | ~$1–2/mo |
 
 All three are **reversible with zero reliability cost at pre-launch scale** —
-that's why they're the default here. Two bigger levers (merging the two worker
+that's why they're the default here. Two bigger levers (merging the three worker
 processes; lazy-loading heavy libs in the workers) are deliberately **not**
-taken: the first reverts the `worker`/`worker-fast` split that protects paid
-credit grants (a documented deploy invariant), and the second is a code change
-worth doing only after real memory numbers justify it.
+taken: the first reverts the worker-lane isolation that protects paid credit
+grants and durable generation (a documented deploy invariant), and the second
+is a code change worth doing only after real memory numbers justify it.
 
 **These are modeled estimates, not a quote.** Railway shows real per-service
 memory within a day of running — watch it (Phase 12) and let the actual graph,
@@ -201,13 +201,13 @@ A few things specific to **this** launch, on top of the handbook:
 4. **`FRONTEND_URL`** — same story, set a placeholder for now
    (`https://placeholder.example.com` is fine), you'll fix it in Phase 5.
 
-5. This app also needs **two worker processes**, not just the web service —
-   `worker` (bulk jobs) and `worker-fast` (billing + PR-check jobs). Even
-   with payments off, create both now so nothing is missing later:
+5. This app also needs **three worker processes**, not just the web service —
+   `worker` (bulk jobs), `worker-fast` (billing + PR-check jobs), and
+   `worker-generation` (paid LLM generation). Create all three now:
    - Create the backend service as the handbook describes, then duplicate it
-     twice more (or add two more "GitHub Repo" services from the same repo),
+     three more times (or add three more "GitHub Repo" services from the same repo),
      rooted at `backend` the same way.
-   - On each of the three services, set **Settings → Config-as-code → Config
+   - On each of the four services, set **Settings → Config-as-code → Config
      File Path** explicitly:
 
      | Service name | Config File Path |
@@ -215,19 +215,19 @@ A few things specific to **this** launch, on top of the handbook:
      | `backend` | `/backend/railway.json` |
      | `worker` | `/backend/railway.worker.json` |
      | `worker-fast` | `/backend/railway.worker-fast.json` |
+     | `worker-generation` | `/backend/railway.worker-generation.json` |
 
-   - Copy the **same environment variables** onto `worker` and `worker-fast`
+   - Copy the **same environment variables** onto all three worker services
      as you set on `backend` (Railway's "Variable References" / "Shared
      Variables" feature can do this in one place — use it if offered, it
-     saves you from keeping three copies in sync).
+     saves you from keeping four copies in sync).
    - Only the `backend` service needs **Generate Domain** (Phase 1, step 14
      in the handbook) — workers don't serve HTTP traffic.
 
-6. After all three services deploy, confirm all three show a healthy
+6. After all four services deploy, confirm all four show a healthy
    deployment in the **Deployments** tab (not just `backend`) — a missing
-   `worker-fast` is easy to overlook and, per `docs/RUNBOOK.md` §16, it means
-   nothing processes billing webhooks or PR checks later, even though the app
-   otherwise looks fine.
+   `worker-fast` and `worker-generation` are easy to overlook. Without the
+   latter, paid generation jobs queue but never run.
 
 7. **Cost levers on the Postgres database** (both safe, do them now while the
    DB is empty):
@@ -242,8 +242,9 @@ A few things specific to **this** launch, on top of the handbook:
      (~$1–2/mo) — skip it if the plugin doesn't expose tuning; **never** trim it
      so far the DB can't serve the smoke test in Phase 10.
 
-**✅ You should now have:** three Railway services (`backend`, `worker`,
-`worker-fast`) all deployed successfully, `WEB_CONCURRENCY=1` set on `backend`,
+**✅ You should now have:** four Railway services (`backend`, `worker`,
+`worker-fast`, `worker-generation`) all deployed successfully,
+`WEB_CONCURRENCY=1` set on `backend`,
 the Postgres volume at 1 GB, and
 `https://<your-railway-backend-url>/health` returning
 `{"status":"ok",...}` in your browser.
@@ -408,7 +409,7 @@ intentionally gated off until you flip this, so it can't fire during earlier
 testing.
 
 Only the Vercel secrets are needed. Railway deploys itself: each of `backend`,
-`worker`, and `worker-fast` is connected to `main` with **Auto deploys when
+`worker`, `worker-fast`, and `worker-generation` is connected to `main` with **Auto deploys when
 pushed to GitHub** + **Wait for CI** (service → **Settings** → **Source**), so it
 builds the commit once CI is green. CI has no `railway up` step and needs no
 `RAILWAY_TOKEN` — re-adding one would double-build every push and fail on the
@@ -426,7 +427,7 @@ environment; you have one environment, so treat this as the trimmed
 equivalent. Go through it right before you announce the site is live:
 
 **Environment sanity**
-- [ ] `ENVIRONMENT=production` is set on `backend`, `worker`, `worker-fast`
+- [ ] `ENVIRONMENT=production` is set on all four application services
 - [ ] `FRONTEND_URL` starts with `https://` and matches your real domain
       exactly (no trailing slash)
 - [ ] `ALLOWED_HOSTS` includes `api.thought2build.com`
@@ -442,8 +443,8 @@ equivalent. Go through it right before you announce the site is live:
 
 **It actually boots correctly**
 - [ ] `https://api.thought2build.com/health` returns `{"status":"ok",...}`
-- [ ] Railway's **Deployments** tab shows `backend`, `worker`, and
-      `worker-fast` all green/running, not just `backend`
+- [ ] Railway's **Deployments** tab shows `backend`, `worker`, `worker-fast`, and
+      `worker-generation` all green/running, not just `backend`
 - [ ] Database migrations ran without error — this happens automatically on
       every backend deploy (`entrypoint.sh` runs `alembic upgrade head`
       before starting the server); check the `backend` service's deploy logs
@@ -617,7 +618,8 @@ reconciliation) once you're past the first-week basics covered here.
 ## Quick reference: full checklist in one place
 
 - [ ] Phase 0 — secrets generated
-- [ ] Phase 1 — Railway: Postgres + Redis + `backend`/`worker`/`worker-fast`
+- [ ] Phase 1 — Railway: Postgres + Redis + `backend`/`worker`/`worker-fast`/
+      `worker-generation`
       deployed, `/health` OK
 - [ ] Phase 2 — `api.thought2build.com` → Railway, HTTPS valid
 - [ ] Phase 3 — Vercel frontend deployed with `VITE_API_URL` set

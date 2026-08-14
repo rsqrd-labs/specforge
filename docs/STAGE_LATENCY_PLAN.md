@@ -4,9 +4,10 @@
 
 - Target p90 end-to-end stage generation under 120 seconds; p95 over 180 seconds is a regression signal.
 - Core stages use mandatory dependency-wave chunking and prompt caching. The
-  durable five-minute lifecycle supersedes the former repair-loop design.
-- Output budgets remain operation-scoped; token-limit failures save a blocked
-  partial and never launch an automatic repair call.
+  durable worker lifecycle uses a 600-second default run deadline and a shorter
+  per-attempt cap that preserves alternate-provider retry time.
+- Output budgets remain operation/model-scoped; one provider limit-stop repair
+  may increase the output budget to the model's declared ceiling.
 
 ## Implemented V1 Changes
 

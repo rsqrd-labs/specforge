@@ -62,10 +62,12 @@ logger = structlog.get_logger(__name__)
 #   - FAST_QUEUE_NAME = a separate queue drained by its OWN worker process
 #     (`arq worker.FastWorkerSettings`), so a bulk-export storm cannot occupy its
 #     job slots. Carries paid credit grants and latency-sensitive GitHub updates.
+#   - GENERATION_QUEUE_NAME = a separate durable lane for paid LLM artifacts,
+#     isolated from both bulk exports and webhook/credit latency.
 #
 # Routing is by job NAME via queue_for_job(), so every enqueue() call site is
 # unchanged — the home queue is resolved centrally (DRY) and worker.py partitions
-# the two WorkerSettings classes off the SAME table.
+# the three WorkerSettings classes off the SAME table.
 #
 # DEPLOY INVARIANT: the FastWorkerSettings process MUST be running in every
 # environment, or fast-queue jobs (paid grants) never drain. The
@@ -75,6 +77,11 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 BULK_QUEUE_NAME = "arq:queue"  # arq's built-in default queue name.
 FAST_QUEUE_NAME = "arq:queue:fast"
+# Paid LLM generation has a different failure and capacity profile from both
+# GitHub bulk I/O and billing webhooks.  It therefore gets an independently
+# scalable worker lane: a deploy/restart may interrupt a worker process, but arq
+# retains and retries the generation job under its durable generation-run id.
+GENERATION_QUEUE_NAME = "arq:queue:generation"
 
 # Jobs whose latency is user-/money-visible and must not queue behind a bulk
 # GitHub-export storm (audit §F5): paid credit grants, webhook reconciliation,
@@ -90,6 +97,8 @@ _FAST_QUEUE_JOBS = frozenset(
     }
 )
 
+_GENERATION_QUEUE_JOBS = frozenset({"stage_generate"})
+
 
 def queue_for_job(job: str) -> str:
     """Resolve a job's home queue from its name (F5 — single source of truth).
@@ -98,6 +107,8 @@ def queue_for_job(job: str) -> str:
     partition which functions each WorkerSettings class drains), so the split can
     never drift between the producer and consumer sides.
     """
+    if job in _GENERATION_QUEUE_JOBS:
+        return GENERATION_QUEUE_NAME
     return FAST_QUEUE_NAME if job in _FAST_QUEUE_JOBS else BULK_QUEUE_NAME
 
 

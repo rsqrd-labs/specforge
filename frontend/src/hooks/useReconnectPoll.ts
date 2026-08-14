@@ -22,7 +22,7 @@ export const RECONNECT_POLL_DELAY_MS = 3000
 // its whole life.
 export const RECONNECT_POLL_SLOW_DELAY_MS = 10000
 export const RECONNECT_POLL_SLOWDOWN_AFTER_MS = 120_000
-// Total lifetime exceeds the 300-second absolute generation deadline plus its
+// Total lifetime exceeds the configured generation deadline plus its
 // 30-second recovery grace. The recovery sweep terminalises any run that misses
 // that bound, so reconnect polling never silently abandons an active overlay.
 export const RECONNECT_POLL_MAX_MS = 6 * 60 * 1000

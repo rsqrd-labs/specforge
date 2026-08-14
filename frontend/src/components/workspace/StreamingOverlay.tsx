@@ -495,7 +495,7 @@ export function StreamingOverlay({
             </p>
             {variant !== "patch" ? (
               <p className="generation-deadline">
-                Five-minute limit · {formatElapsed(deadlineSeconds)} remaining
+                Processing limit · {formatElapsed(deadlineSeconds)} remaining
               </p>
             ) : null}
             {showParts ? (
@@ -586,7 +586,7 @@ export function StreamingOverlay({
           ) : null}
           {isPipeline ? (
             <p className="generation-deadline">
-              Five-minute limit · {formatElapsed(deadlineSeconds)} remaining
+              Processing limit · {formatElapsed(deadlineSeconds)} remaining
             </p>
           ) : null}
         </div>

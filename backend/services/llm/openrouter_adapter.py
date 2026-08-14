@@ -15,8 +15,8 @@ stream decoder drops any line starting with ``:`` before it becomes a chunk
 (``openai/_streaming.py``), so those comments never reach this adapter and
 can never reset the stream watchdog's idle timer. This is an accepted,
 documented gap, not an oversight: the idle timeout
-(``stage_provider_idle_timeout_seconds``, default 180s) already tolerates a
-generous cold-start/queueing delay, and reasoning-delta chunks — which
+(``stage_provider_idle_timeout_seconds``, default 240s) matches the attempt cap,
+so a dropped comment cannot pre-empt the hard deadline. Reasoning-delta chunks — which
 carry the actual multi-minute silent phases the watchdog exists to survive
 (issue #19) — arrive as real ``data:`` events with ``delta.content = None``
 and DO reach guard 3 below, which yields the empty liveness sentinel exactly
@@ -36,33 +36,30 @@ catalog-rate estimate — OpenRouter's ~5% platform fee is not folded into
 ``estimate_cost_usd``, which stays authoritative from catalog rates so the
 ledger's cost math stays shaped like every other provider).
 
-Route pinning — the single most load-bearing thing this adapter does.
+Route preference — the single most load-bearing thing this adapter does.
 OpenRouter serves one model slug from many upstream hosts that differ in
 quantisation (fp4/fp8/unknown), price, cache-read price, real output ceiling,
 latency and data-retention policy, and it load-balances between them by
-default. ``provider.allow_fallbacks = false`` does **NOT** pin on its own —
-OpenRouter's docs are explicit that it "is combined with the ``order`` field
-… to restrict the providers that OpenRouter will prioritize to just your
-chosen list", so with no ``order``/``only`` it merely stops fallback past a
-list that was never supplied. Every request therefore sends an explicit
-``provider.only`` allowlist sourced from the catalog entry's
-``upstream_providers`` (plus ``allow_fallbacks: false`` and
-``data_collection: "deny"``).
+default. Every request sends an explicit ``provider.order`` sourced from the
+catalog entry's ``upstream_providers`` so the cache-compatible, costed host is
+tried first, plus ``data_collection: "deny"``. ``allow_fallbacks`` remains
+enabled: if that host is down, OpenRouter may use another privacy-compatible
+endpoint for the same open model instead of failing a paid run. The resolved
+upstream and provider-reported cost remain captured for reconciliation.
 
-Three things break without that allowlist, and the first is the reason the
+Three things break without that preference, and the first is the reason the
 DeepSeek ladder exists at all:
 
-* **Prompt caching would be structurally zero.** On ``deepseek-v4-flash``,
+* **Prompt caching would usually be zero.** On ``deepseek-v4-flash``,
   ``supports_implicit_caching`` is true for 1 of 19 upstream hosts (DeepSeek's
   own). An unpinned request lands on a caching host ~5% of the time, and
   prefix caching is per-host anyway, so consecutive chunks of one stage share
   nothing.
-* **Cost accounting would be fiction.** Catalog rates are the pinned host's;
-  the alias-level price is a different number (deepseek-v4-pro: $0.435/$0.870
-  pinned vs $1.168/$2.336 at the alias).
-* **The promotion gate would be unreproducible.** The golden corpus would
-  grade whichever host answered that afternoon at whichever quantisation,
-  while production runs whichever answers next.
+* **Cost accounting needs fallback evidence.** Catalog rates describe the
+  preferred host; provider-reported cost and resolved-upstream metadata identify
+  the exceptional fallback case.
+* **The promotion gate stays reproducible in the healthy case.** Normal traffic
+  tries the declared host first; fallback is an availability escape hatch.
 
 Reasoning control: core generation sends the catalog's declared effort, but
 the cheap non-core operations (judge/eval, focused+section refine, summary)
@@ -89,17 +86,18 @@ sent — DeepSeek caching is automatic and needs none.
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 
 import httpx
 import openai
 
 from config import settings
 from services.llm.base import (
-    RATE_LIMIT_STATUS_CODES,
     BaseLLMAdapter,
     ProviderError,
     ProviderRateLimitError,
+    ProviderTerminalError,
+    ProviderUnavailableError,
     classify_provider_status,
     extract_retry_after,
 )
@@ -113,11 +111,9 @@ _BASE_URL = "https://openrouter.ai/api/v1"
 # other adapter: connect/write short (fast-fail), read long (streaming).
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=10.0, pool=5.0)
 
-# Base upstream-route policy (see module docstring). The ``only`` allowlist is
-# added per-model from the catalog entry's ``upstream_providers``; these two
-# fields alone do NOT pin anything — ``allow_fallbacks`` is a no-op without an
-# explicit list, and ``data_collection`` is a policy filter, not a selector.
-_BASE_PROVIDER_ROUTE = {"data_collection": "deny", "allow_fallbacks": False}
+# The catalog's preferred host is tried first, but another privacy-compatible
+# endpoint for the same open model may recover a paid run when it is unavailable.
+_BASE_PROVIDER_ROUTE = {"data_collection": "deny", "allow_fallbacks": True}
 
 
 def _wrap_openrouter_error(exc: openai.OpenAIError) -> ProviderError:
@@ -128,20 +124,79 @@ def _wrap_openrouter_error(exc: openai.OpenAIError) -> ProviderError:
     observability all attribute failures to the provider actually called.
     """
     status = classify_provider_status(exc)
+    error_type, provider_code, message = _openrouter_error_metadata(exc)
+    common = {
+        "status_code": status,
+        "error_type": error_type,
+        "provider_code": provider_code,
+    }
     is_rate_limited = (
         isinstance(exc, getattr(openai, "RateLimitError", ()))
-        or status in RATE_LIMIT_STATUS_CODES
+        or status in {429, 529}
     )
     if is_rate_limited:
         return ProviderRateLimitError(
-            "openrouter", exc, retry_after=extract_retry_after(exc)
+            "openrouter",
+            exc,
+            retry_after=extract_retry_after(exc),
+            **common,
         )
-    return ProviderError("openrouter", exc)
+    # OpenRouter uses 503 both for transient capacity and for a routing policy
+    # that matches zero upstreams.  Retrying the latter unchanged only burns the
+    # run deadline, so recognise the stable typed/message forms and fail fast.
+    impossible_route = status == 503 and (
+        "no available model provider" in message.lower()
+        or "routing requirement" in message.lower()
+        or error_type
+        in {
+            "no_available_provider",
+            "provider_routing_error",
+            "provider_unavailable_for_parameters",
+        }
+    )
+    if status in {400, 401, 402, 403} or impossible_route:
+        return ProviderTerminalError(
+            "openrouter",
+            exc,
+            failover_allowed=status in {401, 402, 503},
+            **common,
+        )
+    if status in {408, 502, 503} or (status is not None and status >= 500):
+        return ProviderUnavailableError("openrouter", exc, **common)
+    return ProviderError("openrouter", exc, **common)
 
 
 def _wrap_openrouter_transport_error(exc: Exception) -> ProviderError:
     """Normalise SDK-bypassing stream transport failures."""
-    return ProviderError("openrouter", exc)
+    return ProviderUnavailableError(
+        "openrouter", exc, error_type="transport", status_code=None
+    )
+
+
+def _openrouter_error_metadata(
+    exc: Exception,
+) -> tuple[str | None, str | None, str]:
+    """Extract OpenRouter's stable typed-error vocabulary from SDK envelopes."""
+
+    body = getattr(exc, "body", None)
+    error: Mapping | None = body if isinstance(body, Mapping) else None
+    if error is not None and isinstance(error.get("error"), Mapping):
+        error = error["error"]
+    metadata = error.get("metadata") if isinstance(error, Mapping) else None
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+    error_type = metadata.get("error_type")
+    if error_type is None and isinstance(error, Mapping):
+        error_type = error.get("error_type") or error.get("type")
+    provider_code = metadata.get("provider_code")
+    if provider_code is None and isinstance(error, Mapping):
+        provider_code = error.get("code")
+    message = error.get("message") if isinstance(error, Mapping) else None
+    return (
+        str(error_type) if error_type is not None else None,
+        str(provider_code) if provider_code is not None else None,
+        str(message or exc),
+    )
 
 
 class OpenRouterAdapter(BaseLLMAdapter):
@@ -296,15 +351,13 @@ class OpenRouterAdapter(BaseLLMAdapter):
     def _provider_route(self) -> dict:
         """The upstream-host routing block for this model (see module docstring).
 
-        ``only`` is omitted entirely when the catalog declares no
-        ``upstream_providers``. That matters: an empty allowlist is not "no
-        preference" to OpenRouter, it is "no provider meets your routing
-        requirements" — a permanent 503 on every call.
+        ``order`` is omitted when the catalog declares no upstream preference;
+        OpenRouter then uses its normal availability-aware routing.
         """
         route = dict(_BASE_PROVIDER_ROUTE)
         allowlist = self._request_policy.get("upstream_providers") or ()
         if allowlist:
-            route["only"] = list(allowlist)
+            route["order"] = list(allowlist)
         return route
 
     def _reasoning_field(self, *, suppress_reasoning: bool) -> dict | None:
@@ -346,7 +399,7 @@ def _capture_resolved_model(
     if resolved_model:
         completion.raw["resolved_model"] = str(resolved_model)
     # OpenRouter echoes the concrete upstream host it routed to on some
-    # responses (provider pinning above still applies; this is purely for
+    # responses (the preferred-host policy above still applies; this is for
     # ledger/forensics visibility into which host actually served the call).
     provider_name = getattr(response_or_chunk, "provider", None)
     if provider_name:

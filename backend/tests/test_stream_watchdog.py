@@ -204,11 +204,11 @@ def test_runtime_fallback_route_escalates_on_same_provider(
     assert fallback.model_tier == "mid"
 
 
-def test_runtime_fallback_route_stops_when_already_at_escalation_tier(
+def test_runtime_fallback_route_moves_provider_at_last_same_provider_tier(
     monkeypatch,
 ) -> None:
-    # Under the cheap-primary policy a mid-tier failure has nowhere left to
-    # escalate (mid IS the escalation tier).  Pin it on explicitly.
+    # Once the same-provider ladder is exhausted, recovery must continue on a
+    # healthy configured provider instead of failing the paid run.
     from services.llm import tier_policy
 
     monkeypatch.setattr(tier_policy.settings, "core_cheap_primary", True)
@@ -220,7 +220,33 @@ def test_runtime_fallback_route_stops_when_already_at_escalation_tier(
     mid.operation = "spec.generate"
 
     fallback = _runtime_fallback_route(mid)
-    assert fallback is None
+    assert fallback is not None
+    assert fallback.provider != mid.provider
+    assert fallback.cross_provider_fallback is True
+
+
+def test_runtime_fallback_route_can_skip_throttled_provider(monkeypatch) -> None:
+    """A spent 429 retry budget must change providers, not model size."""
+    primary = MagicMock()
+    primary.provider = "anthropic"
+    primary.model = "claude-haiku-4-5-20251001"
+    primary.model_tier = "small"
+    primary.operation = "spec.generate"
+
+    def unexpected_same_provider_route(**_kwargs):
+        raise AssertionError("same-provider escalation must be skipped after 429s")
+
+    monkeypatch.setattr(
+        stage_manager_module,
+        "resolve_llm_route",
+        unexpected_same_provider_route,
+    )
+
+    fallback = _runtime_fallback_route(primary, allow_same_provider=False)
+
+    assert fallback is not None
+    assert fallback.provider != primary.provider
+    assert fallback.cross_provider_fallback is True
 
 
 def test_output_budgets_carry_reasoning_headroom() -> None:
@@ -274,22 +300,17 @@ def test_chunk_output_budgets_are_fixed_and_model_clamped(monkeypatch) -> None:
     harness_contract, harness_files = _chunk_specs_for_stage("harness")
     tasks_chunk = _chunk_specs_for_stage("tasks")[0]
 
-    # ONE budget for every chunk. A chunk is exactly one provider call bounded
-    # by stage_provider_call_timeout_seconds (270s), and at the measured ~38
-    # visible tok/s no call can emit more than ~9,120 tokens on the platform
-    # primary — so the per-chunk budgets were never the binding constraint, and
-    # their divergence has already caused one production bug (the Demo Day Files
-    # chunk silently getting half the budget). It stays generous for the faster
-    # fallback providers and for the stopped_by_limit doubling repair.
-    assert _chunk_output_budget("spec", spec_chunk, route) == 32_768
-    assert _chunk_output_budget("plan", plan_chunk, route) == 32_768
-    assert _chunk_output_budget("tasks", tasks_chunk, route) == 32_768
-    assert _chunk_output_budget("harness", harness_contract, route) == 32_768
-    assert _chunk_output_budget("harness", harness_files, route) == 32_768
+    # Every chunk uses the operation's source-of-truth budget. The prior hardcoded
+    # 32768 silently contradicted OUTPUT_TOKEN_BUDGETS and left no usable repair
+    # headroom for reasoning-heavy models.
+    assert _chunk_output_budget("spec", spec_chunk, route) == 49_152
+    assert _chunk_output_budget("plan", plan_chunk, route) == 49_152
+    assert _chunk_output_budget("tasks", tasks_chunk, route) == 49_152
+    assert _chunk_output_budget("harness", harness_contract, route) == 49_152
+    assert _chunk_output_budget("harness", harness_files, route) == 49_152
 
-    monkeypatch.setattr(
-        stage_manager_module, "model_max_output_tokens", lambda *_: 8_192
-    )
+    route.provider = "google"
+    route.model = "gemini-3.5-flash-lite"
     assert _chunk_output_budget("spec", spec_chunk, route) == 8_192
 
 
@@ -298,14 +319,26 @@ def test_settings_reject_generation_bounds_outside_contract() -> None:
 
     import config
 
-    with pytest.raises(ValidationError, match="must be 300"):
-        config.Settings(stage_generation_deadline_seconds=301)
-    with pytest.raises(ValidationError, match="must be 1..90"):
-        config.Settings(stage_provider_idle_timeout_seconds=91)
+    with pytest.raises(ValidationError, match="between 300 and 3600"):
+        config.Settings(stage_generation_deadline_seconds=299)
+    with pytest.raises(ValidationError, match="cannot exceed the call timeout"):
+        config.Settings(stage_provider_idle_timeout_seconds=241)
     with pytest.raises(ValidationError, match="at least 45"):
         config.Settings(stage_retry_min_remaining_seconds=44)
+    with pytest.raises(ValidationError, match="PROVIDER_CALLS_PER_PROCESS"):
+        config.Settings(max_concurrent_provider_calls_per_process=0)
+    with pytest.raises(ValidationError, match="smaller than"):
+        config.Settings(
+            stage_generation_deadline_seconds=300,
+            stage_generation_finalise_reserve_seconds=30,
+            stage_retry_min_remaining_seconds=270,
+        )
     with pytest.raises(ValidationError, match="must be 1..270"):
-        config.Settings(stage_provider_call_timeout_seconds=271)
+        config.Settings(
+            stage_generation_deadline_seconds=300,
+            stage_generation_finalise_reserve_seconds=30,
+            stage_provider_call_timeout_seconds=271,
+        )
 
 
 def test_call_cap_cannot_exceed_the_provider_budget_the_deadline_grants() -> None:
@@ -313,27 +346,18 @@ def test_call_cap_cannot_exceed_the_provider_budget_the_deadline_grants() -> Non
     never reach: the watchdog takes min(call_remaining, run_remaining), so the
     advertised cap silently becomes a lie and the real kill lands earlier.
 
-    Measured 2026-07-30 (generation 65fe5f10): Opus 5 chunks died at exactly the
-    180s cap, and the mid-tier retries then died at ~90s — the remainder of the
-    run budget, not the cap they were nominally granted. The cap was raised
-    180->240 (30s of deliberate margin below the 270s true budget) then, and
-    240->270 on 2026-08-06 when Opus 5 moved to effort=high and needed more of
-    the call's own budget to finish a chunk before the watchdog kills it.
+    The run deadline is now long enough to leave a real alternate-provider
+    attempt after the first call cap, instead of allowing one 270-second call to
+    consume a 300-second run.
     """
     import config
 
-    assert config.settings.stage_provider_call_timeout_seconds == 270
+    assert config.settings.stage_provider_call_timeout_seconds == 240
     budget = (
         config.settings.stage_generation_deadline_seconds
         - config.settings.stage_generation_finalise_reserve_seconds
     )
     assert config.settings.stage_provider_call_timeout_seconds <= budget
 
-    # The validator now enforces ONLY this dynamic budget-derived ceiling (a
-    # prior version also hardcoded a stricter static 240 literal below it,
-    # removed when the cap was raised to the true 270s budget). The ceiling is
-    # deliberately UNREACHABLE-as-a-separate-constraint today: the deadline and
-    # reserve are pinned to exactly 300/30 by checks that run first, so nothing
-    # can shrink the budget below the cap. It is there to fail loudly the day
-    # those pins are relaxed without anyone revisiting the cap, which is
-    # precisely how 180 outlived its justification.
+    # The validator enforces this dynamic budget-derived ceiling for every valid
+    # deadline/reserve combination.

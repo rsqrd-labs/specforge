@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import logging
 import os
@@ -38,6 +39,10 @@ _INSTANCE_CACHE_MAX = 256
 # Adapters older than this are evicted on cache hit and rebuilt fresh.
 # Ensures stale httpx connection pools are recycled periodically.  L-1 — T-223.
 _INSTANCE_CACHE_TTL_SECONDS: float = 3600.0
+# Cached entries are adapter *templates*.  ``get_llm`` always returns a shallow
+# fork so request-local mutable fields (most importantly ``last_completion``)
+# can never be shared by concurrent chunks.  The expensive SDK client / HTTP
+# connection pool remains shared by the fork through the shallow copy.
 _INSTANCES: OrderedDict[tuple[str, str, str, str], tuple["BaseLLMAdapter", float]] = (
     OrderedDict()
 )
@@ -60,7 +65,13 @@ def get_llm(
     operation: str | None = None,
     bypass_circuit: bool = False,
 ) -> "BaseLLMAdapter":
-    """Return a cached adapter for *provider* / *model*.
+    """Return a request-local adapter for *provider* / *model*.
+
+    The bounded cache owns provider SDK clients and their connection pools, but
+    callers receive a shallow fork of the cached template.  Concrete adapters
+    keep completion metadata on ``self``; returning the template directly made
+    parallel stage chunks race on ``last_completion`` and misattribute finish
+    reasons, usage, and provider response ids.
 
     Raises HTTPException(503) when the provider circuit is open (≥ 3 recent
     consecutive failures) unless *bypass_circuit=True*.  Health-check probes
@@ -104,7 +115,7 @@ def get_llm(
         if _time.monotonic() - created_at < _INSTANCE_CACHE_TTL_SECONDS:
             # Fresh — move to end (most-recently-used) for LRU ordering.
             _INSTANCES.move_to_end(key)
-            return adapter
+            return _fork_adapter(adapter)
         # TTL expired — evict the stale adapter and rebuild below.
         del _INSTANCES[key]
     # Evict the least-recently-used entry when the cache is full.
@@ -112,7 +123,18 @@ def get_llm(
         _INSTANCES.popitem(last=False)
     new_adapter = _REGISTRY[provider](model, api_key=api_key, operation=operation)
     _INSTANCES[key] = (new_adapter, _time.monotonic())
-    return new_adapter
+    return _fork_adapter(new_adapter)
+
+
+def _fork_adapter(adapter: "BaseLLMAdapter") -> "BaseLLMAdapter":
+    """Share the immutable SDK client while isolating per-call adapter state."""
+
+    fork = copy.copy(adapter)
+    # Every concrete adapter currently owns this field.  Keep the defensive
+    # guard so a future stateless adapter can still use the common gateway.
+    if hasattr(fork, "last_completion"):
+        fork.last_completion = None
+    return fork
 
 
 def get_instrumented_llm(

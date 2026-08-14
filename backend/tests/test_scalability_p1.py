@@ -7,7 +7,10 @@ F5 — fast/bulk live-queue split (routing table + worker partition + sampler).
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+
+import pytest
 
 import database
 from config import settings
@@ -148,6 +151,7 @@ def test_queue_for_job_routes_fast_and_bulk() -> None:
     from services.queue import (
         BULK_QUEUE_NAME,
         FAST_QUEUE_NAME,
+        GENERATION_QUEUE_NAME,
         queue_for_job,
     )
 
@@ -155,6 +159,7 @@ def test_queue_for_job_routes_fast_and_bulk() -> None:
     assert queue_for_job("pr_check") == FAST_QUEUE_NAME
     assert queue_for_job("reconcile_issue_event") == FAST_QUEUE_NAME
     assert queue_for_job("refresh_task_states") == FAST_QUEUE_NAME
+    assert queue_for_job("stage_generate") == GENERATION_QUEUE_NAME
     for bulk in (
         "export_push",
         "backfill_repo",
@@ -188,6 +193,8 @@ async def test_enqueue_routes_to_resolved_queue() -> None:
     assert captured["queue"] == queue_mod.FAST_QUEUE_NAME
     await queue_mod.enqueue("export_push", 2, pool=_FakePool())
     assert captured["queue"] == queue_mod.BULK_QUEUE_NAME
+    await queue_mod.enqueue("stage_generate", {}, pool=_FakePool())
+    assert captured["queue"] == queue_mod.GENERATION_QUEUE_NAME
     # Explicit override wins over the routing table.
     await queue_mod.enqueue("export_push", 3, queue_name="custom", pool=_FakePool())
     assert captured["queue"] == "custom"
@@ -198,21 +205,31 @@ def test_worker_settings_partition_is_disjoint_and_complete() -> None:
     from services.queue import (
         BULK_QUEUE_NAME,
         FAST_QUEUE_NAME,
+        GENERATION_QUEUE_NAME,
         queue_for_job,
     )
 
     bulk = {f.__name__ for f in worker.WorkerSettings.functions}
     fast = {f.__name__ for f in worker.FastWorkerSettings.functions}
+    generation = {
+        getattr(f, "__name__", getattr(f, "name", None))
+        for f in worker.GenerationWorkerSettings.functions
+    }
     # No job is registered on both lanes.
     assert bulk.isdisjoint(fast)
+    assert bulk.isdisjoint(generation)
+    assert fast.isdisjoint(generation)
     # Each lane's queue_name matches its routing.
     assert worker.WorkerSettings.queue_name == BULK_QUEUE_NAME
     assert worker.FastWorkerSettings.queue_name == FAST_QUEUE_NAME
+    assert worker.GenerationWorkerSettings.queue_name == GENERATION_QUEUE_NAME
     # Every registered job lands on the lane the routing table sends it to.
     for name in bulk:
         assert queue_for_job(name) == BULK_QUEUE_NAME
     for name in fast:
         assert queue_for_job(name) == FAST_QUEUE_NAME
+    for name in generation:
+        assert queue_for_job(name) == GENERATION_QUEUE_NAME
     # The fast lane carries exactly the latency-sensitive jobs.
     assert fast == {
         "billing_process_webhook",
@@ -220,12 +237,48 @@ def test_worker_settings_partition_is_disjoint_and_complete() -> None:
         "reconcile_issue_event",
         "refresh_task_states",
     }
+    assert generation == {"stage_generate"}
+    assert (
+        worker.GenerationWorkerSettings.functions[0].max_tries
+        == worker._GENERATION_JOB_MAX_TRIES
+    )
+    assert worker._GENERATION_JOB_MAX_TRIES >= 100
     # keep_result is inherited from the shared base (the re-export dedup guard).
     assert worker.WorkerSettings.keep_result == 0
     assert worker.FastWorkerSettings.keep_result == 0
+    assert worker.GenerationWorkerSettings.keep_result == 0
+    assert worker.GenerationWorkerSettings.job_timeout == (
+        worker._GENERATION_JOB_SLICE_SECONDS + 30
+    )
+    assert worker._GENERATION_JOB_SLICE_SECONDS <= (
+        worker.settings.stage_generation_deadline_seconds
+        - worker.settings.stage_retry_min_remaining_seconds
+    )
     # The light-work fast lane runs fewer concurrent jobs than the bulk lane, so
     # adding its process is a smaller Postgres-connection footprint add (§15).
     assert worker.FastWorkerSettings.max_jobs < worker.WorkerSettings.max_jobs
+
+
+async def test_generation_slice_timeout_requeues_same_durable_job(monkeypatch) -> None:
+    import worker
+    from services.pipeline.stage_manager import stage_manager
+
+    cancelled = False
+
+    async def _blocked(_payload):
+        nonlocal cancelled
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled = True
+
+    monkeypatch.setattr(worker, "_GENERATION_JOB_SLICE_SECONDS", 0.01)
+    monkeypatch.setattr(stage_manager, "execute_queued_generation", _blocked)
+
+    with pytest.raises(worker.Retry):
+        await worker.stage_generate({}, {"generation_run_id": "run-1"})
+
+    assert cancelled is True
 
 
 def test_global_crons_registered_on_exactly_one_lane() -> None:

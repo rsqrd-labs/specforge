@@ -3,9 +3,9 @@
 Mirrors test_openai_adapter.py's guard coverage (the chat-completions path
 this adapter is modelled on) plus OpenRouter-specific behavior: usage/cost
 accounting (stream_options + usage.include, since — unlike OpenAI's dead
-chat-completions path — this IS the live path), upstream-host pinning
-(provider.only from the catalog, plus data_collection=deny and
-allow_fallbacks=false), reasoning gating — effort from the catalog on core
+chat-completions path — this IS the live path), preferred upstream routing
+(provider.order from the catalog, privacy filtering, and endpoint failover),
+reasoning gating — effort from the catalog on core
 generation, exclude=true on the cheap non-core `complete()` path and NEVER on
 a stream — and BatchUnsupportedError on all three batch methods.
 """
@@ -24,6 +24,8 @@ from services.llm.base import (
     BatchUnsupportedError,
     ProviderError,
     ProviderRateLimitError,
+    ProviderTerminalError,
+    ProviderUnavailableError,
 )
 
 # ---------------------------------------------------------------------------
@@ -234,13 +236,56 @@ async def test_rate_limit_error_is_wrapped_with_retry_after() -> None:
     assert raised.value.retry_after == 30.0
 
 
+def test_openrouter_payment_error_allows_cross_provider_failover() -> None:
+    from services.llm.openrouter_adapter import _wrap_openrouter_error
+
+    error = RuntimeError("insufficient provider credits")
+    error.status_code = 402  # type: ignore[attr-defined]
+    wrapped = _wrap_openrouter_error(error)  # type: ignore[arg-type]
+
+    assert isinstance(wrapped, ProviderTerminalError)
+    assert wrapped.retryable is False
+    assert wrapped.failover_allowed is True
+    assert wrapped.error_code.startswith("openrouter_terminal_402")
+
+
+def test_openrouter_impossible_route_is_terminal_but_can_fail_over() -> None:
+    from services.llm.openrouter_adapter import _wrap_openrouter_error
+
+    error = RuntimeError("No available model provider meets routing requirements")
+    error.status_code = 503  # type: ignore[attr-defined]
+    error.body = {  # type: ignore[attr-defined]
+        "error": {
+            "message": str(error),
+            "metadata": {"error_type": "no_available_provider"},
+        }
+    }
+    wrapped = _wrap_openrouter_error(error)  # type: ignore[arg-type]
+
+    assert isinstance(wrapped, ProviderTerminalError)
+    assert wrapped.failover_allowed is True
+    assert wrapped.error_type == "no_available_provider"
+
+
+def test_openrouter_upstream_502_is_retryable_unavailability() -> None:
+    from services.llm.openrouter_adapter import _wrap_openrouter_error
+
+    error = RuntimeError("upstream bad gateway")
+    error.status_code = 502  # type: ignore[attr-defined]
+    wrapped = _wrap_openrouter_error(error)  # type: ignore[arg-type]
+
+    assert isinstance(wrapped, ProviderUnavailableError)
+    assert wrapped.retryable is True
+    assert wrapped.failover_allowed is True
+
+
 # ---------------------------------------------------------------------------
 # OR-9: request shape — stream_options, usage.include, pinned provider route
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_stream_request_includes_usage_accounting_and_pinned_route() -> None:
+async def test_stream_request_prefers_catalog_host_but_allows_recovery() -> None:
     adapter = _make_adapter([_chunk("hi")])
 
     async for _ in adapter.stream("sys", "user", 4096):
@@ -251,23 +296,19 @@ async def test_stream_request_includes_usage_accounting_and_pinned_route() -> No
     assert kwargs["stream"] is True
     assert kwargs["stream_options"] == {"include_usage": True}
     assert kwargs["extra_body"]["usage"] == {"include": True}
-    # `only` is the field that actually pins the upstream host. allow_fallbacks
-    # alone is a documented no-op without it, which is what made prompt caching
-    # structurally impossible (1 of 19 hosts caches) before this was added.
+    # Normal calls prefer the cache-compatible/costed host. If it is down,
+    # OpenRouter can use another privacy-compatible endpoint for this same model.
     assert kwargs["extra_body"]["provider"] == {
         "data_collection": "deny",
-        "allow_fallbacks": False,
-        "only": ["deepseek"],
+        "allow_fallbacks": True,
+        "order": ["deepseek"],
     }
     # No reasoning field when the catalog entry sets no effort.
     assert "reasoning" not in kwargs["extra_body"]
 
 
 @pytest.mark.asyncio
-async def test_upstream_allowlist_is_omitted_when_the_catalog_declares_none() -> None:
-    """An EMPTY `only` is not "no preference" to OpenRouter — it is "no provider
-    meets your routing requirements", a permanent 503 on every call. A catalog
-    entry with no `upstream_providers` must send no `only` key at all."""
+async def test_upstream_order_is_omitted_when_catalog_declares_none() -> None:
     adapter = _make_adapter([_chunk("hi")], upstream_providers=())
 
     async for _ in adapter.stream("sys", "user", 4096):
@@ -276,8 +317,8 @@ async def test_upstream_allowlist_is_omitted_when_the_catalog_declares_none() ->
     provider_block = adapter._client.chat.completions.create.await_args.kwargs[
         "extra_body"
     ]["provider"]
-    assert "only" not in provider_block
-    assert provider_block == {"data_collection": "deny", "allow_fallbacks": False}
+    assert "order" not in provider_block
+    assert provider_block == {"data_collection": "deny", "allow_fallbacks": True}
 
 
 @pytest.mark.asyncio

@@ -31,7 +31,7 @@ interface QualityGateFailedEvent {
 export interface GenerationStartedInfo {
   generation_id: string
   deadline: string
-  action: "generate" | "regenerate"
+  action: "generate" | "regenerate" | "resume"
   total_parts: number
 }
 
@@ -41,6 +41,8 @@ export interface GenerationTerminalInfo {
   partial_saved: boolean
   refunded_credits: number
   credit_was_deducted?: boolean
+  /** Stable backend diagnostic identifier suitable for support correlation. */
+  error_code?: string | null
 }
 
 interface GenerationStartedEvent {
@@ -60,9 +62,9 @@ export interface GenerationProgress {
    *  `string` because the wire is the source of truth and an unknown value must
    *  degrade to the generic liveness copy, never throw. */
   phase?: string
-  /** Parallel chunked generation part progress (issue #39 UX). The parallel
-   *  path streams only its lead chunk per wave live, so its silent sibling
-   *  chunks show no text — these counts give the overlay honest, monotonic
+  /** Parallel chunked generation part progress (issue #39 UX). Durable workers
+   *  publish completed checkpoints rather than process-local token deltas, so
+   *  these counts give the overlay honest, monotonic
    *  "N of M parts drafted" feedback for the whole set. Additive and optional:
    *  present only while a part counter is active (`total_parts > 0`); absent on
    *  the fully sequential live-streamed stages (harness) and older backends. */
@@ -113,6 +115,7 @@ export class StreamError extends Error {
   constructor(
     public readonly code: string,
     message: string,
+    public readonly diagnosticCode?: string | null,
   ) {
     super(message)
     this.name = "StreamError"
@@ -445,8 +448,9 @@ export function createSSEConnection(options: SSEConnectionOptions): SSEControl {
                 terminal.status === "cancelled"
                   ? "Generation cancelled."
                   : terminal.status === "timed_out"
-                    ? "Generation reached its five-minute deadline."
+                    ? "Generation reached its processing time limit."
                     : "Generation did not complete.",
+                terminal.error_code,
               ),
             )
             close()

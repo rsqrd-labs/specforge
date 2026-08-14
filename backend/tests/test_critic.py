@@ -301,6 +301,7 @@ def install_pipeline_session_patch(monkeypatch):
     block.
     """
     import database
+    from services.pipeline import stage_manager as stage_manager_module
 
     global _ACTIVE_MULTI_QUERY_DB
     _ACTIVE_MULTI_QUERY_DB = None
@@ -314,6 +315,16 @@ def install_pipeline_session_patch(monkeypatch):
         return _ACTIVE_MULTI_QUERY_DB
 
     monkeypatch.setattr(database, "AsyncSessionLocal", _factory)
+
+    async def _execute_enqueued_inline(self, payload, _run_id):
+        # Unit tests use the seeded in-memory DB/Redis doubles. Exercise the
+        # durable worker entrypoint synchronously without requiring local arq.
+        await self.execute_queued_generation(payload)
+
+    monkeypatch.setattr(
+        StageManager, "_enqueue_generation_job", _execute_enqueued_inline
+    )
+    monkeypatch.setattr(stage_manager_module, "_GENERATION_OBSERVER_POLL_SECONDS", 0)
 
 
 @pytest.fixture(autouse=True)

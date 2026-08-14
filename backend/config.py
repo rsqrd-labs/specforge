@@ -199,16 +199,19 @@ class Settings(BaseSettings):
     #   across processes/instances. 0 disables.
     # generation_admission_lease_ttl_seconds: how long a per-user/per-provider
     #   admission lease survives without an explicit release (process-death
-    #   self-heal). Generously larger than a realistic full generation so a live
-    #   generation is never evicted; on the normal path the lease is released at
-    #   pipeline teardown well before this.
+    #   self-heal). Runtime clamps this to at least generation deadline + 120s,
+    #   so a live run is never evicted and stale outage capacity clears promptly.
     # generation_rate_per_minute / _window_seconds: the HTTP-native generation
     #   rate tier enforced in RateLimitMiddleware (true 429 + Retry-After). This
     #   is the authoritative per-minute generation cap; the daily ceiling lives in
     #   the stage manager. 0 disables the tier.
-    max_concurrent_generations_per_process: int = 20
+    max_concurrent_generations_per_process: int = 4
     max_concurrent_generations_per_user: int = 3
-    generation_admission_lease_ttl_seconds: int = 1_800
+    # Worker-local call bulkhead. A single generation may draft several chunks
+    # concurrently, so generation-count admission alone does not bound actual
+    # provider sockets/RPM pressure.
+    max_concurrent_provider_calls_per_process: int = 8
+    generation_admission_lease_ttl_seconds: int = 720
     generation_rate_per_minute: int = 10
     generation_rate_window_seconds: int = 60
 
@@ -218,15 +221,15 @@ class Settings(BaseSettings):
     #   background tasks (the best-effort eval score + the off-critical-path
     #   critic judge + the Demo-Day construction verifier) run concurrently, so a
     #   burst of post-`done` work cannot starve live generation streams for the
-    #   shared provider key / DB pool / event loop. The detached generation
-    #   pipeline itself is NOT gated — it is bounded upstream by F1 admission and
-    #   gating it would deadlock generation. 0 disables the gate (unbounded — the
+    #   shared provider key / DB pool / event loop. The durable generation worker
+    #   is bounded separately by F1 admission and provider-call capacity. 0
+    #   disables the advisory gate (unbounded — the
     #   pre-F6 behaviour, the instant-revert path).
     # background_tasks_soft_max: per-registry soft ceiling that, when crossed,
     #   emits a one-shot high-water WARNING (a back-pressure signal that a
     #   registry is leaking tasks past the F1 cap). It NEVER drops a task —
     #   shedding advisory work would silently lose eval/critic findings and a
-    #   dropped pipeline task would lose a paid generation. 0 disables the
+    #   durable pipeline runs in ARQ and is never part of this registry. 0 disables the
     #   warning. The live count is always exported as thought2build_background_tasks.
     max_concurrent_advisory_tasks: int = 12
     background_tasks_soft_max: int = 200
@@ -286,18 +289,18 @@ class Settings(BaseSettings):
     #   governed by their OWN rate tiers and are NOT counted here — so this is a
     #   core-generation budget, not a whole-account budget (audit F1/F2 scope;
     #   those paths verifiably do not amplify on 429 — they surface it directly).
-    #   The real per-org RPM/TPM/concurrency limits MUST be measured before
-    #   setting these (audit §F2/§6); they ship at 0 (unlimited) so no environment
-    #   is throttled on an unmeasured guess — the 429-aware backoff below is the
-    #   protection that ships on.
+    #   The in-flight ceiling ships at a conservative 4 durable generations per
+    #   provider: one generation can fan out up to four simultaneous chunk calls,
+    #   and the worker-local call bulkhead is 8. Tune it from measured org limits.
+    #   The RPM ceiling remains 0 (unlimited) until the real account limit is known.
     # provider_rate_limit_max_retries: bounded same-tier retries when a provider
     #   returns 429/overloaded. A rate-limit is a throughput failure, NOT a
     #   quality failure, so it is retried in place (honoring Retry-After, then
-    #   exponential backoff + jitter) and NEVER escalated to a bigger/mid tier —
-    #   escalation amplifies load against an already-throttled org (audit §F2.3).
+    #   exponential backoff + jitter) and never escalated within the throttled
+    #   provider. Exhaustion may move to a separately configured provider.
     # provider_rate_limit_backoff_base_seconds / _max_seconds: the backoff used
     #   when the provider sends no Retry-After header.
-    provider_max_inflight_generations: int = 0
+    provider_max_inflight_generations: int = 4
     provider_max_generations_per_minute: int = 0
     provider_rate_limit_max_retries: int = 3
     provider_rate_limit_backoff_base_seconds: float = 2.0
@@ -316,60 +319,16 @@ class Settings(BaseSettings):
     llm_stream_idle_timeout_seconds: int = 180
     llm_stream_hard_cap_seconds: int = 900
     llm_complete_timeout_seconds: int = 120
-    # Core stage-run deadline contract. These values are intentionally separate
-    # from storyboard/increment timeouts: Spec/Plan/Harness/Tasks are interactive
-    # and must reach a durable terminal state within five minutes.
-    # The per-call cap is 270 — the full provider budget the 300s deadline minus
-    # the 30s finalise reserve grants a single call — not an artificially
-    # tighter 240. The 300s product contract is untouched.
-    #
-    # 180 was measured too low on 2026-07-30 (generation 65fe5f10): two parallel
-    # Opus 5 spec chunks were both killed at exactly 180,000ms having produced
-    # 6,821 and 7,521 visible output tokens — ~38 tok/s at effort=medium, so one
-    # call buys ~26,000 characters, not the ~15-18K tokens this code assumed
-    # without ever measuring it. Both partials were discarded and the run
-    # terminalised as incomplete_output. The cap was then raised to 240 with 30s
-    # of deliberate slack, and later to the full 270 on 2026-08-06 when Opus 5
-    # moved to effort=high (see the claude-opus-5 catalog entry): reasoning
-    # tokens are spent before any visible output, so effort=high needs more of
-    # the call's own budget to finish a chunk. Neither cap value has been
-    # measured directly against high-effort throughput — 270 is the deadline
-    # arithmetic's true ceiling, used because it is provably safe (it cannot
-    # exceed what the 300s/30s contract already grants), not because per-chunk
-    # wall-clock was re-measured at high effort. Re-measure and retarget chunk
-    # length prompts (``_chunk_length_target``) once real high-effort throughput
-    # data exists.
-    #
-    # A deliberate consequence, unchanged by the 240->270 move: after a
-    # full-length first attempt at most 0-30s remains, below
-    # stage_retry_min_remaining_seconds (45s), so the mid-tier retry still
-    # cannot start. That retry was structurally doomed — in the same trace both
-    # Sonnet 5 retries were killed at ~90s redoing work Opus could not finish in
-    # 180 — so a clean terminal failure is strictly better than paying for it.
-    #
-    # A real, accepted trade-off of the 240->270 move: the harness stage's two
-    # sequential chunks (contract, then files) share this same 270s run budget
-    # with no independent per-chunk split (``_chunk_length_target``'s harness
-    # docstring). At the old 240 cap, a single chunk could never consume more
-    # than 240 of the 270s pool, so the second chunk always had >=30s left. At
-    # 270, a contract chunk that badly overshoots its own 3,000-15,000-char
-    # prompt target could in principle consume the whole budget and leave the
-    # files chunk 0s, i.e. an immediate GenerationDeadlineExceeded instead of a
-    # doomed-but-nonzero attempt. Both outcomes are already failures in that
-    # edge case, so this does not introduce a new failure mode, only changes
-    # its shape — but the PROBABILITY of hitting it also went up, not just its
-    # ceiling: Opus 5 moved to effort=high in the same change, and high-effort
-    # reasoning spends more wall-clock before visible output, making a contract
-    # chunk overrun its own target more likely than when this trade-off was
-    # first accepted. Still accepted rather than patched with an unmeasured
-    # per-chunk carve-out, but re-evaluate if harness starvation shows up in
-    # production (missing_harness_files / GenerationDeadlineExceeded on the
-    # files chunk specifically).
-    stage_generation_deadline_seconds: int = 300
+    # Core stage-run deadline contract. Generation is durable background work,
+    # so reliability takes precedence over forcing every model/chunk through a
+    # request-shaped deadline. The attempt cap is deliberately less
+    # than half of the provider budget: a primary timeout must leave enough time
+    # for a real alternate-provider attempt plus terminal persistence.
+    stage_generation_deadline_seconds: int = 600
     stage_generation_finalise_reserve_seconds: int = 30
-    stage_provider_call_timeout_seconds: int = 270
-    stage_provider_idle_timeout_seconds: int = 90
-    stage_retry_min_remaining_seconds: int = 45
+    stage_provider_call_timeout_seconds: int = 240
+    stage_provider_idle_timeout_seconds: int = 240
+    stage_retry_min_remaining_seconds: int = 120
     stage_generation_cancel_poll_seconds: float = 1.0
     stage_generation_cancel_db_poll_seconds: float = 5.0
     # External technology lifecycle/advisory lookups run after the draft is
@@ -380,18 +339,20 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_stage_generation_bounds(self) -> "Settings":
-        if self.stage_generation_deadline_seconds != 300:
-            raise ValueError("STAGE_GENERATION_DEADLINE_SECONDS must be 300")
-        if self.stage_generation_finalise_reserve_seconds != 30:
-            raise ValueError("STAGE_GENERATION_FINALISE_RESERVE_SECONDS must be 30")
+        if not 300 <= self.stage_generation_deadline_seconds <= 3600:
+            raise ValueError(
+                "STAGE_GENERATION_DEADLINE_SECONDS must be between 300 and 3600"
+            )
+        if not 10 <= self.stage_generation_finalise_reserve_seconds <= 120:
+            raise ValueError(
+                "STAGE_GENERATION_FINALISE_RESERVE_SECONDS must be between 10 and 120"
+            )
         # The ceiling is the provider budget the deadline actually grants:
         # deadline - finalise reserve. Anything above it is a bound the run can
         # never reach, which is how a call cap silently becomes a lie. This is
-        # the ONLY ceiling — there is deliberately no separate hardcoded literal
-        # below it (a prior version enforced 240 here, a self-imposed 30s margin
-        # below the true 270s budget; see the stage_provider_call_timeout_seconds
-        # comment above for why that margin was given back to Opus 5 at
-        # effort=high on 2026-08-06).
+        # the only ceiling. The configured attempt cap intentionally leaves a
+        # retry window, but older environment values remain valid during a
+        # rolling migration.
         provider_budget = (
             self.stage_generation_deadline_seconds
             - self.stage_generation_finalise_reserve_seconds
@@ -400,8 +361,10 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"STAGE_PROVIDER_CALL_TIMEOUT_SECONDS must be 1..{provider_budget}"
             )
-        if not 1 <= self.stage_provider_idle_timeout_seconds <= 90:
-            raise ValueError("STAGE_PROVIDER_IDLE_TIMEOUT_SECONDS must be 1..90")
+        if not 1 <= self.stage_provider_idle_timeout_seconds <= provider_budget:
+            raise ValueError(
+                f"STAGE_PROVIDER_IDLE_TIMEOUT_SECONDS must be 1..{provider_budget}"
+            )
         if (
             self.stage_provider_idle_timeout_seconds
             > self.stage_provider_call_timeout_seconds
@@ -411,6 +374,11 @@ class Settings(BaseSettings):
             )
         if self.stage_retry_min_remaining_seconds < 45:
             raise ValueError("STAGE_RETRY_MIN_REMAINING_SECONDS must be at least 45")
+        if self.stage_retry_min_remaining_seconds >= provider_budget:
+            raise ValueError(
+                "STAGE_RETRY_MIN_REMAINING_SECONDS must be smaller than the "
+                "generation provider budget"
+            )
         if not 1 <= self.stage_technology_check_timeout_seconds <= 10:
             raise ValueError("STAGE_TECHNOLOGY_CHECK_TIMEOUT_SECONDS must be 1..10")
         if not 1 <= self.stage_technology_check_stale_seconds <= 30:
@@ -419,6 +387,10 @@ class Settings(BaseSettings):
             raise ValueError("STAGE_GENERATION_CANCEL_POLL_SECONDS must be positive")
         if self.stage_generation_cancel_db_poll_seconds <= 0:
             raise ValueError("STAGE_GENERATION_CANCEL_DB_POLL_SECONDS must be positive")
+        if self.max_concurrent_provider_calls_per_process < 1:
+            raise ValueError(
+                "MAX_CONCURRENT_PROVIDER_CALLS_PER_PROCESS must be at least 1"
+            )
         return self
 
     # Phase 0 (issue #26) LLM cost ledger: persist one llm_cost_events row per

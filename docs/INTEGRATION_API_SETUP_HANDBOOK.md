@@ -111,7 +111,7 @@ you merge to `main`.
 | Redis | Yes | Stores login sessions, rate-limit counters, and stage cache |
 | Google OAuth | Yes | User sign-in ("Sign in with Google") |
 | Anthropic / OpenAI / Google Gemini | At least one | LLM generation — you need a key for whichever provider(s) you want to offer |
-| Railway | Production | Hosts the backend `backend` web service **plus the `worker` and `worker-fast` arq worker services**, PostgreSQL, and Redis in the cloud — see [Step 1](#step-1--set-up-railway-backend--databases), all three services are required, not just `backend` |
+| Railway | Production | Hosts `backend` plus the `worker`, `worker-fast`, and `worker-generation` arq services, PostgreSQL, and Redis — see [Step 1](#step-1--set-up-railway-backend--databases); all four app services are required |
 | Vercel | Production | Hosts the frontend website (the SPA) — and, separately, the marketing zone |
 | GitHub Actions secrets | Production | Lets the automated pipeline deploy to Railway and Vercel |
 | Marketing Vercel project | Optional | Second Vercel project rooted at `apps/marketing` — the SEO/GEO content site on the apex domain (issue #18). Skip until you launch organic/answer-engine acquisition. |
@@ -793,10 +793,9 @@ first time. Work through these steps in order.
 
 ### Step 1 — Set up Railway (backend + databases)
 
-Railway will host the FastAPI server, **two arq worker processes**, PostgreSQL,
-and Redis. All three application services (`backend`, `worker`, `worker-fast`)
-are required — not just `backend` — or GitHub jobs and billing webhooks never
-process even though the app otherwise looks fine.
+Railway will host the FastAPI server, **three arq worker processes**, PostgreSQL,
+and Redis. All four application services (`backend`, `worker`, `worker-fast`,
+`worker-generation`) are required: the generation worker owns paid LLM runs.
 
 **Create a project:**
 
@@ -815,14 +814,15 @@ process even though the app otherwise looks fine.
 6. Click **Add a service** → **Database** → **Add Redis**.
 7. Click the Redis tile → **Connect** tab → copy the **Private URL**.
 
-**Add the three backend services (`backend`, `worker`, `worker-fast`):**
+**Add the four backend services (`backend`, `worker`, `worker-fast`,
+`worker-generation`):**
 
 8. Click **Add a service** → **GitHub Repo**, connect Railway to your GitHub
    account if prompted, then select this repository. Name this service
    `backend`.
-9. Repeat step 8 **two more times** — once for `worker`, once for
-   `worker-fast` — each pointing at the same GitHub repository.
-10. On **all three** services, set **Settings → Config-as-code → Config File
+9. Repeat step 8 **three more times** — for `worker`, `worker-fast`, and
+   `worker-generation` — each pointing at the same GitHub repository.
+10. On **all four** services, set **Settings → Config-as-code → Config File
     Path** explicitly (this is what tells Railway which process each service
     runs — the `startCommand` differs per service):
 
@@ -831,6 +831,7 @@ process even though the app otherwise looks fine.
     | `backend` | `/backend/railway.json` |
     | `worker` | `/backend/railway.worker.json` |
     | `worker-fast` | `/backend/railway.worker-fast.json` |
+    | `worker-generation` | `/backend/railway.worker-generation.json` |
 
     (You do **not** need to set a Root Directory separately — each config file
     already points at `backend/`.)
@@ -879,11 +880,11 @@ process even though the app otherwise looks fine.
     | `METRICS_TOKEN` | Generated below |
     | `WEB_CONCURRENCY` | Optional cost lever — `1` keeps `backend` to a single async worker (roughly halves its memory bill) at pre-launch traffic; bump to `2` once real traffic arrives. Workers ignore this variable. |
 
-14. Copy the **same environment variables** onto the `worker` and
-    `worker-fast` services (Railway's "Variable References" / "Shared
+14. Copy the **same environment variables** onto all three worker services
+    (Railway's "Variable References" / "Shared
     Variables" feature can do this in one place — use it if offered instead of
-    keeping three copies in sync by hand). Only `backend` needs
-    `WEB_CONCURRENCY`; the other two ignore it either way.
+    keeping four copies in sync by hand). Only `backend` needs
+    `WEB_CONCURRENCY`; workers ignore it either way.
 
 **Generate the JWT key pair** (run this on your local machine):
 
@@ -922,17 +923,16 @@ python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 15. Once all variables are set, go to the `backend` service → **Settings** →
     **Networking** → **Generate Domain**. Railway gives you a public URL like
     `https://thought2build-backend-production.up.railway.app`. Copy it — you need
-    it for Vercel. `worker` and `worker-fast` don't serve HTTP traffic, so skip
-    this for them.
+    it for Vercel. Worker services don't serve HTTP traffic, so skip this for them.
 
-16. Check the **Deployments** tab and confirm **all three services** —
-    `backend`, `worker`, and `worker-fast` — started successfully, not just
-    `backend`. Visit `https://your-railway-url/health` — you should see
+16. Check the **Deployments** tab and confirm **all four services** —
+    `backend`, `worker`, `worker-fast`, and `worker-generation` — started
+    successfully, not just `backend`. Visit `https://your-railway-url/health` — you should see
     `{"status":"ok","version":"1.0.0"}`.
 
 > **If the deployment fails:** go to the **Deployments** tab, click the failed
 > deploy, and read the build/runtime logs. The most common issues are a missing
-> environment variable or a wrong `DATABASE_URL` format. A `worker`/`worker-fast`
+> environment variable or a wrong `DATABASE_URL` format. A worker
 > deploy failing on the `Config File Path` step usually means step 10 above
 > wasn't set correctly for that service.
 
@@ -987,15 +987,17 @@ Actions.
 
 - Three Vercel identifiers (token, org ID, project ID)
 
-**Railway needs no token — it deploys itself.** The `backend`, `worker`, and
-`worker-fast` services are each connected to this repo's `main` branch with
+**Railway needs no token — it deploys itself.** The `backend`, `worker`,
+`worker-fast`, and `worker-generation` services are each connected to this
+repo's `main` branch with
 **Auto deploys when pushed to GitHub** *and* **Wait for CI** enabled (service →
 **Settings** → **Source**), so Railway builds them once this workflow goes green.
 CI therefore contains **no** `railway up` step and no `RAILWAY_TOKEN`.
 
 > Do not re-add a `railway up` step. Each service resolves its root directory
 > (`/backend`) and its config file (`/backend/railway.json`,
-> `railway.worker.json`, `railway.worker-fast.json`) *relative to the repo root*,
+> `railway.worker.json`, `railway.worker-fast.json`, or
+> `railway.worker-generation.json`) *relative to the repo root*,
 > so `railway up ./backend --path-as-root` — which makes the backend folder the
 > snapshot root — fails initialization with
 > `service config at '/backend/railway.json' not found`. It would also
@@ -1037,7 +1039,7 @@ CI therefore contains **no** `railway up` step and no `RAILWAY_TOKEN`.
 
 5. Push any small change to `main`. Watch the **Actions** tab in GitHub — the run
    should end with the `Deploy` job pushing the SPA (and marketing) to Vercel.
-   Railway's three services pick the same commit up on their own once the run is
+   Railway's four services pick the same commit up on their own once the run is
    green; watch them in the Railway dashboard's **Deployments** tab.
 
 ---
@@ -1257,8 +1259,8 @@ docker compose up --build
 ```
 
 This starts PostgreSQL, Redis, the FastAPI backend, the Vite frontend, and the
-two arq worker containers (`worker` and `worker-fast`, which drain GitHub jobs
-and billing webhooks respectively). Wait until you see
+three arq worker containers (`worker`, `worker-fast`, and `worker-generation`).
+Wait until you see
 `Uvicorn running on http://0.0.0.0:8000`.
 
 ### Check backend health

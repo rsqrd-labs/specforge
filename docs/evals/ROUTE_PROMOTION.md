@@ -119,17 +119,16 @@ key. That env flip is a **separate, gated promotion** — the four items below,
 not just the golden-corpus run every other route change requires — because it
 moves more than generation.
 
-0. **Pinned-pool preflight — do this first; it can invalidate everything
+0. **Privacy-compatible pool preflight — do this first; it can invalidate everything
    below.** `GET /providers/health?model=deepseek/deepseek-v4-pro` (admin) makes
-   a real 1-token call carrying the catalog's upstream-host pin. If
-   `data_collection: "deny"` filters out DeepSeek's own host, the pinned pool is
+   a real 1-token call carrying the catalog's upstream-host preference and
+   privacy policy. If `data_collection: "deny"` filters out every host, the pool is
    empty, OpenRouter answers a permanent **503 "no available model provider
    meets your routing requirements"**, and every generation fails identically.
    The response's `probe_error` field distinguishes that from a bad key. There
    is no way to determine this from code — DeepSeek's data policy is not exposed
-   on the public API. If it fails, the choice is between the data-retention
-   policy and prompt caching entirely (only DeepSeek's own host caches), and
-   that is a decision to escalate, not to work around.
+   on the public API. Do not weaken the data-retention policy to make the probe
+   pass; keep a direct provider next in `LLM_PROVIDER_PRIORITY` instead.
 
 1. **Live golden-corpus run.** Same procedure as the rest of this document:
    run the expanded golden corpus through real openrouter calls
@@ -175,19 +174,18 @@ moves more than generation.
    inert changes nothing here; the flip is what starts transmitting user
    content to them.
 
-4. **Pinned upstream route — verify it stays that way.**
+4. **Preferred upstream route with same-model fallback — verify both.**
    `services/llm/openrouter_adapter.py` sends
-   `provider: {"only": [...], "allow_fallbacks": false, "data_collection":
-   "deny"}`, where `only` comes from the catalog entry's `upstream_providers`.
+   `provider: {"order": [...], "allow_fallbacks": true, "data_collection":
+   "deny"}`, where `order` comes from the catalog entry's `upstream_providers`.
 
-   The `only` list is the part that pins. `allow_fallbacks: false` on its own is
-   a **documented no-op** — OpenRouter combines it with `order`/`only` and
-   without such a list it merely declines to fall back past a list that was
-   never supplied. The original adapter sent only the two inert fields, which is
-   why prompt caching was structurally impossible: on `deepseek-v4-flash` just 1
-   of 19 upstream hosts supports prefix caching, hosts disagree on real output
-   ceiling by up to 32x, and catalog rates describe the pinned host rather than
-   the alias.
+   `order` keeps DeepSeek's cache-capable/costed endpoint first in the normal
+   case; `allow_fallbacks: true` lets OpenRouter use another endpoint for the
+   same model when that host is unavailable. On `deepseek-v4-flash` just 1 of
+   19 upstream hosts supports prefix caching, hosts disagree on real output
+   ceiling by up to 32x, and catalog rates describe the preferred host rather
+   than the alias, so resolved-upstream usage metadata is authoritative when a
+   fallback occurs.
 
    Verify with `uv run python ../scripts/check_openrouter_catalog_drift.py`
    (exit 0), and record the resolved upstream

@@ -198,17 +198,15 @@ class ModelCatalogEntry:
     extended_prompt_cache_retention: bool = False
     cached_token_accounting: bool = False
     minimum_cacheable_input_tokens: int | None = None
-    # Upstream host allowlist for aggregator providers (openrouter, issue #152).
+    # Preferred upstream hosts for aggregator providers (openrouter, issue #152).
     # OpenRouter serves one model slug from many upstream hosts that differ in
     # quantisation, real output ceiling, price, cache-read price, and — decisively
     # — whether they support prefix caching at ALL (on deepseek-v4-flash, 1 of 19
-    # hosts does). ``provider.allow_fallbacks=false`` does NOT pin on its own: it
-    # only stops fallback PAST an explicit ``order``/``only`` list, so without this
-    # the balancer picks whichever host is cheapest that afternoon.
+    # hosts does). The adapter emits this as ``provider.order`` so the declared
+    # host wins normally while another privacy-compatible endpoint can recover
+    # a paid run if it is unavailable.
     #
-    # Empty tuple = send no allowlist (correct for every non-aggregator provider).
-    # Non-empty = the adapter emits ``provider.only``, making the upstream host —
-    # and therefore caching, pricing and quantisation — deterministic.
+    # Empty tuple = send no preference. Non-empty = try these hosts first.
     upstream_providers: tuple[str, ...] = ()
 
     def to_registry_config(self) -> dict[str, Any]:
@@ -273,10 +271,8 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         default_operations=(),
         supports_reasoning=True,
         # HIGH, not the previously-shipped medium, as of 2026-08-06. Core stages
-        # are bound by a locked interactive deadline contract —
-        # stage_provider_call_timeout_seconds caps a single provider stream (now
-        # 270s, the full 300s deadline minus the 30s finalise reserve — see
-        # config.py) — and high-effort reasoning tokens are spent before any
+        # are bound by a per-call attempt cap inside a longer durable run budget,
+        # and high-effort reasoning tokens are spent before any
         # visible output, which is exactly what made medium the safer default
         # when the cap was a tighter 240s.
         #
@@ -304,7 +300,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
             "and Demo Day mode. Resolves via active_same_tier (no default_operations "
             "claim) — route logs show that selection_reason, not active_default. "
             "A hard runtime failure retries down once on Sonnet 5 (mid). Runs at "
-            "effort=high (2026-08-06) against a 270s per-call cap — see the "
+            "effort=high (2026-08-06) against the configured per-call cap — see the "
             "reasoning_effort comment for the unmeasured-throughput caveat."
         ),
         routing_priority=1,
@@ -504,9 +500,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         default_operations=(),
         supports_reasoning=True,
         # Medium, matching Opus 5 and for the identical reason: core stages are
-        # bound by a locked interactive deadline contract
-        # (stage_provider_call_timeout_seconds caps a single provider stream at
-        # 240s, stage_generation_deadline_seconds is validator-pinned to 300s)
+        # bound by a per-call cap inside the durable generation deadline
         # and high-effort reasoning tokens are spent before any visible output.
         # This model is the FALLBACK artifact primary, so a high-effort timeout
         # here would fail precisely when Anthropic is already down. Raising it
@@ -892,9 +886,9 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
     # A fourth provider reached through a thin chat_completions adapter over
     # the openai SDK, base_url=https://openrouter.ai/api/v1.
     #
-    # The ladder is ALL-DeepSeek-V4 and every entry is host-pinned via
-    # ``upstream_providers=("deepseek",)``. That pairing is load-bearing, not a
-    # preference — verified against the live OpenRouter endpoints API:
+    # The ladder is all DeepSeek V4 and prefers DeepSeek's own endpoint via
+    # ``upstream_providers=("deepseek",)`` while retaining same-model endpoint
+    # fallback for availability. Verified against the live endpoints API:
     #
     #   * Prompt caching exists on exactly ONE upstream host. On
     #     deepseek-v4-flash, ``supports_implicit_caching`` is true for 1 of 19
@@ -905,12 +899,12 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
     #     route therefore has structurally ZERO cache hit rate, and prefix
     #     caching is per-host anyway, so consecutive chunks of one stage
     #     landing on different hosts share nothing.
-    #   * Rates below are the PINNED HOST's, not the model alias's. These
+    #   * Rates below are the preferred host's, not the model alias's. These
     #     differ materially: deepseek-v4-pro bills $1.168/$2.336 at the alias
     #     and $0.435/$0.870 on DeepSeek's own host. Reading alias pricing into
     #     the catalog is how the retired glm-5.2 entry came to understate
     #     output cost by 64%. ``scripts/check_openrouter_catalog_drift.py``
-    #     re-checks these against the pinned endpoint.
+    #     re-checks these against the preferred endpoint.
     #   * The real output ceiling varies 32x across hosts (32,768 → 1,048,576
     #     on flash; 7,168 → 163,840 on the retired v3.2) against the 32,768 the
     #     pipeline sends, so an unpinned route can hit a host that truncates.
@@ -1001,7 +995,7 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         default_operations=(),
         supports_reasoning=True,
         # MEDIUM, not high — this is a brand-new, entirely unmeasured route
-        # against the shared 270s stage_provider_call_timeout_seconds cap, and
+        # against the configured stage_provider_call_timeout_seconds cap, and
         # every chunk length target is a wall-clock budget still sized at the
         # ~145 chars/s measured on Opus 5. Same reasoning as GPT-5.5: raise
         # only after a real per-chunk measurement on this route, the same way
@@ -1207,9 +1201,8 @@ def model_request_policy(
         "extended_prompt_cache_retention": entry.extended_prompt_cache_retention,
         "cached_token_accounting": entry.cached_token_accounting,
         "minimum_cacheable_input_tokens": entry.minimum_cacheable_input_tokens,
-        # Aggregator upstream-host allowlist. The adapter turns a non-empty
-        # value into ``provider.only`` on the request; see the field's docstring
-        # on ModelCatalogEntry for why pinning is load-bearing.
+        # Aggregator upstream-host preference. The adapter turns a non-empty
+        # value into ``provider.order`` while leaving endpoint fallback enabled.
         "upstream_providers": entry.upstream_providers,
         # True when this operation is one of the core artifact-generation ops.
         # The adapter uses it to suppress reasoning on the cheap non-core paths

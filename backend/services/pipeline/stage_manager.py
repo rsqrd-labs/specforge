@@ -8,10 +8,12 @@ import logging
 import random
 import re
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import UUID
 
+from fastapi import HTTPException
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy import select
@@ -53,6 +55,7 @@ from services.llm.base import (
     ProviderError,
     ProviderRateLimitError,
     ProviderTimeoutError,
+    ProviderUnavailableError,
 )
 from services.llm.complexity_classifier import (
     ComplexitySignals,
@@ -94,6 +97,7 @@ from services.llm.usage import estimate_tokens
 from services.observability import (
     HARNESS_PATCH_BLOCK_REJECTED,
     HARNESS_PATCH_NOOP,
+    PIPELINE_COMPLETION_REPAIRS,
     PIPELINE_COMPLEXITY_TIER_FLOORS,
     PIPELINE_CRITIC_ADVISORY_FINDINGS,
     PIPELINE_GENERATION_DURATION,
@@ -116,6 +120,8 @@ from services.pipeline.admission import (
     GenerationAdmission,
     GenerationCapacityError,
     admit_generation,
+    release_generation_admission_handoff,
+    resume_generation_admission,
 )
 from services.pipeline.artifact_validator import (
     CompletenessIssue,
@@ -149,6 +155,8 @@ from services.pipeline.generation_runs import (
     GenerationStoppedError,
     checkpoint_chunk,
     create_generation_run,
+    load_checkpoint_content,
+    load_checkpoint_map,
     load_resume_seed,
     lock_running_run,
     lock_stage_for_run,
@@ -162,6 +170,7 @@ from services.pipeline.tech_safety import (
     analyze_technology_safety,
     is_blocking_finding,
 )
+from services.queue import QueueUnavailableError, enqueue
 from services.research import research_service
 from services.research.research_service import _EMPTY as _EMPTY_RESEARCH
 from services.research.research_service import ResearchContext
@@ -222,9 +231,16 @@ _DEFAULT_CORE_TIER_POLICY = DEFAULT_TIER_POLICY
 # during long frontier-model reasoning and silent gate phases, and giving the
 # UI a liveness signal.
 _GENERATION_HEARTBEAT_SECONDS = 10.0
-# Queue sentinel marking the end of the generation pipeline's event stream.
-_PIPELINE_END = object()
-
+# The request stream observes durable database state after enqueue.  A short
+# poll keeps checkpoint progress responsive without tying correctness to the
+# client connection or to an API-process-local queue.
+_GENERATION_OBSERVER_POLL_SECONDS = 2.0
+# Generation admission counts artifacts, while a chunked artifact can issue
+# multiple simultaneous requests. This worker-local call bulkhead is the final
+# guard against section fan-out multiplying into an upstream 429 storm.
+_PROVIDER_CALL_SEMAPHORE = asyncio.Semaphore(
+    max(1, settings.max_concurrent_provider_calls_per_process)
+)
 # Pipeline phases surfaced on the progress heartbeat so the loading UI can show
 # what the silent pipeline is actually doing instead of inferring from elapsed
 # time alone (issue #21 Phase 2c).  Ordered by pipeline progression.  The field
@@ -931,6 +947,7 @@ async def _watchdog_stream(
     provider: str,
     control: GenerationControl | None = None,
     wave_deadline: float | None = None,
+    hard_cap_seconds: float | None = None,
 ) -> AsyncGenerator[str, None]:
     """Supervise an adapter token stream with an idle timeout and a hard cap.
 
@@ -952,7 +969,11 @@ async def _watchdog_stream(
     clamp simply never binds tighter than the existing per-call/per-run bounds.
     """
     idle_timeout = float(settings.stage_provider_idle_timeout_seconds)
-    hard_cap = float(settings.stage_provider_call_timeout_seconds)
+    hard_cap = float(
+        hard_cap_seconds
+        if hard_cap_seconds is not None
+        else settings.stage_provider_call_timeout_seconds
+    )
     loop = asyncio.get_running_loop()
     started = loop.time()
     iterator = stream.__aiter__()
@@ -1089,15 +1110,18 @@ async def _stage_db_heartbeat(stage_id: UUID, run_id: UUID | None = None) -> Non
 
 
 def _runtime_fallback_route(
-    failed_route: LLMRoute, *, mode: str = "standard"
+    failed_route: LLMRoute,
+    *,
+    mode: str = "standard",
+    attempted_routes: frozenset[tuple[str, str]] = frozenset(),
+    allow_same_provider: bool = True,
 ) -> LLMRoute | None:
-    """Resolve the one-shot retry route after a full-artifact generation failure.
+    """Resolve the next healthy route after a generation-call failure.
 
-    A failed chunk may retry once on the selected provider.  Cross-provider
-    fallback is intentionally excluded: provider credentials, rate limits, and
-    model tier semantics are independent, and changing provider mid-artifact
-    produces inconsistent chunks. Rate-limit retries are handled separately and
-    never reach this function.
+    Prefer the configured alternate tier on the same provider while its circuit
+    remains healthy, then move to the next configured provider.  Completed
+    chunks record their effective provider/model, so changing provider at a chunk
+    boundary is recoverable and materially safer than terminalising a paid run.
 
     Direction note: for a provider whose primary is already the TOP tier (today
     Anthropic, on Opus 5) the second policy slot points DOWN — the retry lands on
@@ -1113,24 +1137,52 @@ def _runtime_fallback_route(
         else _CORE_ARTIFACT_TIER_POLICY
     )
     _, escalation_tier = table.get(failed_route.provider, _DEFAULT_CORE_TIER_POLICY)
-    if escalation_tier is None:
-        return None
-    if failed_route.model_tier == escalation_tier:
-        return None
+    from services.llm.provider_status import (  # noqa: PLC0415
+        can_route,
+        is_provider_configured,
+    )
+
+    attempted = set(attempted_routes)
+    attempted.add((failed_route.provider, failed_route.model))
+    if (
+        allow_same_provider
+        and escalation_tier is not None
+        and failed_route.model_tier != escalation_tier
+        and is_provider_configured(failed_route.provider)
+        and can_route(failed_route.provider)
+    ):
+        try:
+            route = resolve_llm_route(
+                operation=failed_route.operation,
+                preferred_provider=failed_route.provider,
+                requested_tier=escalation_tier,
+                fallback_tier=None,
+                latency_class="interactive",
+                allow_cross_provider=False,
+            )
+        except LLMRoutingError:
+            route = None
+        if route is not None and (route.provider, route.model) not in attempted:
+            return route
+
+    attempted_providers = frozenset(provider for provider, _model in attempted)
     try:
-        route = resolve_llm_route(
+        route = resolve_platform_route_by_provider(
             operation=failed_route.operation,
-            preferred_provider=failed_route.provider,
-            requested_tier=escalation_tier,
-            fallback_tier=None,
+            tier_policy=table,
             latency_class="interactive",
-            allow_cross_provider=False,
+            exclude_providers=attempted_providers,
         )
     except LLMRoutingError:
         return None
-    if route.model == failed_route.model:
+    if (route.provider, route.model) in attempted:
         return None
-    return route
+    return replace(
+        route,
+        cross_provider_fallback=True,
+        reason="runtime_cross_provider_fallback",
+        selection_reason="runtime_recovery",
+    )
 
 
 # Absolute clamp on an honored Retry-After so a pathological provider hint cannot
@@ -1871,23 +1923,19 @@ def _is_harness_files_chunk(stage_type: str, chunk: ArtifactChunkSpec) -> bool:
 def _chunk_output_budget(
     stage_type: str, chunk: ArtifactChunkSpec, route: LLMRoute
 ) -> int:
-    """Return the fixed first-attempt ceiling for a generation chunk.
+    """Return the canonical operation/provider/model first-attempt budget."""
 
-    ONE number for every chunk. The per-chunk budgets (49,152 for the harness
-    Files chunk, 24,576 for the rest of the harness, 32,768 elsewhere) implied a
-    size ordering that wall-clock does not honour: a chunk is exactly one
-    provider call, bounded by ``stage_provider_call_timeout_seconds`` (240s), and
-    at the measured ~38 visible tok/s that call cannot emit more than ~9,120
-    tokens on the platform primary whatever the budget says. So the budget was
-    never the binding constraint on Anthropic, and the divergence between the
-    three values has already caused one production bug (the Demo Day Files chunk
-    silently getting half the budget — see ``_is_harness_files_chunk``).
-
-    It still matters on the faster fallback providers and as the trigger for the
-    ``provider_stopped_by_limit`` doubling repair, so it stays generous — well
-    above every length target — and is clamped to the model's catalog ceiling.
-    """
-    return min(32_768, model_max_output_tokens(route.provider, route.model))
+    del chunk
+    operation = (
+        route.operation
+        if isinstance(route.operation, str)
+        else f"{stage_type}.generate"
+    )
+    return resolve_output_budget(
+        operation,
+        provider=route.provider,
+        model=route.model,
+    )
 
 
 # Measured visible-output throughput per provider, in characters per second.
@@ -1937,32 +1985,16 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
 
     Every target is sized against what ONE provider stream can actually finish,
     because a chunk is exactly one call: ``_watchdog_stream`` kills it at the
-    absolute ``stage_provider_call_timeout_seconds`` hard cap (270s as of
-    2026-08-06 — the full 300s deadline minus the 30s finalise reserve; a prior
-    version capped this at a stricter, self-imposed 240s), and the whole run is
-    pinned to that deadline. Overshooting the bound is not a soft failure — the
-    stream is killed and its partial text is discarded. Either way there is no
-    longer time for the mid-tier retry (the remainder falls below
-    ``stage_retry_min_remaining_seconds``), so a too-ambitious target burns the
-    whole deadline and delivers nothing.
+    configured ``stage_provider_call_timeout_seconds`` hard cap (240s by
+    default), inside a longer durable run deadline. Overshooting the bound is
+    not a soft failure — the stream is killed and its partial text is discarded.
+    The longer run deadline deliberately preserves an alternate-route attempt,
+    but conservative targets still avoid spending that recovery budget normally.
 
-    The targets below are NOT re-derived for the 270s cap or for Opus 5's move
-    to ``effort=high`` (also 2026-08-06): they are still sized against the
-    ~145 chars/s figure measured at ``effort=medium`` against the old 240s cap
-    (see the 24,000-character rationale below). Whether that leaves MORE margin
-    or LESS is genuinely unknown and depends on how much wall-clock high-effort
-    reasoning spends before visible output starts — margin is measured in
-    seconds, and high effort spends more of them per visible character, not
-    fewer. The cap only grew 12.5% (240s -> 270s); if high-effort throughput
-    drops by more than that, margin went DOWN despite the larger cap. The two
-    measured medium-effort core-gen calls on record bound the tolerance: on
-    2026-08-05 ``spec.generate`` ran 137.6s and ``plan.generate`` ran 163.4s
-    against the (then) 240s cap — against the new 270s cap that is 96% and 65%
-    headroom respectively, so a chunk near ``plan``'s shape can absorb at most
-    ~65% wall-clock inflation from medium to high before it starts losing
-    partial output to the watchdog. Retarget these once real high-effort
-    throughput is measured; until then, watch ``latency_ms`` and ``hard_cap``
-    kills in the generation route logs for spec/plan/harness/tasks.
+    The targets remain sized from the measured ~145 chars/s medium-effort
+    throughput against a 240s call cap. Opus high-effort throughput has not been
+    re-measured; watch latency, hard-cap kills, and runtime fallback counters and
+    retarget from production measurements rather than enlarging aspirationally.
 
     Every non-harness target is therefore the SAME 24,000-character ceiling,
     whether the chunk is a slice or the whole artifact. The earlier 80,000
@@ -2002,7 +2034,7 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
 
         contract  3,000-15,000 chars  ~103s
         files     below 22,000 chars  ~152s
-                                      ~255s of the 270s available
+                                      ~255s normal-case target
 
     at the measured ~145 chars/s. The contract chunk does not need the old
     headroom once the File Tree is bounded (below): its matrix is one row per
@@ -2048,7 +2080,7 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
     as two SEQUENTIAL waves (``task-overview`` alone, then
     ``task-foundation-blocks`` + ``task-interface-blocks`` +
     ``task-hardening-blocks`` in parallel, ~165s at the same ceiling) on the
-    SAME shared 270s run pool (``GenerationControl.provider_seconds_remaining``
+    SAME durable run pool (``GenerationControl.provider_seconds_remaining``
     — one deadline for the whole run, not per wave). Before this fix every
     chunk in both stages independently advertised the generic 24,000-char /
     ~165s ceiling regardless of wave, so the two sequential legs could sum to
@@ -2062,10 +2094,11 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
     with harness, whichever wave is the smaller sequential-only leg is shrunk
     so the two targets add up: ``validation-risk`` (spec) and ``task-overview``
     (tasks) are each capped at 3,000-13,000 characters (~90s), leaving the
-    unchanged 24,000-char parallel wave (~165s) ~255s total of the 270s pool —
-    the same margin as the harness split. Second, and unlike harness, this is
-    also enforced at runtime: ``_wave_deadline`` computes an absolute deadline
-    for each wave, threaded through ``_run_chunk_attempts`` /
+    unchanged 24,000-char parallel wave (~165s) ~255s total. The larger durable
+    run pool preserves retry capacity beyond that normal target. Second, and
+    unlike harness, this is also enforced at runtime: ``_wave_deadline``
+    computes an absolute deadline for each wave, threaded through
+    ``_run_chunk_attempts`` /
     ``_generate_chunk_once`` into ``_watchdog_stream`` as a third clamp
     alongside the per-call and per-run bounds. The deadline is a WEIGHTED share
     of whatever run budget remains at the moment the wave starts — weighted by
@@ -2077,7 +2110,7 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
     needs protecting). Capping the earlier wave to its fair share is what
     actually guarantees the later wave a floor of run budget; the prompt target
     alone is advisory and a chunk that ignores it could still consume the
-    whole per-call cap (270s as of 2026-08-06; was 240s) regardless of what it
+    whole configured per-call cap regardless of what it
     was asked to aim for.
 
     Demo Day is unaffected: its spec/tasks stay single ``whole_document``
@@ -2121,7 +2154,7 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
         return (
             "Length target: 3,000-13,000 characters for this chunk. It runs "
             "SECOND, after the product-scope/system-expectations wave already "
-            "spends part of the shared 270s run budget — keep this chunk lean "
+            "spends part of the shared run budget — keep this chunk lean "
             "so the two waves fit together. Shorter and denser beats longer "
             "and padded; do not pad toward the upper bound."
         )
@@ -2133,7 +2166,7 @@ def _chunk_length_target(stage_type: str, chunk: ArtifactChunkSpec) -> str:
         return (
             "Length target: 3,000-13,000 characters for this chunk. It runs "
             "FIRST, before the foundation/interface/hardening wave that needs "
-            "most of the shared 270s run budget — keep this chunk lean (the "
+            "most of the shared run budget — keep this chunk lean (the "
             "Dependency Graph and Task Sizing Legend are graded structurally, "
             "not by prose length, so most of this budget is really for the "
             "Traceability Overview) so the two waves fit together. Shorter "
@@ -2644,13 +2677,13 @@ def _wave_deadline(
 ) -> float | None:
     """Absolute monotonic deadline capping how long THIS wave may run.
 
-    ``None`` means "no additional cap" — the caller falls back to the existing
-    per-call (270s as of 2026-08-06; was 240s) and per-run (270s pool) bounds
+    ``None`` means "no additional cap" — the caller falls back to the configured
+    per-call and durable per-run bounds
     unchanged, which is every stage/mode except standard spec/tasks and every
     non-multi-wave case within those two.
 
     The deadline is a WEIGHTED share of whatever run budget remains right now
-    (``control.provider_seconds_remaining``), not a fixed 270/N split —
+    (``control.provider_seconds_remaining``), not a fixed deadline/N split —
     weighted by each wave's own advertised character ceiling (via
     ``_max_target_chars``, reading the same numbers ``_chunk_length_target``
     put in the prompt), because spec's and tasks' two waves are NOT equal in
@@ -2875,6 +2908,14 @@ class RateLimitError(Exception):
         self.retry_after = retry_after
 
 
+class QueuedGenerationCapacityError(RuntimeError):
+    """A durable generation job should retry after temporary saturation."""
+
+    def __init__(self, retry_after: int) -> None:
+        self.retry_after = max(1, int(retry_after))
+        super().__init__("generation worker capacity is temporarily full")
+
+
 class StageManager:
     STAGE_ORDER = STAGE_ORDER
     # STAGE_DEPENDENCIES is defined at module scope above; do not duplicate
@@ -3033,15 +3074,94 @@ class StageManager:
             wave_index: int,
         ) -> tuple[str, str, LLMRoute, int, str | None]:
             attempt_route = route
-            fallback_used = False
+            attempted_routes: set[tuple[str, str]] = set()
+            route_failovers = 0
             rate_limit_retries = 0
+            repair_count = 0
+            output_budget = _chunk_output_budget(stage_type, chunk, attempt_route)
+
+            def _move_to_fallback(
+                exc: BaseException,
+                *,
+                allow_same_provider: bool = True,
+            ) -> bool:
+                nonlocal attempt_route
+                nonlocal output_budget
+                nonlocal rate_limit_retries
+                nonlocal repair_count
+                nonlocal route_failovers
+
+                if isinstance(exc, ProviderError) and not exc.failover_allowed:
+                    return False
+                minimum = float(settings.stage_retry_min_remaining_seconds)
+                if control.provider_seconds_remaining < minimum:
+                    return False
+                fallback = _runtime_fallback_route(
+                    attempt_route,
+                    mode=mode,
+                    attempted_routes=frozenset(attempted_routes),
+                    allow_same_provider=allow_same_provider,
+                )
+                if fallback is None:
+                    return False
+                # Defensive loop breaker: routing implementations and tests are
+                # external to this attempt loop. Never revisit a provider/model
+                # already tried by this chunk even if a resolver returns it.
+                if (fallback.provider, fallback.model) in attempted_routes:
+                    return False
+                if repair_count:
+                    PIPELINE_COMPLETION_REPAIRS.labels(
+                        stage_type=stage_type,
+                        provider=attempt_route.provider,
+                        outcome="failed",
+                    ).inc()
+                PIPELINE_GENERATION_FALLBACKS.labels(
+                    stage_type=stage_type,
+                    provider=attempt_route.provider,
+                    outcome="attempted",
+                ).inc()
+                logger.warning(
+                    "stage.chunk_generation_fallback",
+                    extra={
+                        "generation_id": str(control.run_id),
+                        "stage": stage_type,
+                        "chunk": chunk.key,
+                        "provider": attempt_route.provider,
+                        "fallback_provider": fallback.provider,
+                        "failed_model": attempt_route.model,
+                        "fallback_model": fallback.model,
+                        "cause": type(exc).__name__,
+                        "provider_error_code": getattr(exc, "error_code", None),
+                    },
+                )
+                attempt_route = fallback
+                route_failovers += 1
+                rate_limit_retries = 0
+                repair_count = 0
+                output_budget = _chunk_output_budget(stage_type, chunk, attempt_route)
+                if stream_live and emit is not None:
+                    emit(json.dumps({"stream_reset": True}))
+                return True
+
             while True:
                 control.raise_if_stopped()
                 if control.provider_seconds_remaining <= 0:
                     control.request_deadline()
                     raise GenerationDeadlineExceeded()
-                adapter = adapter_factory(attempt_route)
-                retry_count = int(fallback_used) + rate_limit_retries
+                route_key = (attempt_route.provider, attempt_route.model)
+                attempted_routes.add(route_key)
+                retry_count = route_failovers + rate_limit_retries
+                # Never let one provider call consume the whole run. Reserve a
+                # real retry window for an alternate route while enough budget
+                # remains; the configured per-call cap is still the upper bound.
+                remaining = control.provider_seconds_remaining
+                retry_reserve = float(settings.stage_retry_min_remaining_seconds)
+                attempt_hard_cap = min(
+                    float(settings.stage_provider_call_timeout_seconds),
+                    max(1.0, remaining - retry_reserve)
+                    if remaining > retry_reserve * 2
+                    else remaining,
+                )
                 # Recomputed on EVERY attempt (including a fallback retry) from
                 # whatever run budget genuinely remains right now. A deadline
                 # frozen once at wave start would already be expired by the
@@ -3054,27 +3174,48 @@ class StageManager:
                     stage_type, mode, control, waves, wave_index
                 )
                 try:
-                    text = await self._generate_chunk_once(
-                        adapter=adapter,
-                        route=attempt_route,
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        stage_type=stage_type,
-                        chunk=chunk,
-                        prior_chunks=prior_chunks,
-                        max_tokens=_chunk_output_budget(
-                            stage_type, chunk, attempt_route
-                        ),
-                        retry_count=retry_count,
-                        repair_count=0,
-                        emit=emit if stream_live else None,
-                        cache_policy=cache_policy,
-                        cache_system=_should_cache_system_prompt(
-                            mode, chunk, attempt_route.provider
-                        ),
-                        control=control,
-                        wave_deadline=wave_deadline,
-                    )
+                    try:
+                        adapter = adapter_factory(attempt_route)
+                    except HTTPException as exc:
+                        # A circuit can open after initial route selection (for
+                        # example when parallel siblings fail together). Convert
+                        # the gateway's HTTP boundary exception back into the
+                        # provider-neutral retry domain instead of terminalising
+                        # the run as the meaningless code ``HTTPException``.
+                        raise ProviderUnavailableError(
+                            attempt_route.provider,
+                            exc,
+                            status_code=exc.status_code,
+                            error_type="route_unavailable",
+                        ) from exc
+                    async with _PROVIDER_CALL_SEMAPHORE:
+                        control.raise_if_stopped()
+                        text = await self._generate_chunk_once(
+                            adapter=adapter,
+                            route=attempt_route,
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                            stage_type=stage_type,
+                            chunk=chunk,
+                            prior_chunks=prior_chunks,
+                            max_tokens=output_budget,
+                            retry_count=retry_count,
+                            repair_count=repair_count,
+                            emit=emit if stream_live else None,
+                            cache_policy=cache_policy,
+                            cache_system=_should_cache_system_prompt(
+                                mode, chunk, attempt_route.provider
+                            ),
+                            control=control,
+                            wave_deadline=wave_deadline,
+                            hard_cap_seconds=attempt_hard_cap,
+                        )
+                    if repair_count:
+                        PIPELINE_COMPLETION_REPAIRS.labels(
+                            stage_type=stage_type,
+                            provider=attempt_route.provider,
+                            outcome="succeeded",
+                        ).inc()
                     return (
                         chunk.key,
                         _ensure_chunk_heading(chunk, text),
@@ -3082,6 +3223,45 @@ class StageManager:
                         retry_count,
                         getattr(adapter, "last_generation_id", None),
                     )
+                except IncompleteArtifactError as exc:
+                    provider_limit_stop = any(
+                        issue.code == "provider_stopped_by_limit"
+                        for issue in exc.issues
+                    )
+                    ceiling = model_max_output_tokens(
+                        attempt_route.provider, attempt_route.model
+                    )
+                    enlarged = min(output_budget * 2, ceiling)
+                    if (
+                        provider_limit_stop
+                        and repair_count == 0
+                        and enlarged > output_budget
+                        and control.provider_seconds_remaining
+                        >= float(settings.stage_retry_min_remaining_seconds)
+                    ):
+                        repair_count = 1
+                        output_budget = enlarged
+                        PIPELINE_COMPLETION_REPAIRS.labels(
+                            stage_type=stage_type,
+                            provider=attempt_route.provider,
+                            outcome="attempted",
+                        ).inc()
+                        if stream_live and emit is not None:
+                            emit(json.dumps({"stream_reset": True}))
+                        continue
+                    if provider_limit_stop and enlarged <= output_budget:
+                        PIPELINE_COMPLETION_REPAIRS.labels(
+                            stage_type=stage_type,
+                            provider=attempt_route.provider,
+                            outcome="skipped_at_ceiling",
+                        ).inc()
+                    if provider_limit_stop and repair_count:
+                        PIPELINE_COMPLETION_REPAIRS.labels(
+                            stage_type=stage_type,
+                            provider=attempt_route.provider,
+                            outcome="failed",
+                        ).inc()
+                    raise
                 except ProviderRateLimitError as exc:
                     maximum = max(0, settings.provider_rate_limit_max_retries)
                     if rate_limit_retries >= maximum:
@@ -3090,6 +3270,11 @@ class StageManager:
                             provider=attempt_route.provider,
                             outcome="exhausted",
                         ).inc()
+                        # Do not move to a larger model under the same throttled
+                        # provider/org. Once bounded in-place retries are spent,
+                        # recover through a separately configured provider.
+                        if _move_to_fallback(exc, allow_same_provider=False):
+                            continue
                         raise
                     delay = _rate_limit_retry_delay(rate_limit_retries, exc.retry_after)
                     if control.remaining_seconds < max(
@@ -3104,31 +3289,9 @@ class StageManager:
                     ).inc()
                     await _bounded_backoff(delay)
                 except (ProviderError, TimeoutError) as exc:
-                    minimum = float(settings.stage_retry_min_remaining_seconds)
-                    if fallback_used or control.remaining_seconds < minimum:
-                        raise
-                    fallback = _runtime_fallback_route(attempt_route, mode=mode)
-                    if fallback is None:
-                        raise
-                    PIPELINE_GENERATION_FALLBACKS.labels(
-                        stage_type=stage_type,
-                        provider=attempt_route.provider,
-                        outcome="attempted",
-                    ).inc()
-                    logger.warning(
-                        "stage.chunk_generation_fallback",
-                        extra={
-                            "generation_id": str(control.run_id),
-                            "stage": stage_type,
-                            "chunk": chunk.key,
-                            "provider": attempt_route.provider,
-                            "failed_model": attempt_route.model,
-                            "fallback_model": fallback.model,
-                            "cause": type(exc).__name__,
-                        },
-                    )
-                    attempt_route = fallback
-                    fallback_used = True
+                    if _move_to_fallback(exc):
+                        continue
+                    raise
 
         async def _one_chunk(
             chunk: ArtifactChunkSpec,
@@ -3282,6 +3445,7 @@ class StageManager:
         cache_system: bool = True,
         control: GenerationControl | None = None,
         wave_deadline: float | None = None,
+        hard_cap_seconds: float | None = None,
     ) -> str:
         accumulated = ""
         _set_adapter_attempt_metadata(
@@ -3348,6 +3512,7 @@ class StageManager:
                     provider=route.provider,
                     control=control,
                     wave_deadline=wave_deadline,
+                    hard_cap_seconds=hard_cap_seconds,
                 ):
                     accumulated += token
                     if len(accumulated) > 500_000:
@@ -3388,7 +3553,7 @@ class StageManager:
                 stage_type,
                 [
                     CompletenessIssue(
-                        code="model_overproduction",
+                        code="provider_stopped_by_limit",
                         detail=(
                             "The model exceeded this chunk's output ceiling and "
                             "stopped before completing it."
@@ -3744,17 +3909,7 @@ class StageManager:
                     status="cancelled",
                     error_code=exc.code,
                 )
-                yield json.dumps(
-                    {
-                        "generation_terminal": {
-                            "generation_id": str(generation_run.id),
-                            "status": settled.status,
-                            "partial_saved": False,
-                            "refunded_credits": settled.refunded_credits,
-                            "credit_was_deducted": settled.credit_was_deducted,
-                        }
-                    }
-                )
+                yield self._terminal_event(settled)
                 return
             except GenerationDeadlineExceeded as exc:
                 settled = await terminalize_interrupted_run(
@@ -3763,17 +3918,7 @@ class StageManager:
                     status="timed_out",
                     error_code=exc.code,
                 )
-                yield json.dumps(
-                    {
-                        "generation_terminal": {
-                            "generation_id": str(generation_run.id),
-                            "status": settled.status,
-                            "partial_saved": False,
-                            "refunded_credits": settled.refunded_credits,
-                            "credit_was_deducted": settled.credit_was_deducted,
-                        }
-                    }
-                )
+                yield self._terminal_event(settled)
                 return
             except Exception as exc:
                 logger.warning(
@@ -3793,17 +3938,7 @@ class StageManager:
                     error_code="invalid_generation_cache_entry",
                     discard_content=True,
                 )
-                yield json.dumps(
-                    {
-                        "generation_terminal": {
-                            "generation_id": str(generation_run.id),
-                            "status": settled.status,
-                            "partial_saved": False,
-                            "refunded_credits": settled.refunded_credits,
-                            "credit_was_deducted": settled.credit_was_deducted,
-                        }
-                    }
-                )
+                yield self._terminal_event(settled)
                 return
             except (asyncio.CancelledError, GeneratorExit):
                 _BACKGROUND_PIPELINE_TASKS.spawn(
@@ -3880,14 +4015,9 @@ class StageManager:
                     )
             return
 
-        # Admission control (audit F1/F2): acquire a generation slot across the
-        # per-process, per-user, and per-provider budgets BEFORE any provider call
-        # (incl. the paid Brave research below). Acquired after the cache-miss so a
-        # cache hit never consumes a slot. Over budget ⇒ fast-fail with a
-        # Retry-After, surfaced through the existing RateLimitError SSE convention.
-        # The slot is owned by the pipeline once it is launched (released in the
-        # pipeline body's finally); generate() releases it only when it acquired
-        # but never handed off (a preflight failure before the task is created).
+        # Admission control keeps the durable queue bounded before charging. The
+        # short API-side lease is released after enqueue; the worker acquires its
+        # own full-lifetime lease before research, prompt compression, or model I/O.
         try:
             admission = await admit_generation(
                 redis, user_id=str(user.id), provider=route.provider
@@ -3895,9 +4025,6 @@ class StageManager:
         except GenerationCapacityError as exc:
             raise RateLimitError(retry_after=exc.retry_after) from exc
 
-        admission_handed_off = False
-        control_handed_off = False
-        control: GenerationControl | None = None
         try:
             # Charge + flip to in_progress FIRST, before the seconds-long research
             # fetch and prompt assembly below. This shrinks the
@@ -3972,362 +4099,434 @@ class StageManager:
                         exc_info=True,
                     )
 
-            phase_tracker = _PhaseTracker()
-            phase_tracker.bind_run(generation_run)
-            control = GenerationControl(
-                run_id=generation_run.id,
-                stage_id=stage.id,
-                redis=redis,
-                deadline_at=generation_run.deadline_at,
-                duration_seconds=max(
-                    0.0,
-                    (generation_run.deadline_at - datetime.now(UTC)).total_seconds(),
-                ),
+            # Transfer the entire post-charge lifecycle to the durable worker,
+            # including optional research and any model-backed prompt compression.
+            # Enqueue happens before the first SSE yield, so even an immediate
+            # browser disconnect cannot strand or cancel the paid run.
+            job_payload = {
+                "payload_version": 1,
+                "generation_run_id": str(generation_run.id),
+                "route": asdict(route),
+                "trace_id": trace_id,
+                "cache_key": cache_key,
+                "resume_content": resume_seed,
+                "free": free,
+                "admission_handoff": admission.handoff_payload(),
+            }
+            enqueue_task = asyncio.create_task(
+                self._enqueue_generation_job(job_payload, generation_run.id),
+                name=f"stage-generation-enqueue:{generation_run.id}",
             )
-            control.start()
-            # This is deliberately the first post-commit event. The UI receives
-            # the durable id and absolute deadline before research or prompt
-            # compression begins, so refresh/cancel are safe during preflight.
             try:
-                yield json.dumps(
-                    {
-                        "generation_started": {
-                            "generation_id": str(generation_run.id),
-                            "deadline": generation_run.deadline_at.isoformat(),
-                            "action": action,
-                            "total_parts": generation_run.total_parts,
-                        }
-                    }
-                )
-            except (asyncio.CancelledError, GeneratorExit):
-                _BACKGROUND_PIPELINE_TASKS.spawn(
-                    self._terminalize_generation_run(
-                        generation_run.id,
-                        status="cancelled",
-                        error_code="client_disconnected_during_preflight",
-                    )
-                )
-                raise
-
-            # Prompt assembly runs AFTER the in_progress commit now. A failure
-            # here must undo the charge and reset the stage so a preflight failure
-            # stays user-invisible (net zero).
-            #
-            # The stage is committed `in_progress` but the pipeline (which owns the
-            # liveness heartbeat) is not spawned until AFTER research + build_prompt
-            # succeed. Cover that window with the same heartbeat the pipeline uses,
-            # so a slow-but-alive preflight (a large-statement compression call, a
-            # stalled Brave fetch) can't be mistaken for a dead generation and
-            # reaped by the recovery sweep mid-flight — which would refund
-            # a generation that then streams and delivers (#4). Cancelled in every
-            # exit path (finally) so it never outlives the preflight.
-            preflight_heartbeat = asyncio.create_task(
-                _stage_db_heartbeat(stage.id, generation_run.id)
-            )
-            preflight_task: asyncio.Task | None = None
-            stop_task: asyncio.Task | None = None
-            try:
-                # Issue #12 (Phase 3): optional Brave web-research grounding,
-                # fetched after the generation-cache miss so a cache hit never
-                # triggers a paid Brave call, and baked into user_prompt once. The
-                # mid-tier escalation retry reuses this same user_prompt, so a
-                # retry never re-fetches or re-charges. `credit_cost=0` because the
-                # generation charge is ALREADY deducted above: the research surplus
-                # guard must only ensure the remaining balance covers the research
-                # charge itself, not re-reserve the already-spent generation cost
-                # (post-reorder double-count fix). (Phase 4): the block feeds the
-                # prompt and the full context is threaded to the pipeline to
-                # persist on the StageVersion.
-                async def _assemble_prompt():
-                    research = await self._fetch_research_context(
-                        workspace,
-                        stage.type,
-                        user,
-                        redis,
-                        credit_cost=0,
-                        free=free,
-                    )
-                    system_prompt, user_prompt, compression_rung = await build_prompt(
-                        stage.type,
-                        workspace,
-                        db,
-                        redis,
-                        provider=route.provider,
-                        model=route.model,
-                        research_context=research.block,
-                    )
-                    return research, system_prompt, user_prompt, compression_rung
-
-                preflight_task = asyncio.create_task(
-                    _assemble_prompt(),
-                    name=f"stage-preflight:{generation_run.id}",
-                )
-                stop_task = asyncio.create_task(control.event.wait())
-                while not preflight_task.done():
-                    control.raise_if_stopped()
-                    done, _ = await asyncio.wait(
-                        {preflight_task, stop_task},
-                        timeout=min(
-                            _GENERATION_HEARTBEAT_SECONDS,
-                            max(0.001, control.remaining_seconds),
-                        ),
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if stop_task in done:
-                        preflight_task.cancel()
-                        await asyncio.gather(preflight_task, return_exceptions=True)
-                        control.raise_if_stopped()
-                    if preflight_task not in done:
-                        yield json.dumps(
-                            {
-                                "progress": _progress_payload(
-                                    stage_type=stage.type,
-                                    phase=phase_tracker,
-                                    elapsed_seconds=int(
-                                        settings.stage_generation_deadline_seconds
-                                        - control.remaining_seconds
-                                    ),
-                                )
-                            }
-                        )
-                research, system_prompt, user_prompt, compression_rung = (
-                    await preflight_task
-                )
-                control.raise_if_stopped()
-                # Phase A instrumentation (compression plan §8): observe the size
-                # of the fully assembled prompt actually sent to the model. Reached
-                # only on a generation-cache miss (a hit returns above without
-                # assembling a prompt), which is correct — this is the figure the
-                # window-fit reliability ceiling (§5) is measured against.
-                record_assembled_prompt_tokens(
-                    route.provider,
-                    stage.type,
-                    estimate_tokens(
-                        route.provider,
-                        route.model,
-                        f"{system_prompt}\n{user_prompt}",
-                    ),
-                )
-            except GenerationCancelledError as exc:
-                settled = await terminalize_interrupted_run(
-                    db,
-                    run_id=generation_run.id,
-                    status="cancelled",
-                    error_code=exc.code,
-                )
-                yield json.dumps(
-                    {
-                        "generation_terminal": {
-                            "generation_id": str(generation_run.id),
-                            "status": settled.status,
-                            "partial_saved": settled.partial_saved,
-                            "refunded_credits": settled.refunded_credits,
-                            "credit_was_deducted": settled.credit_was_deducted,
-                        }
-                    }
-                )
-                return
-            except GenerationDeadlineExceeded as exc:
-                settled = await terminalize_interrupted_run(
-                    db,
-                    run_id=generation_run.id,
-                    status="timed_out",
-                    error_code=exc.code,
-                )
-                yield json.dumps(
-                    {
-                        "generation_terminal": {
-                            "generation_id": str(generation_run.id),
-                            "status": settled.status,
-                            "partial_saved": settled.partial_saved,
-                            "refunded_credits": settled.refunded_credits,
-                            "credit_was_deducted": settled.credit_was_deducted,
-                        }
-                    }
-                )
-                return
-            except Exception as exc:
-                # A normal (non-cancellation) preflight failure after the charge:
-                # refund + reset to the PRIOR status on the still-live request
-                # session, best effort, then re-raise the ORIGINAL error so the
-                # router maps it honestly (a secondary DB error here must not mask
-                # the real cause). If this cleanup itself fails, the bounded
-                # recovery sweep is the backstop — it refunds (idempotently, keyed
-                # on the ledger row) and resets any stage left in_progress.
+                # Request cancellation must not interrupt the tiny commit→enqueue
+                # handoff and strand a paid run. If the browser vanishes here,
+                # finish this one queue write before propagating cancellation.
+                await asyncio.shield(enqueue_task)
+                admission.complete_handoff()
+            except asyncio.CancelledError:
                 try:
-                    settled = await terminalize_interrupted_run(
+                    await enqueue_task
+                except QueueUnavailableError:
+                    await terminalize_interrupted_run(
                         db,
                         run_id=generation_run.id,
                         status="failed",
-                        error_code="preflight_failed",
+                        error_code="generation_queue_unavailable",
                     )
-                except Exception:
-                    logger.warning(
-                        "stage.preflight_reset_failed stage_id=%s — recovery "
-                        "sweep will reconcile the charge + status",
-                        stage_id,
-                        exc_info=True,
-                    )
-                    raise exc
-                yield json.dumps(
-                    {
-                        "generation_terminal": {
-                            "generation_id": str(generation_run.id),
-                            "status": settled.status,
-                            "partial_saved": settled.partial_saved,
-                            "refunded_credits": settled.refunded_credits,
-                            "credit_was_deducted": settled.credit_was_deducted,
-                        }
-                    }
+                else:
+                    admission.complete_handoff()
+                raise
+            except QueueUnavailableError:
+                settled = await terminalize_interrupted_run(
+                    db,
+                    run_id=generation_run.id,
+                    status="failed",
+                    error_code="generation_queue_unavailable",
                 )
+                yield self._terminal_event(settled)
                 return
-            except (asyncio.CancelledError, GeneratorExit):
-                # Client disconnect DURING the post-charge preflight (#2): the
-                # request session is being torn down mid-await, so we cannot refund
-                # on it (and awaiting a cleanup here would be unsafe on the
-                # cancellation/GeneratorExit unwind). Spawn a detached
-                # fresh-session cleanup instead — a synchronous create_task, no
-                # await — to refund + reset promptly rather than leaving a charged
-                # `in_progress` zombie until the next recovery sweep. It is
-                # idempotent (refund keyed on the ledger row; reset guarded on
-                # in_progress + ledger ownership) and the sweep remains the
-                # backstop if it never runs (e.g. loop shutdown), so it is a pure
-                # acceleration with no new correctness dependency. Then re-raise so
-                # the cancellation propagates unchanged.
-                try:
-                    _BACKGROUND_PIPELINE_TASKS.spawn(
-                        self._terminalize_generation_run(
-                            generation_run.id,
-                            status="cancelled",
-                            error_code="client_disconnected_during_preflight",
+        finally:
+            await admission.release()
+        yield json.dumps(
+            {
+                "generation_started": {
+                    "generation_id": str(generation_run.id),
+                    "deadline": generation_run.deadline_at.isoformat(),
+                    "action": action,
+                    "total_parts": generation_run.total_parts,
+                }
+            }
+        )
+        async for event in self._observe_queued_generation(
+            generation_run.id, stage_id=stage_id, stage_type=stage.type
+        ):
+            yield event
+
+    async def _enqueue_generation_job(self, payload: dict, run_id: UUID) -> None:
+        """Durable queue seam kept narrow for deterministic unit testing."""
+        await enqueue(
+            "stage_generate",
+            payload,
+            job_id=f"stage-generation:{run_id}",
+        )
+
+    @staticmethod
+    def _terminal_event(run: StageGenerationRun) -> str:
+        """Return the stable, diagnostic terminal SSE contract."""
+        return json.dumps(
+            {
+                "generation_terminal": {
+                    "generation_id": str(run.id),
+                    "status": run.status,
+                    "error_code": run.error_code,
+                    "partial_saved": run.partial_saved,
+                    "refunded_credits": run.refunded_credits,
+                    "credit_was_deducted": run.credit_was_deducted,
+                }
+            }
+        )
+
+    async def _observe_queued_generation(
+        self,
+        generation_run_id: UUID,
+        *,
+        stage_id: UUID,
+        stage_type: str,
+    ) -> AsyncGenerator[str, None]:
+        """Stream a durable run's DB state without owning or cancelling it."""
+        from database import AsyncSessionLocal  # noqa: PLC0415
+
+        last_completed = -1
+        while True:
+            async with AsyncSessionLocal() as observer_db:
+                run = (
+                    await observer_db.execute(
+                        select(StageGenerationRun).where(
+                            StageGenerationRun.id == generation_run_id
                         )
                     )
-                except Exception:
-                    logger.warning(
-                        "stage.preflight_detached_cleanup_spawn_failed "
-                        "stage_id=%s — recovery sweep will reconcile",
-                        stage_id,
-                        exc_info=True,
-                    )
-                raise
-            finally:
-                # The preflight heartbeat has done its job (or the preflight is
-                # unwinding); stop it before the pipeline starts its own. cancel()
-                # is synchronous and safe on every exit path including the
-                # cancellation/GeneratorExit unwind; the heartbeat's WHERE-clause
-                # guard makes any late bump harmless.
-                preflight_heartbeat.cancel()
-                if stop_task is not None:
-                    stop_task.cancel()
-                if preflight_task is not None and not preflight_task.done():
-                    preflight_task.cancel()
-                await asyncio.gather(
-                    *(
-                        task
-                        for task in (preflight_heartbeat, stop_task, preflight_task)
-                        if task is not None
-                    ),
-                    return_exceptions=True,
-                )
-
-            # The pipeline runs as a background task; this generator only pumps its
-            # SSE events to the client, interleaving {"progress": ...} heartbeats
-            # whenever the pipeline has been silent for a heartbeat interval.
-            # Heartbeats therefore cover the ENTIRE generation — artifact
-            # streaming, quality gates, critic review/regenerate, persistence —
-            # so proxies never see an idle connection and the UI always has a
-            # liveness signal, even while a frontier model reasons silently or a
-            # silent gate phase (critic complete() call) runs for minutes.
-            events: asyncio.Queue = asyncio.Queue()
-            # The pipeline owns its own DB session and is identified only by ids /
-            # scalars, never the request-bound ORM objects: the request session is
-            # torn down the instant generate() returns (e.g. on a client
-            # disconnect), so the detached task must not touch `db`, `user`, or
-            # `deduction` (docs/REFRESH_DURING_GENERATION_PLAN.md).
-            # Hold a strong reference (via the registry) so a client disconnect —
-            # which stops the pump below from awaiting the task — can never let
-            # the detached pipeline be garbage-collected before it finishes
-            # persisting. The pipeline is NOT advisory-gated (it is the live work,
-            # already bounded by F1 admission).
-            pipeline = _BACKGROUND_PIPELINE_TASKS.spawn(
-                self._execute_generation_pipeline(
-                    emit=events.put_nowait,
-                    stage_id=stage_id,
-                    generation_run_id=generation_run.id,
-                    control=control,
-                    workspace_id=workspace.id,
-                    user_id=user.id,
-                    redis=redis,
-                    route=route,
-                    deduction_id=deduction.id if deduction else None,
-                    action=action,
-                    trace_id=trace_id,
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    compression_rung=compression_rung,
-                    cache_key=cache_key,
-                    phase=phase_tracker,
-                    research=research,
-                    admission=admission,
-                    resume_content=resume_seed,
-                )
-            )
-            # The pipeline now owns the admission slot (released in its body's
-            # finally). Mark handed off so generate()'s finally below does not
-            # also release it (the release is idempotent regardless, but this
-            # keeps ownership unambiguous).
-            admission_handed_off = True
-            control_handed_off = True
-        finally:
-            if control is not None and not control_handed_off:
-                await control.close()
-            if not admission_handed_off:
-                await admission.release()
-        # The sentinel is enqueued from the done-callback (not the pipeline
-        # body) so it is guaranteed to arrive after every event the pipeline
-        # emitted, on success, failure, and cancellation alike. The registry
-        # already attached the strong-ref discard + error-log callbacks.
-        pipeline.add_done_callback(lambda _task: events.put_nowait(_PIPELINE_END))
-        heartbeat_loop = asyncio.get_running_loop()
-        pipeline_started = heartbeat_loop.time()
-        try:
-            while True:
-                try:
-                    event = await asyncio.wait_for(
-                        events.get(), timeout=_GENERATION_HEARTBEAT_SECONDS
-                    )
-                except asyncio.TimeoutError:
+                ).scalar_one_or_none()
+                if run is None:
+                    # A deleted run is an invariant violation, but it must still
+                    # terminate the SSE instead of spinning forever.
                     yield json.dumps(
                         {
-                            "progress": _progress_payload(
-                                stage_type=stage.type,
-                                phase=phase_tracker,
-                                elapsed_seconds=int(
-                                    heartbeat_loop.time() - pipeline_started
-                                ),
-                            )
+                            "generation_terminal": {
+                                "generation_id": str(generation_run_id),
+                                "status": "failed",
+                                "error_code": "generation_run_missing",
+                                "partial_saved": False,
+                                "refunded_credits": 0,
+                                "credit_was_deducted": False,
+                            }
                         }
                     )
-                    continue
-                if event is _PIPELINE_END:
-                    break
-                yield event
-            # Re-raise the pipeline's failure (if any) for the router's error
-            # mapping, after every queued event has been flushed to the client.
-            await pipeline
+                    return
+
+                if run.status != "running":
+                    if run.status == "succeeded":
+                        completed_stage = (
+                            await observer_db.execute(
+                                select(Stage).where(Stage.id == stage_id)
+                            )
+                        ).scalar_one_or_none()
+                        content = completed_stage.content if completed_stage else ""
+                        yield json.dumps({"stream_reset": True})
+                        if content:
+                            yield content
+                        yield json.dumps({"done": True, "stage_id": str(stage_id)})
+                    else:
+                        if run.status == "blocked":
+                            blocked_stage = (
+                                await observer_db.execute(
+                                    select(Stage).where(Stage.id == stage_id)
+                                )
+                            ).scalar_one_or_none()
+                            gate_payload = (
+                                dict(blocked_stage.quality_gate_payload or {})
+                                if blocked_stage is not None
+                                else {}
+                            )
+                            if gate_payload:
+                                yield json.dumps(
+                                    {"quality_gate_failed": gate_payload}
+                                )
+                        yield self._terminal_event(run)
+                    return
+
+                if run.completed_parts != last_completed:
+                    last_completed = run.completed_parts
+                    if last_completed > 0:
+                        checkpoint = await load_checkpoint_content(
+                            observer_db, generation_run_id
+                        )
+                        if checkpoint:
+                            yield json.dumps({"stream_reset": True})
+                            yield checkpoint
+
+                phase = _PhaseTracker()
+                phase.bind_run(run)
+                phase.phase = run.phase
+                phase.completed = run.completed_parts
+                yield json.dumps(
+                    {
+                        "progress": _progress_payload(
+                            stage_type=stage_type,
+                            phase=phase,
+                            elapsed_seconds=max(
+                                0,
+                                int(
+                                    (
+                                        datetime.now(UTC) - run.started_at
+                                    ).total_seconds()
+                                ),
+                            ),
+                        )
+                    }
+                )
+            await asyncio.sleep(_GENERATION_OBSERVER_POLL_SECONDS)
+
+    async def execute_queued_generation(self, payload: dict) -> None:
+        """Worker entrypoint for one idempotent durable generation run."""
+        from database import AsyncSessionLocal  # noqa: PLC0415
+
+        run_id = UUID(str(payload["generation_run_id"]))
+        async with AsyncSessionLocal() as db:
+            run = (
+                await db.execute(
+                    select(StageGenerationRun).where(StageGenerationRun.id == run_id)
+                )
+            ).scalar_one_or_none()
+            if run is None:
+                return
+            run_is_running = run.status == "running"
+            # Copy every scalar before closing the read session.  No worker job
+            # retains request/session-owned ORM state across provider I/O.
+            stage_id = run.stage_id
+            workspace_id = run.workspace_id
+            user_id = run.user_id
+            deduction_id = run.deduction_ledger_id
+            action = run.action
+            deadline_at = run.deadline_at
+            phase = _PhaseTracker()
+            phase.bind_run(run)
+            checkpoint_seed = (
+                await load_checkpoint_map(db, run_id) if run_is_running else {}
+            )
+
+        try:
+            if payload.get("payload_version") != 1:
+                raise ValueError("unsupported generation job payload version")
+            route = LLMRoute(**payload["route"])
+            cache_key = str(payload["cache_key"])
+            admission_handoff = payload["admission_handoff"]
+            if not isinstance(admission_handoff, dict):
+                raise ValueError("generation admission handoff is invalid")
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.error(
+                "stage.generation_job_payload_invalid",
+                extra={"generation_id": str(run_id), "reason": str(exc)},
+            )
+            if run_is_running:
+                await self._terminalize_generation_run(
+                    run_id,
+                    status="failed",
+                    error_code="generation_job_payload_invalid",
+                )
+            return
+        redis = await self._redis_client()
+        if not run_is_running:
+            with contextlib.suppress(ValueError):
+                await release_generation_admission_handoff(
+                    redis,
+                    handoff=admission_handoff,
+                    user_id=str(user_id),
+                    provider=route.provider,
+                )
+            return
+        remaining = max(0.0, (deadline_at - datetime.now(UTC)).total_seconds())
+        if remaining <= 0:
+            with contextlib.suppress(ValueError):
+                await release_generation_admission_handoff(
+                    redis,
+                    handoff=admission_handoff,
+                    user_id=str(user_id),
+                    provider=route.provider,
+                )
+            await self._terminalize_generation_run(
+                run_id,
+                status="timed_out",
+                error_code="generation_deadline_exceeded",
+            )
+            return
+
+        try:
+            admission = await resume_generation_admission(
+                redis,
+                handoff=admission_handoff,
+                user_id=str(user_id),
+                provider=route.provider,
+            )
+        except ValueError as exc:
+            logger.error(
+                "stage.generation_job_payload_invalid",
+                extra={"generation_id": str(run_id), "reason": str(exc)},
+            )
+            await self._terminalize_generation_run(
+                run_id,
+                status="failed",
+                error_code="generation_job_payload_invalid",
+            )
+            return
+        except GenerationCapacityError as exc:
+            # Let arq retry this same job instead of failing/refunding a valid
+            # paid run merely because a worker/provider bulkhead is momentarily
+            # full. The exception is deliberately typed for worker.py.
+            raise QueuedGenerationCapacityError(exc.retry_after) from exc
+
+        control = GenerationControl(
+            run_id=run_id,
+            stage_id=stage_id,
+            redis=redis,
+            deadline_at=deadline_at,
+            duration_seconds=remaining,
+        )
+        control.start()
+        resume_content = dict(payload.get("resume_content") or {})
+        # A worker killed after checkpointing one or more chunks is retried under
+        # the same arq/run id. Reuse those chunks rather than paying for them and
+        # risking a different answer a second time.
+        resume_content.update(checkpoint_seed)
+
+        async def _prepare_prompt() -> tuple[ResearchContext, str, str, str, str]:
+            async with AsyncSessionLocal() as prep_db:
+                stage = await self._load_stage(stage_id, prep_db)
+                workspace = await self._load_workspace(workspace_id, prep_db)
+                # The generation charge already committed before enqueue. Brave's
+                # own billing path performs the authoritative balance check; this
+                # lightweight reference avoids retaining a user ORM object across
+                # its dedicated research session.
+                research_user = SimpleNamespace(
+                    id=user_id,
+                    credit_balance=None,
+                )
+                research = await self._fetch_research_context(
+                    workspace,
+                    stage.type,
+                    research_user,
+                    redis,
+                    credit_cost=0,
+                    free=bool(payload.get("free", False)),
+                )
+                system_prompt, user_prompt, compression_rung = await build_prompt(
+                    stage.type,
+                    workspace,
+                    prep_db,
+                    redis,
+                    provider=route.provider,
+                    model=route.model,
+                    research_context=research.block,
+                )
+                await prep_db.commit()
+                return (
+                    research,
+                    system_prompt,
+                    user_prompt,
+                    compression_rung,
+                    stage.type,
+                )
+
+        preflight_heartbeat = asyncio.create_task(
+            _stage_db_heartbeat(stage_id, run_id)
+        )
+        preflight_task = asyncio.create_task(
+            _prepare_prompt(), name=f"stage-worker-preflight:{run_id}"
+        )
+        stop_task = asyncio.create_task(control.event.wait())
+        pipeline_handoff = False
+        try:
+            done, _ = await asyncio.wait(
+                {preflight_task, stop_task},
+                timeout=max(0.001, control.remaining_seconds),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if preflight_task not in done:
+                preflight_task.cancel()
+                await asyncio.gather(preflight_task, return_exceptions=True)
+                control.raise_if_stopped()
+                control.request_deadline()
+                raise GenerationDeadlineExceeded()
+            research, system_prompt, user_prompt, compression_rung, stage_type = (
+                await preflight_task
+            )
+            control.raise_if_stopped()
+            record_assembled_prompt_tokens(
+                route.provider,
+                stage_type,
+                estimate_tokens(
+                    route.provider,
+                    route.model,
+                    f"{system_prompt}\n{user_prompt}",
+                ),
+            )
+            pipeline_handoff = True
+        except GenerationStoppedError as exc:
+            await self._terminalize_generation_run(
+                run_id,
+                status=(
+                    "cancelled"
+                    if isinstance(exc, GenerationCancelledError)
+                    else "timed_out"
+                ),
+                error_code=exc.code,
+            )
+            return
+        except Exception as exc:
+            logger.exception(
+                "stage.worker_preflight_failed",
+                extra={"generation_id": str(run_id), "stage_id": str(stage_id)},
+            )
+            await self._terminalize_generation_run(
+                run_id,
+                status="failed",
+                error_code=str(getattr(exc, "error_code", "preflight_failed")),
+            )
+            return
         finally:
-            # A client disconnect (GeneratorExit/CancelledError) tears down this
-            # supervising generator, but the pipeline is deliberately NOT
-            # cancelled: it keeps running on its own DB session to completion so
-            # the generated artifact is persisted and the reloaded page can poll
-            # for it (docs/REFRESH_DURING_GENERATION_PLAN.md).  Billing is now
-            # charge-on-completion — a finished generation keeps its charge; only
-            # a genuine failure refunds.  The detached task is kept alive by
-            # _BACKGROUND_PIPELINE_TASKS; any post-disconnect emit() calls land
-            # in a queue nobody reads and are GC'd with this closure.  If the
-            # detached task itself dies, its db_heartbeat stops and the
-            # stuck-stage recovery sweep is the safety net.
-            pass
+            preflight_heartbeat.cancel()
+            stop_task.cancel()
+            if not preflight_task.done():
+                preflight_task.cancel()
+            await asyncio.gather(
+                preflight_heartbeat,
+                stop_task,
+                preflight_task,
+                return_exceptions=True,
+            )
+            if not pipeline_handoff:
+                await control.close()
+                await admission.release()
+        await self._execute_generation_pipeline(
+            emit=lambda _event: None,
+            stage_id=stage_id,
+            generation_run_id=run_id,
+            control=control,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            redis=redis,
+            route=route,
+            deduction_id=deduction_id,
+            action=action,
+            trace_id=payload.get("trace_id"),
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            compression_rung=compression_rung,
+            cache_key=cache_key,
+            phase=phase,
+            research=research,
+            admission=admission,
+            resume_content=resume_content,
+        )
 
     async def _execute_generation_pipeline(
         self,
@@ -4352,24 +4551,16 @@ class StageManager:
         admission: GenerationAdmission | None = None,
         resume_content: dict[str, str] | None = None,
     ) -> None:
-        """Run the post-preflight generation pipeline on its OWN DB session.
+        """Run a durable worker-owned pipeline on an independent DB session.
 
-        This runs as a detached background task (docs/REFRESH_DURING_GENERATION
-        _PLAN.md): a client disconnect tears down the supervising generate()
-        generator and FastAPI closes the request-scoped session, so the pipeline
-        must not borrow that session or any request-bound ORM object.  It opens
-        its own AsyncSessionLocal — the same pattern as _stage_db_heartbeat and
-        _dispatch_critic_review — and re-loads `stage` and `workspace` by id on
-        it.  Callers identify the work only by ids / scalars (workspace_id,
-        user_id, deduction_id).  The body then mutates and commits exactly as it
-        did when it borrowed the request session.
+        The queued payload contains only ids and bounded scalars. The worker
+        reloads stage/workspace state here and never borrows the API request's
+        session or ORM instances, so browser disconnects, API restarts, and
+        rolling API deploys cannot cancel paid provider work.
 
-        ``admission`` is the generation slot acquired by generate() (audit F1/F2).
-        The pipeline owns it for its full lifetime and releases it in the finally
-        below — on every terminal path (success, failure, cancellation), and
-        because the pipeline is deliberately not cancelled on client disconnect,
-        the release lands at the true end of generation. ``release()`` is
-        idempotent, so the generate() preflight guard releasing it is harmless.
+        ``admission`` is acquired by the generation worker. The pipeline owns it
+        for its full lifetime and releases it on every terminal path. ARQ retries
+        after worker loss reacquire a fresh slot and reuse durable checkpoints.
         """
         from database import AsyncSessionLocal  # noqa: PLC0415
 
@@ -4432,19 +4623,7 @@ class StageManager:
                 status=terminal_status,
                 error_code=terminal_code,
             )
-            emit(
-                json.dumps(
-                    {
-                        "generation_terminal": {
-                            "generation_id": str(generation_run_id),
-                            "status": settled.status,
-                            "partial_saved": settled.partial_saved,
-                            "refunded_credits": settled.refunded_credits,
-                            "credit_was_deducted": settled.credit_was_deducted,
-                        }
-                    }
-                )
-            )
+            emit(self._terminal_event(settled))
         finally:
             await control.close()
             if admission is not None:
@@ -4520,6 +4699,7 @@ class StageManager:
         stage_started = asyncio.get_running_loop().time()
         stage_metric_outcome = "error"
         unhandled_error: Exception | None = None
+        worker_interrupted = False
         # Liveness heartbeat for the recovery sweep: runs for the entire
         # generation (streaming, local gates, persistence) and is cancelled in
         # the finally below before the stage leaves in_progress.
@@ -4640,19 +4820,7 @@ class StageManager:
                     partial_ordinal=getattr(exc, "generation_chunk_ordinal", None),
                 )
                 _cleanup_done = True
-                emit(
-                    json.dumps(
-                        {
-                            "generation_terminal": {
-                                "generation_id": str(generation_run_id),
-                                "status": settled.status,
-                                "partial_saved": settled.partial_saved,
-                                "refunded_credits": settled.refunded_credits,
-                                "credit_was_deducted": settled.credit_was_deducted,
-                            }
-                        }
-                    )
-                )
+                emit(self._terminal_event(settled))
                 return
             except GenerationDeadlineExceeded as exc:
                 stage_metric_outcome = "timed_out"
@@ -4666,19 +4834,7 @@ class StageManager:
                     partial_ordinal=getattr(exc, "generation_chunk_ordinal", None),
                 )
                 _cleanup_done = True
-                emit(
-                    json.dumps(
-                        {
-                            "generation_terminal": {
-                                "generation_id": str(generation_run_id),
-                                "status": settled.status,
-                                "partial_saved": settled.partial_saved,
-                                "refunded_credits": settled.refunded_credits,
-                                "credit_was_deducted": settled.credit_was_deducted,
-                            }
-                        }
-                    )
-                )
+                emit(self._terminal_event(settled))
                 return
             except IncompleteArtifactError as exc:
                 stage_metric_outcome = "incomplete_output"
@@ -4699,19 +4855,7 @@ class StageManager:
                     partial_ordinal=partial_ordinal,
                 )
                 _cleanup_done = True
-                emit(
-                    json.dumps(
-                        {
-                            "generation_terminal": {
-                                "generation_id": str(generation_run_id),
-                                "status": settled.status,
-                                "partial_saved": settled.partial_saved,
-                                "refunded_credits": settled.refunded_credits,
-                                "credit_was_deducted": settled.credit_was_deducted,
-                            }
-                        }
-                    )
-                )
+                emit(self._terminal_event(settled))
                 return
             except (ProviderError, TimeoutError) as exc:
                 deadline_exhausted = control.remaining_seconds <= 0
@@ -4731,7 +4875,7 @@ class StageManager:
                         else (
                             "provider_timeout"
                             if isinstance(exc, TimeoutError)
-                            else "provider_error"
+                            else getattr(exc, "error_code", "provider_error")
                         )
                     ),
                     partial_content=safe_partial,
@@ -4739,19 +4883,7 @@ class StageManager:
                 )
                 _cleanup_done = True
                 SSE_STREAM_FAILURES.labels(stage_type=stage.type).inc()
-                emit(
-                    json.dumps(
-                        {
-                            "generation_terminal": {
-                                "generation_id": str(generation_run_id),
-                                "status": settled.status,
-                                "partial_saved": settled.partial_saved,
-                                "refunded_credits": settled.refunded_credits,
-                                "credit_was_deducted": settled.credit_was_deducted,
-                            }
-                        }
-                    )
-                )
+                emit(self._terminal_event(settled))
                 return
 
             # The deterministic self-heals (whole-document fence unwrap, harness
@@ -4810,19 +4942,7 @@ class StageManager:
                     discard_content=True,
                 )
                 _cleanup_done = True
-                emit(
-                    json.dumps(
-                        {
-                            "generation_terminal": {
-                                "generation_id": str(generation_run_id),
-                                "status": settled.status,
-                                "partial_saved": settled.partial_saved,
-                                "refunded_credits": settled.refunded_credits,
-                                "credit_was_deducted": (settled.credit_was_deducted),
-                            }
-                        }
-                    )
-                )
+                emit(self._terminal_event(settled))
                 if span_id:
                     await self._mark_langfuse_span_failed(
                         span_id, SecurityError(validation.reason)
@@ -5049,6 +5169,14 @@ class StageManager:
                     extra={"stage_id": str(stage_id)},
                     exc_info=True,
                 )
+        except asyncio.CancelledError:
+            # ARQ cancels in-flight handlers on graceful shutdown and at the
+            # bounded job-slice timeout, then requeues the same job. Preserve the
+            # durable run/checkpoints instead of misclassifying infrastructure
+            # interruption as a user-visible generation failure/refund.
+            worker_interrupted = True
+            stage_metric_outcome = "worker_interrupted"
+            raise
         except Exception as exc:
             unhandled_error = exc
             if span_id and not span_finished:
@@ -5059,7 +5187,7 @@ class StageManager:
             # (or before the disconnect cleanup below resets it).
             db_heartbeat.cancel()
             await asyncio.gather(db_heartbeat, return_exceptions=True)
-            if not _cleanup_done:
+            if not _cleanup_done and not worker_interrupted:
                 if isinstance(unhandled_error, GenerationCancelledError):
                     terminal_status = "cancelled"
                     terminal_code = unhandled_error.code
@@ -5072,7 +5200,11 @@ class StageManager:
                 else:
                     terminal_status = "failed"
                     terminal_code = (
-                        type(unhandled_error).__name__
+                        getattr(
+                            unhandled_error,
+                            "error_code",
+                            type(unhandled_error).__name__,
+                        )
                         if unhandled_error is not None
                         else "generation_interrupted"
                     )
@@ -5096,19 +5228,7 @@ class StageManager:
                         ),
                         discard_content=unsafe_failure,
                     )
-                    emit(
-                        json.dumps(
-                            {
-                                "generation_terminal": {
-                                    "generation_id": str(generation_run_id),
-                                    "status": settled.status,
-                                    "partial_saved": settled.partial_saved,
-                                    "refunded_credits": settled.refunded_credits,
-                                    "credit_was_deducted": settled.credit_was_deducted,
-                                }
-                            }
-                        )
-                    )
+                    emit(self._terminal_event(settled))
                     PIPELINE_INTERRUPTED_STREAMS.labels(stage_type=stage_type).inc()
                     await redis.delete(
                         f"{_STAGE_CACHE_PREFIX}{workspace_id}:{stage_type}"

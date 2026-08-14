@@ -1,15 +1,17 @@
 """Durable background worker (Phase 21 — T-269; F5 live-queue split).
 
 Thought2Build's background-job processes that run work *outside* FastAPI. Since the
-F5 scalability remediation there are **two lanes**, each a separate process:
+F5 scalability remediation there are **three lanes**, each a separate process:
 
   - ``arq worker.WorkerSettings``      — the BULK lane (arq's default queue):
     high-volume, latency-tolerant GitHub bulk I/O + LLM eval batch jobs.
   - ``arq worker.FastWorkerSettings``  — the FAST lane (a dedicated queue):
     latency-sensitive, money-/user-visible paid credit grants + inbound GitHub
     reconciliation, so a bulk-export storm can never occupy their job slots.
+  - ``arq worker.GenerationWorkerSettings`` — the GENERATION lane: paid stage
+    generation, durable across browser/API disconnects and worker restarts.
 
-Both are stateless and horizontally scalable to N replicas — jobs are
+All three are stateless and horizontally scalable to N replicas — jobs are
 idempotent/checkpointed, and arq dedups crons per queue so each cron fires once
 per lane regardless of replica count. The producer/consumer split is single-
 sourced by ``services.queue.queue_for_job`` so routing can never drift.
@@ -26,6 +28,7 @@ Job roster (registered here as the single source of truth):
   - ``llm_batch_*``      — deferred eval batch submit/collect.       [bulk]
   - ``pr_check``         — post the Thought2Build status check (T-282).  [fast]
   - ``billing_process_webhook`` — grant credits from a Lemon event.  [fast]
+  - ``stage_generate`` — generate and checkpoint a paid stage artifact. [generation]
 
 Every job carries the shared base contract from ``services.queue`` (idempotency
 keying, exponential backoff + jitter retries to ``JOB_MAX_TRIES``, then a
@@ -36,17 +39,20 @@ enqueues them until their task lands.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from uuid import UUID
 
 import sentry_sdk
 import structlog
 from arq import cron
+from arq.worker import Retry, func
 
 from config import settings
 from services.queue import (
     BULK_QUEUE_NAME,
     FAST_QUEUE_NAME,
+    GENERATION_QUEUE_NAME,
     JOB_MAX_TRIES,
     _redis_settings,
     billing_job,
@@ -67,6 +73,32 @@ _MAX_JOBS = 20
 # than a full per-process pool to the Postgres connection footprint (RUNBOOK §15
 # deploy prerequisite). Per-process pool size itself is DB_POOL_SIZE-tunable.
 _FAST_MAX_JOBS = 10
+# Generation runs fan out into parallel section calls, so job concurrency is
+# intentionally lower than either general worker lane.
+_GENERATION_MAX_JOBS = max(1, settings.max_concurrent_generations_per_process)
+# ARQ keeps a crashed job's queue entry behind an in-progress lease for roughly
+# ``job_timeout + 10`` seconds. Slice a long generation below its durable run
+# deadline so an OOM/kill still leaves a genuine retry window. The handler owns
+# the slice timeout and turns it into ``Retry``; ARQ's own outer timeout is only
+# a safety net because ARQ treats that TimeoutError as a terminal job failure.
+_GENERATION_JOB_SLICE_SECONDS = max(
+    60,
+    min(
+        settings.stage_provider_call_timeout_seconds + 60,
+        settings.stage_generation_deadline_seconds
+        - settings.stage_retry_min_remaining_seconds,
+    ),
+)
+# Leave cleanup/requeue headroom outside the handler-owned slice. A healthy job
+# always exits or raises Retry before this outer ARQ timeout is reached.
+_GENERATION_JOB_TIMEOUT_SECONDS = _GENERATION_JOB_SLICE_SECONDS + 30
+# Capacity retries are expected queue backpressure, not job failure. Keep trying
+# throughout the durable run deadline instead of exhausting the general-purpose
+# five-attempt policy in tens of seconds and leaving a paid run stranded.
+_GENERATION_JOB_MAX_TRIES = max(
+    100,
+    (settings.stage_generation_deadline_seconds + 4) // 5 + 10,
+)
 # Hard ceiling on a single job's wall-clock (a large export of many issues).
 _JOB_TIMEOUT_SECONDS = 1800
 # Do NOT retain job results. Status is polled from the DB push row, not from
@@ -76,6 +108,32 @@ _JOB_TIMEOUT_SECONDS = 1800
 # clear on completion, so re-export re-enqueues while the in-flight job key still
 # guards against concurrent double-submits.
 _KEEP_RESULT_SECONDS = 0
+
+
+async def stage_generate(ctx: dict[str, Any], payload: dict[str, Any]) -> None:
+    """Execute one durable, idempotently keyed stage generation."""
+    from services.pipeline.stage_manager import (
+        QueuedGenerationCapacityError,
+        stage_manager,
+    )
+
+    try:
+        async with asyncio.timeout(_GENERATION_JOB_SLICE_SECONDS):
+            await stage_manager.execute_queued_generation(payload)
+    except QueuedGenerationCapacityError as exc:
+        # Capacity is not a failed paid generation. arq keeps the same job id and
+        # retries it after the advertised bulkhead delay.
+        raise Retry(defer=exc.retry_after) from exc
+    except TimeoutError as exc:
+        # ``asyncio.timeout`` cancelled the worker entrypoint. The pipeline's
+        # CancelledError path deliberately leaves the durable run live and keeps
+        # completed chunk checkpoints; retry the same arq/run id immediately.
+        logger.warning(
+            "generation.job_slice_exhausted",
+            generation_id=payload.get("generation_run_id"),
+            slice_seconds=_GENERATION_JOB_SLICE_SECONDS,
+        )
+        raise Retry(defer=0) from exc
 # Periodic drift reconciliation interval (minutes).
 _DRIFT_CRON_MINUTES = {0, 15, 30, 45}
 # Daily webhook-idempotency retention purge — off-peak, off the top of the hour
@@ -636,3 +694,13 @@ class FastWorkerSettings(_BaseWorkerSettings):
         ),
         _queue_sampler_cron(),
     ]
+
+
+class GenerationWorkerSettings(_BaseWorkerSettings):
+    """Paid LLM lane — ``arq worker.GenerationWorkerSettings``."""
+
+    queue_name = GENERATION_QUEUE_NAME
+    max_jobs = _GENERATION_MAX_JOBS
+    job_timeout = _GENERATION_JOB_TIMEOUT_SECONDS
+    functions = [func(stage_generate, max_tries=_GENERATION_JOB_MAX_TRIES)]
+    cron_jobs = [_queue_sampler_cron()]
