@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from services.llm.base import ProviderError, ProviderTimeoutError
 from services.llm.output_budget import (
     OUTPUT_TOKEN_BUDGETS,
     resolve_output_budget,
@@ -24,6 +25,7 @@ from services.pipeline.stage_manager import (
     _chunk_output_budget,
     _chunk_specs_for_stage,
     _runtime_fallback_route,
+    _same_provider_fallback_allowed,
     _watchdog_stream,
 )
 
@@ -249,6 +251,32 @@ def test_runtime_fallback_route_can_skip_throttled_provider(monkeypatch) -> None
     assert fallback.cross_provider_fallback is True
 
 
+def test_same_provider_fallback_is_skipped_for_shared_failure_domains() -> None:
+    assert (
+        _same_provider_fallback_allowed(ProviderTimeoutError("openrouter", 240))
+        is False
+    )
+    assert _same_provider_fallback_allowed(TimeoutError("watchdog")) is False
+    assert (
+        _same_provider_fallback_allowed(
+            ProviderError("openrouter", RuntimeError("bad key"), status_code=401)
+        )
+        is False
+    )
+    assert (
+        _same_provider_fallback_allowed(
+            ProviderError("openrouter", RuntimeError("no balance"), status_code=402)
+        )
+        is False
+    )
+    assert (
+        _same_provider_fallback_allowed(
+            ProviderError("openrouter", RuntimeError("one model down"), status_code=502)
+        )
+        is True
+    )
+
+
 def test_output_budgets_carry_reasoning_headroom() -> None:
     """Core generation budgets must exceed the pre-fix 8K ceiling: reasoning
     tokens share the budget with visible output on frontier models."""
@@ -327,6 +355,10 @@ def test_settings_reject_generation_bounds_outside_contract() -> None:
         config.Settings(stage_retry_min_remaining_seconds=44)
     with pytest.raises(ValidationError, match="PROVIDER_CALLS_PER_PROCESS"):
         config.Settings(max_concurrent_provider_calls_per_process=0)
+    with pytest.raises(ValidationError, match="PLAN_CHUNKS_PER_GENERATION"):
+        config.Settings(max_concurrent_plan_chunks_per_generation=5)
+    with pytest.raises(ValidationError, match="SAME_PROVIDER_FALLBACK"):
+        config.Settings(stage_same_provider_fallback_timeout_seconds=571)
     with pytest.raises(ValidationError, match="smaller than"):
         config.Settings(
             stage_generation_deadline_seconds=300,

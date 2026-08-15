@@ -202,11 +202,11 @@ class ModelCatalogEntry:
     # OpenRouter serves one model slug from many upstream hosts that differ in
     # quantisation, real output ceiling, price, cache-read price, and — decisively
     # — whether they support prefix caching at ALL (on deepseek-v4-flash, 1 of 19
-    # hosts does). The adapter emits this as ``provider.order`` so the declared
-    # host wins normally while another privacy-compatible endpoint can recover
-    # a paid run if it is unavailable.
+    # hosts does). The adapter emits matching ``provider.order`` and
+    # ``provider.only`` lists, so only the evaluated hosts may serve the request;
+    # the durable pipeline owns recovery to another model/provider.
     #
-    # Empty tuple = send no preference. Non-empty = try these hosts first.
+    # Empty tuple = no host restriction. Non-empty = allow only these hosts.
     upstream_providers: tuple[str, ...] = ()
 
     def to_registry_config(self) -> dict[str, Any]:
@@ -956,12 +956,14 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
             "eval.score",
             "storyboard.generate",
         ),
-        # Accepts reasoning/reasoning_effort (verified against the live models
-        # API). Because it does, it MUST also appear in
-        # _LOW_REASONING_CORE_MODELS or core_generation_low_reasoning silently
-        # fails to lower effort on the primary.
+        # Live OpenRouter metadata (2026-08-15) accepts only high/xhigh effort
+        # and reports mandatory=false. ``medium`` depends on implicit gateway
+        # remapping rather than the model's advertised contract. It deliberately
+        # remains exempt from _LOW_REASONING_CORE_MODELS because this mid-tier
+        # model is also the full-artifact rescue route; the registry comment
+        # documents that guard.
         supports_reasoning=True,
-        reasoning_effort="medium",
+        reasoning_effort="high",
         rollout_notes=(
             "Primary openrouter core ASDD generation default and judge/eval "
             "model. Pinned to DeepSeek's own upstream host — the only host "
@@ -994,13 +996,10 @@ MODEL_CATALOG: tuple[ModelCatalogEntry, ...] = (
         recommended_operations=(*CORE_GENERATION_OPERATIONS, "storyboard.generate"),
         default_operations=(),
         supports_reasoning=True,
-        # MEDIUM, not high — this is a brand-new, entirely unmeasured route
-        # against the configured stage_provider_call_timeout_seconds cap, and
-        # every chunk length target is a wall-clock budget still sized at the
-        # ~145 chars/s measured on Opus 5. Same reasoning as GPT-5.5: raise
-        # only after a real per-chunk measurement on this route, the same way
-        # Opus 5's effort was raised.
-        reasoning_effort="medium",
+        # The live gateway currently advertises only high/xhigh. Use the lower
+        # valid value; throughput remains explicitly unmeasured and is protected
+        # by the per-call watchdog + independent-provider fallback.
+        reasoning_effort="high",
         rollout_notes=(
             "openrouter full-artifact generation primary (reached only once an "
             "operator opts 'openrouter' into LLM_PROVIDER_PRIORITY). Resolves "
@@ -1201,8 +1200,8 @@ def model_request_policy(
         "extended_prompt_cache_retention": entry.extended_prompt_cache_retention,
         "cached_token_accounting": entry.cached_token_accounting,
         "minimum_cacheable_input_tokens": entry.minimum_cacheable_input_tokens,
-        # Aggregator upstream-host preference. The adapter turns a non-empty
-        # value into ``provider.order`` while leaving endpoint fallback enabled.
+        # Aggregator upstream-host allow-list. The adapter turns a non-empty
+        # value into matching ``provider.order`` and ``provider.only`` lists.
         "upstream_providers": entry.upstream_providers,
         # True when this operation is one of the core artifact-generation ops.
         # The adapter uses it to suppress reasoning on the cheap non-core paths

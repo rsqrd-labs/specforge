@@ -286,10 +286,15 @@ def test_global_crons_registered_on_exactly_one_lane() -> None:
 
     bulk_crons = {c.name for c in worker.WorkerSettings.cron_jobs}
     fast_crons = {c.name for c in worker.FastWorkerSettings.cron_jobs}
+    generation_crons = {c.name for c in worker.GenerationWorkerSettings.cron_jobs}
     # The per-queue sampler is the ONLY cron intentionally on both lanes (it
     # samples each lane's own queue). Every other (global) cron is on one lane —
     # arq dedups a cron per queue, so a global cron on both would fire twice.
     assert bulk_crons & fast_crons == {"cron:sample_queue_stats"}
+    assert generation_crons == {
+        "cron:generation_worker_heartbeat",
+        "cron:sample_queue_stats",
+    }
     # Billing recovery crons live on the fast lane; GitHub/LLM on the bulk lane.
     assert "cron:billing_reconcile" in fast_crons
     assert "cron:reconcile_drift" in bulk_crons
@@ -304,7 +309,11 @@ def test_shared_settings_visible_to_arq_cli_introspection() -> None:
     # never walks the MRO, so an attribute living only on _BaseWorkerSettings
     # is invisible to `arq worker.WorkerSettings` — the lane would silently
     # boot on arq defaults (localhost Redis, no on_startup, default max_jobs).
-    for lane in (worker.WorkerSettings, worker.FastWorkerSettings):
+    for lane in (
+        worker.WorkerSettings,
+        worker.FastWorkerSettings,
+        worker.GenerationWorkerSettings,
+    ):
         kwargs = get_kwargs(lane)
         for attr in (
             "redis_settings",
@@ -361,3 +370,25 @@ async def test_sample_queue_stats_swallows_errors() -> None:
 
     # Must not raise — a metrics blip never surfaces as a worker error.
     await worker.sample_queue_stats({"redis": _BrokenRedis()})
+
+
+async def test_generation_worker_heartbeat_publishes_and_swallows_errors(
+    monkeypatch,
+) -> None:
+    import worker
+
+    published: list[object] = []
+
+    async def _record(redis) -> None:
+        published.append(redis)
+
+    redis = object()
+    monkeypatch.setattr(worker, "record_generation_worker_heartbeat", _record)
+    await worker.generation_worker_heartbeat({"redis": redis})
+    assert published == [redis]
+
+    async def _fail(_redis) -> None:
+        raise RuntimeError("redis unavailable")
+
+    monkeypatch.setattr(worker, "record_generation_worker_heartbeat", _fail)
+    await worker.generation_worker_heartbeat({"redis": redis})

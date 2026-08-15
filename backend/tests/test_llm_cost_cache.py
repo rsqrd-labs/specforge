@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from services.llm.cost_cache import (
     GENERATION_CACHE_PREFIX,
@@ -56,7 +57,7 @@ def test_cache_key_changes_for_semantic_inputs(field: str, value) -> None:
 
 class _RedisStub:
     def __init__(self) -> None:
-        self.values: dict[str, str] = {}
+        self.values: dict[str, str | bytes] = {}
         self.ttls: dict[str, int] = {}
 
     async def get(self, key: str):
@@ -77,3 +78,26 @@ async def test_cache_helpers_round_trip_completed_output() -> None:
 
     assert await get_cached_generation(redis, key) == "complete output"
     assert redis.ttls[key] == 30
+
+
+@pytest.mark.asyncio
+async def test_cache_outage_is_fail_open_for_reads_and_writes() -> None:
+    class _DownRedis:
+        async def get(self, _key: str):
+            raise RedisConnectionError("down")
+
+        async def set(self, _key: str, _value: str, ex: int) -> None:
+            del ex
+            raise RedisConnectionError("down")
+
+    redis = _DownRedis()
+    assert await get_cached_generation(redis, _key()) is None
+    await set_cached_generation(redis, _key(), "valid persisted output")
+
+
+@pytest.mark.asyncio
+async def test_cache_invalid_utf8_is_a_miss() -> None:
+    redis = _RedisStub()
+    redis.values[_key()] = b"\xff\xfe"
+
+    assert await get_cached_generation(redis, _key()) is None

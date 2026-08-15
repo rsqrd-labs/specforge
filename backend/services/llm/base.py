@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 
 from services.llm.prompt_cache import PromptCachePolicy
 
@@ -208,13 +210,16 @@ def extract_retry_after(exc: Exception) -> float | None:
     """Best-effort ``Retry-After`` (seconds) from a provider SDK exception.
 
     Provider SDK errors carry the originating ``httpx.Response`` on ``.response``;
-    the ``Retry-After`` header is either a delta-seconds integer or an HTTP date.
-    Only the numeric form is honored (the common provider case); a non-numeric or
-    absent header returns ``None`` and the caller falls back to backoff. Never
-    raises — header parsing is purely advisory.
+    the ``Retry-After`` header is either delta-seconds or an HTTP date. Both forms
+    are honored; malformed/absent values return ``None`` and the caller falls
+    back to bounded exponential backoff. Never raises — parsing is advisory.
     """
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", None)
+    # Some OpenAI-compatible gateways expose response headers directly on the
+    # exception rather than retaining the underlying HTTP response.
+    if headers is None:
+        headers = getattr(exc, "headers", None)
     if headers is None:
         return None
     try:
@@ -226,7 +231,13 @@ def extract_retry_after(exc: Exception) -> float | None:
     try:
         seconds = float(str(raw).strip())
     except (TypeError, ValueError):
-        return None
+        try:
+            retry_at = parsedate_to_datetime(str(raw).strip())
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=UTC)
+            seconds = (retry_at - datetime.now(UTC)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return None
     return seconds if seconds >= 0 else None
 
 

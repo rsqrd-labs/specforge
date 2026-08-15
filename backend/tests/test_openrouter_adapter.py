@@ -3,11 +3,11 @@
 Mirrors test_openai_adapter.py's guard coverage (the chat-completions path
 this adapter is modelled on) plus OpenRouter-specific behavior: usage/cost
 accounting (stream_options + usage.include, since — unlike OpenAI's dead
-chat-completions path — this IS the live path), preferred upstream routing
-(provider.order from the catalog, privacy filtering, and endpoint failover),
-reasoning gating — effort from the catalog on core
-generation, exclude=true on the cheap non-core `complete()` path and NEVER on
-a stream — and BatchUnsupportedError on all three batch methods.
+chat-completions path — this IS the live path), evaluated-host allow-list routing
+(provider.order + provider.only from the catalog, privacy filtering, and strict
+parameter support), reasoning gating — effort from the catalog on core
+generation, effort=none on the cheap non-core `complete()` path and NEVER on a
+stream — and BatchUnsupportedError on all three batch methods.
 """
 
 from __future__ import annotations
@@ -216,6 +216,47 @@ async def test_openai_error_is_wrapped_as_provider_error_labelled_openrouter() -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "choices",
+    [
+        [],
+        [
+            SimpleNamespace(
+                message=SimpleNamespace(content=None),
+                finish_reason=None,
+            )
+        ],
+    ],
+)
+async def test_empty_completion_is_retryable_unavailability(choices) -> None:
+    adapter = _make_adapter()
+    response = SimpleNamespace(choices=choices, usage=None, model=adapter.model)
+    adapter._client.chat.completions.create = AsyncMock(return_value=response)
+
+    with pytest.raises(ProviderUnavailableError) as raised:
+        await adapter.complete("sys", "user", 100)
+
+    assert raised.value.error_type == "empty_response"
+
+
+@pytest.mark.asyncio
+async def test_policy_filtered_empty_completion_is_terminal() -> None:
+    adapter = _make_adapter()
+    choice = SimpleNamespace(
+        message=SimpleNamespace(content=None, refusal="blocked"),
+        finish_reason="content_filter",
+    )
+    response = SimpleNamespace(choices=[choice], usage=None, model=adapter.model)
+    adapter._client.chat.completions.create = AsyncMock(return_value=response)
+
+    with pytest.raises(ProviderTerminalError) as raised:
+        await adapter.complete("sys", "user", 100)
+
+    assert raised.value.failover_allowed is False
+    assert raised.value.error_type == "content_policy_violation"
+
+
+@pytest.mark.asyncio
 async def test_rate_limit_error_is_wrapped_with_retry_after() -> None:
     adapter = _make_adapter()
 
@@ -279,13 +320,33 @@ def test_openrouter_upstream_502_is_retryable_unavailability() -> None:
     assert wrapped.failover_allowed is True
 
 
+def test_openrouter_typed_overload_503_honours_retry_after_without_circuiting() -> None:
+    from services.llm.openrouter_adapter import _wrap_openrouter_error
+
+    error = RuntimeError("provider temporarily overloaded")
+    error.status_code = 503  # type: ignore[attr-defined]
+    error.headers = {"retry-after": "7"}  # type: ignore[attr-defined]
+    error.body = {  # type: ignore[attr-defined]
+        "error": {
+            "message": str(error),
+            "metadata": {"error_type": "provider_overloaded"},
+        }
+    }
+
+    wrapped = _wrap_openrouter_error(error)  # type: ignore[arg-type]
+
+    assert isinstance(wrapped, ProviderRateLimitError)
+    assert wrapped.status_code == 503
+    assert wrapped.retry_after == 7
+
+
 # ---------------------------------------------------------------------------
 # OR-9: request shape — stream_options, usage.include, pinned provider route
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_stream_request_prefers_catalog_host_but_allows_recovery() -> None:
+async def test_stream_request_restricts_to_the_evaluated_catalog_host() -> None:
     adapter = _make_adapter([_chunk("hi")])
 
     async for _ in adapter.stream("sys", "user", 4096):
@@ -296,12 +357,14 @@ async def test_stream_request_prefers_catalog_host_but_allows_recovery() -> None
     assert kwargs["stream"] is True
     assert kwargs["stream_options"] == {"include_usage": True}
     assert kwargs["extra_body"]["usage"] == {"include": True}
-    # Normal calls prefer the cache-compatible/costed host. If it is down,
-    # OpenRouter can use another privacy-compatible endpoint for this same model.
+    # The app owns cross-provider fallback. OpenRouter may retry/fallback only
+    # inside the explicitly evaluated upstream set.
     assert kwargs["extra_body"]["provider"] == {
         "data_collection": "deny",
         "allow_fallbacks": True,
+        "require_parameters": True,
         "order": ["deepseek"],
+        "only": ["deepseek"],
     }
     # No reasoning field when the catalog entry sets no effort.
     assert "reasoning" not in kwargs["extra_body"]
@@ -318,7 +381,11 @@ async def test_upstream_order_is_omitted_when_catalog_declares_none() -> None:
         "extra_body"
     ]["provider"]
     assert "order" not in provider_block
-    assert provider_block == {"data_collection": "deny", "allow_fallbacks": True}
+    assert provider_block == {
+        "data_collection": "deny",
+        "allow_fallbacks": True,
+        "require_parameters": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -372,7 +439,7 @@ async def test_complete_suppresses_reasoning_for_cheap_non_core_operations() -> 
     await adapter.complete("sys", "user", 4096)
 
     kwargs = adapter._client.chat.completions.create.await_args.kwargs
-    assert kwargs["extra_body"]["reasoning"] == {"exclude": True}
+    assert kwargs["extra_body"]["reasoning"] == {"effort": "none"}
 
 
 @pytest.mark.asyncio
@@ -441,6 +508,7 @@ def test_adapter_targets_the_openrouter_base_url(
     adapter = OpenRouterAdapter("deepseek/deepseek-v4-flash", api_key="sk-or-test")
 
     assert str(adapter._client.base_url).rstrip("/") == "https://openrouter.ai/api/v1"
+    assert adapter._client.max_retries == 0
 
 
 # ---------------------------------------------------------------------------

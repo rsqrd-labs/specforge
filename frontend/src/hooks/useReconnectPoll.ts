@@ -22,12 +22,19 @@ export const RECONNECT_POLL_DELAY_MS = 3000
 // its whole life.
 export const RECONNECT_POLL_SLOW_DELAY_MS = 10000
 export const RECONNECT_POLL_SLOWDOWN_AFTER_MS = 120_000
-// Total lifetime exceeds the configured generation deadline plus its
-// 30-second recovery grace. The recovery sweep terminalises any run that misses
-// that bound, so reconnect polling never silently abandons an active overlay.
-export const RECONNECT_POLL_MAX_MS = 6 * 60 * 1000
+// Absolute client safety bound. The server currently permits a 10-minute run;
+// this intentionally exceeds it and the recovery grace. Once generation
+// metadata arrives, the tighter server-provided deadline + grace is used.
+export const RECONNECT_POLL_MAX_MS = 12 * 60 * 1000
+export const RECONNECT_RECOVERY_GRACE_MS = 90 * 1000
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const settlementOverdue = (run: GenerationRun): GenerationRun => ({
+  ...run,
+  status: "timed_out",
+  error_code: "generation_settlement_overdue",
+})
 
 /**
  * Poll a server-side in-progress stage to completion when this client is not the
@@ -50,9 +57,11 @@ export function useReconnectPoll(
 
     let cancelled = false
     const startedAt = Date.now()
+    let stopAt = startedAt + RECONNECT_POLL_MAX_MS
+    let lastRunning: GenerationRun | null = null
 
     const pollUntilSettled = async () => {
-      while (!cancelled && Date.now() - startedAt < RECONNECT_POLL_MAX_MS) {
+      while (!cancelled && Date.now() < stopAt) {
         const delay =
           Date.now() - startedAt < RECONNECT_POLL_SLOWDOWN_AFTER_MS
             ? RECONNECT_POLL_DELAY_MS
@@ -63,6 +72,16 @@ export function useReconnectPoll(
           const run = await getStageGeneration(stageId)
           if (cancelled) return
           if (run?.status === "running") {
+            lastRunning = run
+            const serverDeadline = Date.parse(run.deadline_at)
+            if (Number.isFinite(serverDeadline)) {
+              // Never trust a malformed/far-future server value to poll forever;
+              // the fixed 12-minute bound remains the outer safety ceiling.
+              stopAt = Math.min(
+                startedAt + RECONNECT_POLL_MAX_MS,
+                serverDeadline + RECONNECT_RECOVERY_GRACE_MS,
+              )
+            }
             setStreamProgress(stageId, {
               stage: "",
               state: "generating",
@@ -92,6 +111,35 @@ export function useReconnectPoll(
           // Transient read error — keep polling; the generation is still running
           // server-side and the recovery sweep is the backstop if it dies.
           console.warn("[reconnect] stage poll failed", stageId, err)
+        }
+      }
+
+      if (cancelled) return
+      // The backend should have terminalised by deadline + recovery grace. Do
+      // one final reconciliation so a boundary-time completion is not missed;
+      // if the durable row is still running, surface a settlement-overdue state
+      // instead of silently leaving the loading overlay forever.
+      try {
+        const run = await getStageGeneration(stageId)
+        if (cancelled) return
+        const fresh = await getStage(stageId)
+        if (cancelled) return
+        setStage(fresh)
+        if (run && run.status !== "running") {
+          if (run.status !== "succeeded") onTerminal?.(run)
+          return
+        }
+        const overdue = run ?? lastRunning
+        if (overdue) {
+          onTerminal?.(settlementOverdue(overdue))
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.warn("[reconnect] final reconciliation failed", stageId, err)
+          // The API can itself be transiently unavailable at the settlement
+          // boundary. We still have a durable-running snapshot, so surface the
+          // overdue state rather than ending this hook with no user feedback.
+          if (lastRunning) onTerminal?.(settlementOverdue(lastRunning))
         }
       }
     }

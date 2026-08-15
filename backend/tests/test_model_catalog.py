@@ -439,7 +439,7 @@ def test_openrouter_reasoning_effort_is_gated_on_the_catalog_value() -> None:
     for model_id in _OPENROUTER_ACTIVE_MODELS:
         policy = model_request_policy("openrouter", model_id)
         assert policy["supports_reasoning"] is True
-        assert policy["reasoning_effort"] == "medium"
+        assert policy["reasoning_effort"] == "high"
 
 
 def _cheap_core_default(provider: str):
@@ -540,7 +540,7 @@ def test_openrouter_keeps_full_effort_on_every_core_generation_path() -> None:
     for model_id in _OPENROUTER_ACTIVE_MODELS:
         for operation in ("spec.generate", "regenerate.full", "harness.generate"):
             policy = model_request_policy("openrouter", model_id, operation)
-            assert policy["reasoning_effort"] == "medium", (model_id, operation)
+            assert policy["reasoning_effort"] == "high", (model_id, operation)
             assert policy["is_core_generation"] is True
 
 

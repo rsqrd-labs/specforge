@@ -303,8 +303,10 @@ GET /health
 ```
 
 Returns HTTP 200 with `{"status":"ok","version":"1.0.0"}` when healthy and
-HTTP 503 with `status:"degraded"` on dependency failure. In non-production the
-response also includes `db` and `redis`; production omits dependency details.
+HTTP 503 with `status:"degraded"` on a database, Redis, or enforced
+generation-worker-readiness failure. In non-production the response also
+includes `db`, `redis`, and `generation_worker`; production omits dependency
+details.
 
 ### LLM Provider Health
 
@@ -851,8 +853,8 @@ reports `ok`.
      python scripts/production_smoke.py
    ```
 
-   Set `THOUGHT2BUILD_RUN_LLM_SMOKE=1` to additionally stream one real spec
-   generation (this **does** consume credits).
+   Set `THOUGHT2BUILD_RUN_LLM_SMOKE=1` to additionally generate and finalise one
+   real SPEC, then generate its dependent PLAN (this **does** consume credits).
 
 **Rollback:** restore the previous `ANTHROPIC_API_KEY` on all four services and
 redeploy. If the old key is already revoked and no replacement works, fail over
@@ -881,17 +883,16 @@ Railway services (`backend`, `worker`, `worker-fast`, `worker-generation`) — b
 `"openrouter"` to `LLM_PROVIDER_PRIORITY` in production without completing the
 promotion gate in `docs/evals/ROUTE_PROMOTION.md`.
 
-*Why every tier is DeepSeek, and why DeepSeek's endpoint is preferred.*
+*Why every tier is DeepSeek, and why DeepSeek's endpoint is required.*
 OpenRouter serves one model slug from many upstream hosts. The request uses
-`provider.order=["deepseek"]` so DeepSeek's endpoint is tried first while
-`allow_fallbacks=true` permits another privacy-compatible endpoint for the same
-open model during an outage. The preference matters because prompt caching exists on
+matching `provider.order=["deepseek"]` and `provider.only=["deepseek"]` lists,
+`require_parameters=true`, and `data_collection="deny"`. Fallback remains enabled
+only within that allow-list; cross-provider recovery belongs to the durable
+application pipeline. This restriction matters because prompt caching exists on
 **1 of 19** hosts serving `deepseek-v4-flash` (DeepSeek's own) and on **0 of 32**
 serving the retired `z-ai/glm-5.2`; hosts disagree on real
 `max_completion_tokens` by up to **32x** against the 32,768 the pipeline sends;
-and catalog rates are the preferred host's, which differ from the model alias's.
-Provider-reported usage/cost and resolved-upstream metadata are authoritative
-for the exceptional fallback case.
+and catalog rates are the pinned host's, which differ from the model alias's.
 
 *Failure modes specific to this provider.*
 
@@ -902,10 +903,10 @@ for the exceptional fallback case.
   probe carries the same routing policy a generation does, and `probe_error` on the
   response distinguishes an empty pool from a bad key. Run this **before** the
   env flip, the same way §8.5's Anthropic steps verify `claude-opus-5`.
-* **A 502/503 triggers application fallback.** OpenRouter first tries its
-  same-model endpoint fallbacks. If the request still fails, the generation
-  pipeline tries the next DeepSeek tier and then the next configured platform
-  provider while its durable deadline still has a real retry window.
+* **A 502/503 triggers application fallback.** Typed overloads honor
+  `Retry-After` with bounded in-place retries. Other transient failures move to
+  the next DeepSeek tier and then the next configured platform provider while
+  the durable deadline still has a real retry window.
 * **Silent catalog drift.** Rates, output ceilings and caching support all move
   under a floating slug. `uv run python ../scripts/check_openrouter_catalog_drift.py`
   diffs the catalog against the *preferred endpoint* and exits non-zero on drift.
@@ -2304,14 +2305,19 @@ double-grants.
 
 A missing/stalled generation worker surfaces as
 `thought2build_worker_queue_oldest_age_seconds{queue="arq:queue:generation"}`
-climbing while generation runs remain in `preparing`. **Recovery:** start the
-generation worker; queued jobs retain their stable run ids and drain safely.
+climbing while generation runs remain in `preparing`. Production and staging
+also require a generation-worker heartbeat from the same deploy revision:
+`/health` becomes degraded and cache-miss generation fails before charging when
+that heartbeat is missing, stale, or belongs to the previous rollout. **Recovery:**
+start the matching generation worker; queued jobs retain their stable run ids
+and drain safely.
 
 ### Per-queue backpressure metrics
 
 A lightweight per-worker cron (`sample_queue_stats`, every minute at :45) samples
-the queue **that worker consumes** — sampled from a cron, not on job start, so a
-stalled queue (which starts no jobs) still reports:
+the queue **that worker consumes**. The API independently samples the generation
+queue during readiness checks, so a completely absent generation consumer is
+still visible in API-process metrics:
 
 | Metric | Meaning |
 |---|---|

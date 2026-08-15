@@ -544,7 +544,20 @@ export default function Workspace() {
     partial_saved: boolean
     refunded_credits: number
     credit_was_deducted?: boolean
+    error_code?: string | null
   }) => {
+    if (terminal.error_code === "generation_settlement_overdue") {
+      showAlert({
+        severity: "warning",
+        title: "Generation is still settling",
+        message:
+          "The server has not reported a final generation state yet. Your work is still tracked and cannot be charged twice.",
+        recovery:
+          "Refresh in a moment. If the run failed, its credits will be refunded automatically.",
+        source: "Generation",
+      })
+      return
+    }
     const stopped = terminal.status === "cancelled"
     showAlert({
       severity: stopped ? "info" : "warning",

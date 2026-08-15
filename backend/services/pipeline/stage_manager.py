@@ -170,7 +170,12 @@ from services.pipeline.tech_safety import (
     analyze_technology_safety,
     is_blocking_finding,
 )
-from services.queue import QueueUnavailableError, enqueue
+from services.queue import (
+    QueueUnavailableError,
+    enqueue,
+    generation_worker_readiness_enforced,
+    generation_worker_snapshot,
+)
 from services.research import research_service
 from services.research.research_service import _EMPTY as _EMPTY_RESEARCH
 from services.research.research_service import ResearchContext
@@ -758,9 +763,9 @@ _CORE_ARTIFACT_TIER_POLICY: dict[str, tuple[str, str | None]] = {
     "openai": ("strong", "mid"),
     "google": ("strong", "mid"),
     # openrouter (issue #152): explicit, not left to the .get() default, so
-    # LLM_PROVIDER_PRIORITY=openrouter,... resolves qwen3.8-max (strong)
-    # de-escalating to glm-5.2 (mid) on a hard failure — the same shape every
-    # other provider gets — rather than silently starting at mid.
+    # LLM_PROVIDER_PRIORITY=openrouter,... resolves DeepSeek V4 Pro (strong),
+    # de-escalating to DeepSeek V4 Flash (mid) on a hard failure — the same
+    # shape every other provider gets — rather than silently starting at mid.
     "openrouter": ("strong", "mid"),
 }
 
@@ -1182,6 +1187,16 @@ def _runtime_fallback_route(
         cross_provider_fallback=True,
         reason="runtime_cross_provider_fallback",
         selection_reason="runtime_recovery",
+    )
+
+
+def _same_provider_fallback_allowed(exc: BaseException) -> bool:
+    """Whether retrying another model behind the same failure domain can help."""
+
+    status_code = getattr(exc, "status_code", None)
+    return not (
+        isinstance(exc, (ProviderTimeoutError, TimeoutError))
+        or status_code in {401, 402}
     )
 
 
@@ -3074,6 +3089,7 @@ class StageManager:
             wave_index: int,
         ) -> tuple[str, str, LLMRoute, int, str | None]:
             attempt_route = route
+            initial_provider = route.provider
             attempted_routes: set[tuple[str, str]] = set()
             route_failovers = 0
             rate_limit_retries = 0
@@ -3164,6 +3180,16 @@ class StageManager:
                         else remaining
                     ),
                 )
+                if route_failovers > 0 and attempt_route.provider == initial_provider:
+                    # A fallback model behind the same account/gateway is a
+                    # useful quick recovery for a model-specific failure, but
+                    # it must leave a real independent-provider attempt. Without
+                    # this cap, 240s primary + ~210s same-provider retry consumes
+                    # the whole 600s run once normal overhead is included.
+                    attempt_hard_cap = min(
+                        attempt_hard_cap,
+                        float(settings.stage_same_provider_fallback_timeout_seconds),
+                    )
                 # Recomputed on EVERY attempt (including a fallback retry) from
                 # whatever run budget genuinely remains right now. A deadline
                 # frozen once at wave start would already be expired by the
@@ -3291,7 +3317,15 @@ class StageManager:
                     ).inc()
                     await _bounded_backoff(delay)
                 except (ProviderError, TimeoutError) as exc:
-                    if _move_to_fallback(exc):
+                    # Timeouts have already demonstrated that this failure
+                    # domain can consume a full attempt. Authentication/payment
+                    # errors apply to every model behind the same provider key.
+                    # In both cases another tier on the same provider cannot be
+                    # a meaningful recovery and only burns the remaining budget.
+                    if _move_to_fallback(
+                        exc,
+                        allow_same_provider=_same_provider_fallback_allowed(exc),
+                    ):
                         continue
                     raise
 
@@ -3313,6 +3347,21 @@ class StageManager:
                 setattr(exc, "generation_chunk_ordinal", ordinal_by_key[chunk.key])
                 raise
 
+        plan_chunk_limiter = asyncio.Semaphore(
+            max(1, settings.max_concurrent_plan_chunks_per_generation)
+            if stage_type == "plan"
+            else max(1, len(ordered_specs))
+        )
+
+        async def _one_chunk_bounded(
+            chunk: ArtifactChunkSpec,
+            prior_chunks: list[str],
+            stream_live: bool,
+            wave_index: int,
+        ) -> tuple[str, str, LLMRoute, int, str | None]:
+            async with plan_chunk_limiter:
+                return await _one_chunk(chunk, prior_chunks, stream_live, wave_index)
+
         for wave_index, wave in enumerate(waves):
             control.raise_if_stopped()
             prior = [
@@ -3327,7 +3376,7 @@ class StageManager:
                 continue
             tasks = [
                 asyncio.create_task(
-                    _one_chunk(
+                    _one_chunk_bounded(
                         chunk,
                         prior,
                         stream_live=index == 0,
@@ -4020,6 +4069,22 @@ class StageManager:
         # Admission control keeps the durable queue bounded before charging. The
         # short API-side lease is released after enqueue; the worker acquires its
         # own full-lifetime lease before research, prompt compression, or model I/O.
+        if generation_worker_readiness_enforced():
+            worker = await generation_worker_snapshot(redis)
+            if worker.get("ready") is not True:
+                logger.error(
+                    "stage.generation_worker_unavailable",
+                    extra={
+                        "stage_id": str(stage_id),
+                        "provider": route.provider,
+                        "worker": worker,
+                    },
+                )
+                raise PreflightError(
+                    "generation_worker_unavailable",
+                    "Generation is temporarily unavailable while the worker "
+                    "fleet recovers. No credits were charged.",
+                )
         try:
             admission = await admit_generation(
                 redis, user_id=str(user.id), provider=route.provider

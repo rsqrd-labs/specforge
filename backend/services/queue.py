@@ -21,8 +21,11 @@ rather than starting a second one. The worker itself lives in ``worker.py``.
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
+import os
 import random
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, TypeVar
@@ -32,6 +35,7 @@ from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
 from arq.worker import Retry
 from prometheus_client import Counter
+from redis.asyncio import Redis
 
 from config import settings
 from services.integrations.github_governor import GitHubThrottledError
@@ -82,6 +86,120 @@ FAST_QUEUE_NAME = "arq:queue:fast"
 # scalable worker lane: a deploy/restart may interrupt a worker process, but arq
 # retains and retries the generation job under its durable generation-run id.
 GENERATION_QUEUE_NAME = "arq:queue:generation"
+
+# Generation-worker readiness is deliberately stored under the deployment
+# revision. During a rolling deploy an old worker may still be healthy enough to
+# refresh Redis, but it must not consume a payload produced by a newer API whose
+# job/checkpoint contract may have changed. Railway exposes the commit through
+# RAILWAY_GIT_COMMIT_SHA; the additional names keep the same code portable.
+_DEPLOYMENT_REVISION_ENV_VARS = (
+    "RAILWAY_GIT_COMMIT_SHA",
+    "GIT_COMMIT_SHA",
+    "SOURCE_VERSION",
+    "COMMIT_SHA",
+)
+GENERATION_WORKER_HEARTBEAT_TTL_SECONDS = 45
+
+
+def deployment_revision() -> str:
+    """Return the bounded deploy revision shared by API and worker processes."""
+
+    for name in _DEPLOYMENT_REVISION_ENV_VARS:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value[:128]
+    # Local compose/tests do not normally inject a git SHA. A stable sentinel
+    # still lets developers opt into readiness without creating per-process keys.
+    return "unknown"
+
+
+def _generation_worker_heartbeat_key(revision: str | None = None) -> str:
+    raw = (revision or deployment_revision()).encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()[:20]
+    return f"worker:heartbeat:generation:{digest}"
+
+
+def generation_worker_readiness_enforced() -> bool:
+    """Whether this environment must fail closed when no worker is ready."""
+
+    return settings.generation_worker_readiness_required and (
+        settings.environment.strip().lower() in {"production", "staging"}
+    )
+
+
+async def record_generation_worker_heartbeat(redis: ArqRedis) -> None:
+    """Publish one generation-lane liveness sample with a short self-expiry."""
+
+    revision = deployment_revision()
+    payload = json.dumps(
+        {
+            "revision": revision,
+            "recorded_at": time.time(),
+            "pid": os.getpid(),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    await redis.set(
+        _generation_worker_heartbeat_key(revision),
+        payload,
+        ex=GENERATION_WORKER_HEARTBEAT_TTL_SECONDS,
+    )
+
+
+async def generation_worker_snapshot(redis: Redis) -> dict[str, Any]:
+    """Return revision-aware worker readiness and independently sampled backlog.
+
+    Queue sampling lives here, in the API/control plane, rather than only in the
+    consumer. That distinction is load-bearing: a completely absent worker
+    cannot run its own metrics cron to report that it is absent.
+    """
+
+    revision = deployment_revision()
+    snapshot: dict[str, Any] = {
+        "ready": False,
+        "revision": revision,
+        "heartbeat_age_seconds": None,
+        "queue_depth": None,
+        "oldest_job_age_seconds": None,
+        "error": None,
+    }
+    try:
+        raw = await redis.get(_generation_worker_heartbeat_key(revision))
+        if raw is not None:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            payload = json.loads(str(raw))
+            recorded_at = float(payload["recorded_at"])
+            observed_revision = str(payload["revision"])
+            age = max(0.0, time.time() - recorded_at)
+            snapshot["heartbeat_age_seconds"] = age
+            snapshot["ready"] = (
+                observed_revision == revision
+                and age <= GENERATION_WORKER_HEARTBEAT_TTL_SECONDS
+            )
+
+        depth = int(await redis.zcard(GENERATION_QUEUE_NAME))
+        oldest_age = 0.0
+        oldest = await redis.zrange(GENERATION_QUEUE_NAME, 0, 0, withscores=True)
+        if oldest:
+            score_ms = float(oldest[0][1])
+            oldest_age = max(0.0, (time.time() * 1000 - score_ms) / 1000)
+        snapshot["queue_depth"] = depth
+        snapshot["oldest_job_age_seconds"] = oldest_age
+
+        # Publish from the API process so /metrics remains useful even when the
+        # generation consumer is the component that disappeared.
+        from services.observability import record_worker_queue_stats  # noqa: PLC0415
+
+        record_worker_queue_stats(GENERATION_QUEUE_NAME, depth, oldest_age)
+    except Exception as exc:
+        # Readiness is false on malformed/missing Redis state. The caller decides
+        # whether that is fatal for its environment; never leak Redis details.
+        snapshot["ready"] = False
+        snapshot["error"] = type(exc).__name__
+    return snapshot
+
 
 # Jobs whose latency is user-/money-visible and must not queue behind a bulk
 # GitHub-export storm (audit §F5): paid credit grants, webhook reconciliation,

@@ -4,7 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { getStage, getStageGeneration } from "../services/api"
 import { useStageStore } from "../store/stageStore"
 import type { Stage } from "../types/stage"
-import { useReconnectPoll } from "./useReconnectPoll"
+import {
+  RECONNECT_POLL_DELAY_MS,
+  RECONNECT_POLL_MAX_MS,
+  RECONNECT_RECOVERY_GRACE_MS,
+  useReconnectPoll,
+} from "./useReconnectPoll"
 
 vi.mock("../services/api", () => ({
   getStage: vi.fn(),
@@ -168,6 +173,170 @@ describe("useReconnectPoll", () => {
       await vi.advanceTimersByTimeAsync(1)
     })
     expect(mockGetGeneration.mock.calls.length).toBeGreaterThan(callsAtSlowdown)
+  })
+
+  it("keeps polling beyond six minutes for a server-authorized ten-minute run", async () => {
+    const run = {
+      ...runningGeneration(),
+      deadline_at: new Date(Date.now() + 10 * 60_000).toISOString(),
+    }
+    mockGetGeneration.mockResolvedValue(run)
+    const view = renderHook(() => useReconnectPoll("stage-1", false))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6 * 60_000 + 10_000)
+    })
+
+    expect(RECONNECT_POLL_MAX_MS).toBeGreaterThan(10 * 60_000)
+    expect(mockGetGeneration.mock.calls.length).toBeGreaterThan(1)
+    expect(useStageStore.getState().streamProgress["stage-1"]?.generation_id).toBe(
+      "run-1",
+    )
+    view.unmount()
+  })
+
+  it("ignores a malformed server deadline and retains the client safety bound", async () => {
+    const invalidDeadline = { ...runningGeneration(), deadline_at: "not-a-date" }
+    mockGetGeneration
+      .mockResolvedValueOnce(invalidDeadline)
+      .mockResolvedValueOnce({ ...invalidDeadline, status: "succeeded" })
+    mockGetStage.mockResolvedValueOnce(makeStage({ status: "draft" }))
+    renderHook(() => useReconnectPoll("stage-1", false))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6_000)
+    })
+
+    expect(mockGetGeneration).toHaveBeenCalledTimes(2)
+    expect(useStageStore.getState().stages["stage-1"]?.status).toBe("draft")
+  })
+
+  it("surfaces settlement overdue after server deadline and recovery grace", async () => {
+    const run = {
+      ...runningGeneration(),
+      deadline_at: new Date(Date.now() + 5_000).toISOString(),
+    }
+    mockGetGeneration.mockResolvedValue(run)
+    mockGetStage.mockResolvedValue(makeStage({ status: "in_progress" }))
+    const onTerminal = vi.fn()
+    renderHook(() => useReconnectPoll("stage-1", false, onTerminal))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000 + RECONNECT_RECOVERY_GRACE_MS + 10_000)
+    })
+
+    expect(onTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "timed_out",
+        error_code: "generation_settlement_overdue",
+      }),
+    )
+  })
+
+  it("surfaces settlement overdue when final reconciliation is unavailable", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    const run = {
+      ...runningGeneration(),
+      deadline_at: new Date(Date.now() + 5_000).toISOString(),
+    }
+    mockGetGeneration.mockResolvedValue(run)
+    mockGetStage.mockRejectedValue(new Error("temporary API outage"))
+    const onTerminal = vi.fn()
+    renderHook(() => useReconnectPoll("stage-1", false, onTerminal))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000 + RECONNECT_RECOVERY_GRACE_MS + 10_000)
+    })
+
+    expect(onTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "timed_out",
+        error_code: "generation_settlement_overdue",
+      }),
+    )
+    warning.mockRestore()
+  })
+
+  it("accepts a terminal failure found by the final reconciliation", async () => {
+    const expired = { ...runningGeneration(), deadline_at: new Date(0).toISOString() }
+    const failed = { ...expired, status: "failed" as const, error_code: "provider_error" }
+    mockGetGeneration
+      .mockResolvedValueOnce(expired)
+      .mockResolvedValueOnce(failed)
+    mockGetStage.mockResolvedValueOnce(makeStage({ status: "draft" }))
+    const onTerminal = vi.fn()
+    renderHook(() => useReconnectPoll("stage-1", false, onTerminal))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(RECONNECT_POLL_DELAY_MS)
+    })
+
+    expect(onTerminal).toHaveBeenCalledWith(failed)
+  })
+
+  it("accepts final-reconciliation success without raising a terminal alert", async () => {
+    const expired = { ...runningGeneration(), deadline_at: new Date(0).toISOString() }
+    const succeeded = { ...expired, status: "succeeded" as const }
+    mockGetGeneration
+      .mockResolvedValueOnce(expired)
+      .mockResolvedValueOnce(succeeded)
+    mockGetStage.mockResolvedValueOnce(makeStage({ status: "draft" }))
+    const onTerminal = vi.fn()
+    renderHook(() => useReconnectPoll("stage-1", false, onTerminal))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(RECONNECT_POLL_DELAY_MS)
+    })
+
+    expect(onTerminal).not.toHaveBeenCalled()
+    expect(useStageStore.getState().stages["stage-1"]?.status).toBe("draft")
+  })
+
+  it("finishes safely when no generation metadata exists at the client bound", async () => {
+    mockGetGeneration.mockResolvedValue(null)
+    mockGetStage.mockResolvedValue(makeStage({ status: "in_progress" }))
+    const onTerminal = vi.fn()
+    renderHook(() => useReconnectPoll("stage-1", false, onTerminal))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(RECONNECT_POLL_MAX_MS + 10_000)
+    })
+
+    expect(onTerminal).not.toHaveBeenCalled()
+    expect(mockGetStage.mock.calls.length).toBeGreaterThan(1)
+  })
+
+  it("does not invent an overdue run when all generation reads fail", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined)
+    mockGetGeneration.mockRejectedValue(new Error("API unavailable"))
+    const onTerminal = vi.fn()
+    renderHook(() => useReconnectPoll("stage-1", false, onTerminal))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(RECONNECT_POLL_MAX_MS + 10_000)
+    })
+
+    expect(onTerminal).not.toHaveBeenCalled()
+    warning.mockRestore()
+  })
+
+  it("ignores final generation metadata that resolves after unmount", async () => {
+    const expired = { ...runningGeneration(), deadline_at: new Date(0).toISOString() }
+    let resolveFinal!: (value: ReturnType<typeof runningGeneration>) => void
+    mockGetGeneration
+      .mockResolvedValueOnce(expired)
+      .mockReturnValueOnce(new Promise((done) => { resolveFinal = done }))
+    const onTerminal = vi.fn()
+    const view = renderHook(() => useReconnectPoll("stage-1", false, onTerminal))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(RECONNECT_POLL_DELAY_MS)
+    })
+    view.unmount()
+    await act(async () => resolveFinal(runningGeneration()))
+
+    expect(onTerminal).not.toHaveBeenCalled()
+    expect(mockGetStage).not.toHaveBeenCalled()
   })
 
   it("reports a terminal failure after hydrating the final persisted stage", async () => {

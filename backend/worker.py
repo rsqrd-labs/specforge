@@ -59,6 +59,7 @@ from services.queue import (
     close_arq_pool,
     github_job,
     llm_batch_job,
+    record_generation_worker_heartbeat,
 )
 
 logger = structlog.get_logger(__name__)
@@ -171,6 +172,10 @@ _GENERATION_ESTIMATES_CRON_MINUTE = {3, 13, 23, 33, 43, 53}
 # work, so running it on both lanes is correct (not a double-fire): a fast
 # replica samples the fast queue, a bulk replica samples the bulk queue.
 _QUEUE_SAMPLE_CRON_SECOND = {45}
+# Revision-aware generation-worker heartbeat. It is intentionally more frequent
+# than its 45-second TTL, leaving room for a short event-loop/Redis stall without
+# falsely taking the paid path out of readiness.
+_GENERATION_HEARTBEAT_CRON_SECOND = {0, 10, 20, 30, 40, 50}
 
 # Data retention & purging (issue #43). All BULK-lane global crons — registered on
 # exactly one class (F5 rule) so they never double-fire. The size sampler runs
@@ -498,7 +503,13 @@ async def _on_startup(ctx: dict[str, Any]) -> None:
     # multiply Redis connections the same way the API path did before F8.
     _initialize_redis(build_redis_client())
     queue = getattr(ctx.get("redis"), "default_queue_name", "unknown")
-    lane_max_jobs = _FAST_MAX_JOBS if queue == FAST_QUEUE_NAME else _MAX_JOBS
+    if queue == GENERATION_QUEUE_NAME:
+        lane_max_jobs = _GENERATION_MAX_JOBS
+        # Publish before startup returns so the API can become ready without
+        # waiting for the first cron tick.
+        await record_generation_worker_heartbeat(ctx["redis"])
+    else:
+        lane_max_jobs = _FAST_MAX_JOBS if queue == FAST_QUEUE_NAME else _MAX_JOBS
     logger.info("worker.started", queue=queue, max_jobs=lane_max_jobs)
 
 
@@ -542,6 +553,18 @@ async def sample_queue_stats(ctx: dict[str, Any]) -> None:
             GITHUB_QUEUE_DEPTH.set(int(depth))
     except Exception:  # pragma: no cover — never let metrics break the worker
         logger.debug("worker.queue_stats_unavailable")
+
+
+async def generation_worker_heartbeat(ctx: dict[str, Any]) -> None:
+    """Refresh generation-lane readiness; a failed tick self-heals next tick."""
+
+    try:
+        await record_generation_worker_heartbeat(ctx["redis"])
+    except Exception:
+        # Do not crash the worker over one heartbeat write. The short TTL makes
+        # sustained Redis failure fail the API closed before another user is
+        # charged, while a transient blip recovers on the next ten-second tick.
+        logger.warning("generation.worker_heartbeat_failed", exc_info=True)
 
 
 def _queue_sampler_cron():
@@ -705,4 +728,11 @@ class GenerationWorkerSettings(_BaseWorkerSettings):
     max_jobs = _GENERATION_MAX_JOBS
     job_timeout = _GENERATION_JOB_TIMEOUT_SECONDS
     functions = [func(stage_generate, max_tries=_GENERATION_JOB_MAX_TRIES)]
-    cron_jobs = [_queue_sampler_cron()]
+    cron_jobs = [
+        cron(
+            generation_worker_heartbeat,
+            second=_GENERATION_HEARTBEAT_CRON_SECOND,
+            run_at_startup=False,
+        ),
+        _queue_sampler_cron(),
+    ]

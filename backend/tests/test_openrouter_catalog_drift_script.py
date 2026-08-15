@@ -103,7 +103,19 @@ def test_matching_live_payload_reports_no_drift() -> None:
     entry = model_entry("openrouter", "deepseek/deepseek-v4-flash")
     client = _FakeClient({"endpoints": [_endpoint()]})
 
-    assert drift._check_entry(entry, client).issues == []
+    assert (
+        drift._check_entry(
+            entry,
+            client,
+            model_metadata={
+                "reasoning": {
+                    "mandatory": False,
+                    "supported_efforts": ["xhigh", "high"],
+                }
+            },
+        ).issues
+        == []
+    )
 
 
 @pytest.mark.parametrize(
@@ -153,3 +165,39 @@ def test_a_cache_write_premium_appearing_is_drift() -> None:
     issues = drift._check_entry(entry, client).issues
 
     assert any("cache_write_5m_cost_per_million" in issue for issue in issues), issues
+
+
+def test_unsupported_reasoning_effort_is_detected_from_model_metadata() -> None:
+    entry = model_entry("openrouter", "deepseek/deepseek-v4-flash")
+    client = _FakeClient({"endpoints": [_endpoint()]})
+
+    issues = drift._check_entry(
+        entry,
+        client,
+        model_metadata={
+            "reasoning": {
+                "mandatory": False,
+                "supported_efforts": ["medium"],
+            }
+        },
+    ).issues
+
+    assert any("supported_efforts" in issue for issue in issues), issues
+
+
+def test_mandatory_reasoning_is_a_non_core_and_health_probe_drift() -> None:
+    entry = model_entry("openrouter", "deepseek/deepseek-v4-flash")
+    client = _FakeClient({"endpoints": [_endpoint()]})
+
+    issues = drift._check_entry(
+        entry,
+        client,
+        model_metadata={
+            "reasoning": {
+                "mandatory": True,
+                "supported_efforts": ["high"],
+            }
+        },
+    ).issues
+
+    assert any("mandatory=true" in issue for issue in issues), issues

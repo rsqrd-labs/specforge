@@ -56,6 +56,85 @@ def test_redirect_handler_rejects_cross_origin() -> None:
         )
 
 
+def test_wait_until_finalisable_polls_until_quality_gate_settles(monkeypatch) -> None:
+    client = production_smoke.SmokeClient(_config())
+    responses = iter(
+        [
+            (200, {"quality_gate": {"status": "checking"}}, {}),
+            (200, {"id": "stage-1", "quality_gate": {"status": "advisory"}}, {}),
+        ]
+    )
+    monkeypatch.setattr(client, "request", lambda *_args, **_kwargs: next(responses))
+    monkeypatch.setattr(production_smoke.time, "sleep", lambda _seconds: None)
+
+    stage = client.wait_until_finalisable("stage-1")
+
+    assert stage["id"] == "stage-1"
+
+
+def test_wait_until_finalisable_has_a_hard_timeout(monkeypatch) -> None:
+    client = production_smoke.SmokeClient(_config())
+    samples = iter([0.0, 0.0, production_smoke.QUALITY_GATE_TIMEOUT_SECONDS + 1])
+    monkeypatch.setattr(production_smoke.time, "monotonic", lambda: next(samples))
+    monkeypatch.setattr(production_smoke.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        client,
+        "request",
+        lambda *_args, **_kwargs: (
+            200,
+            {"quality_gate": {"status": "checking"}},
+            {},
+        ),
+    )
+
+    with pytest.raises(production_smoke.SmokeFailure, match="did not settle"):
+        client.wait_until_finalisable("stage-1")
+
+
+def test_run_archives_workspace_when_a_later_check_fails(monkeypatch) -> None:
+    requested: list[tuple[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, _config) -> None:
+            pass
+
+        def request(self, method: str, path: str, **_kwargs):
+            requested.append((method, path))
+            if path == "/health":
+                return 200, {"status": "ok"}, {}
+            if path == "/auth/me":
+                return 200, {"id": "user-1", "email": "smoke@example.com"}, {}
+            if path == "/providers/health":
+                return 403, {}, {}
+            if path == "/credits/balance":
+                return 200, {"balance": 100}, {}
+            if method == "POST" and path == "/workspaces":
+                return (
+                    201,
+                    {
+                        "id": "workspace-1",
+                        "stages": [
+                            {"type": name}
+                            for name in ("spec", "plan", "tasks", "harness")
+                        ],
+                    },
+                    {},
+                )
+            if method == "GET" and path == "/workspaces/workspace-1":
+                raise production_smoke.SmokeFailure("fetch failed")
+            if method == "DELETE" and path == "/workspaces/workspace-1":
+                return 204, "", {}
+            raise AssertionError((method, path))
+
+    monkeypatch.setattr(production_smoke, "load_config", _config)
+    monkeypatch.setattr(production_smoke, "SmokeClient", FakeClient)
+
+    with pytest.raises(production_smoke.SmokeFailure, match="fetch failed"):
+        production_smoke.run()
+
+    assert ("DELETE", "/workspaces/workspace-1") in requested
+
+
 def _config(**overrides) -> object:
     base = {
         "api_url": "https://api.thought2build.example",

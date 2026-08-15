@@ -32,6 +32,7 @@ from services.pipeline.artifact_validator import (
 from services.pipeline.generation_runs import GenerationControl
 from services.pipeline.stage_manager import (
     _BACKGROUND_PIPELINE_TASKS,
+    PreflightError,
     QualityGateBlockedError,
     StageDependencyError,
     StageManager,
@@ -388,6 +389,7 @@ async def _run_durable_generation_for_test(
     emit=None,
     phase=None,
     duration_seconds: float = 300,
+    stage_type: str = "spec",
 ):
     control = GenerationControl(
         run_id=uuid4(),
@@ -408,13 +410,27 @@ async def _run_durable_generation_for_test(
         return None
 
     tracker = phase or stage_manager_module._PhaseTracker()
+    route = _spec_generate_route()
+    if stage_type != "spec":
+        route = LLMRoute(
+            provider=route.provider,
+            model=route.model,
+            model_tier=route.model_tier,
+            operation=f"{stage_type}.generate",
+            latency_class=route.latency_class,
+            cross_provider_fallback=False,
+            reason="test",
+            requested_tier=route.requested_tier,
+            fallback_tier=None,
+            selection_reason="test",
+        )
     try:
         generated = await StageManager()._generate_durable_artifact(
-            route=_spec_generate_route(),
+            route=route,
             adapter_factory=adapter_factory,
             system_prompt="SYSTEM",
-            user_prompt="BASE SPEC PROMPT",
-            stage_type="spec",
+            user_prompt=f"BASE {stage_type.upper()} PROMPT",
+            stage_type=stage_type,
             deps={},
             mode="standard",
             emit=emit,
@@ -448,6 +464,34 @@ async def test_parallel_generation_runs_chunks_concurrently_and_completes() -> N
     assert "## Non-Functional Requirements" in generated.content
     assert "## Acceptance Criteria" in generated.content
     assert generated.content_generation_id == "gen-parallel"
+
+
+@pytest.mark.asyncio
+async def test_plan_generation_caps_correlated_chunk_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker = {"active": 0, "max": 0}
+    created: list[_ConcurrencyAdapter] = []
+    monkeypatch.setattr(settings, "max_concurrent_plan_chunks_per_generation", 2)
+
+    def factory(_route):
+        adapter = _ConcurrencyAdapter(
+            tracker,
+            lambda prompt: artifact_fixtures.plan_stream_payload(
+                prompt, _SAFE_TECH_STACK
+            ),
+        )
+        created.append(adapter)
+        return adapter
+
+    generated, _ = await _run_durable_generation_for_test(
+        adapter_factory=factory,
+        stage_type="plan",
+    )
+
+    assert tracker["max"] == 2
+    assert len(created) == 4
+    assert "## Architecture Overview" in generated.content
 
 
 @pytest.mark.asyncio
@@ -1693,6 +1737,45 @@ async def test_generate_zero_visible_credits_skips_credit_and_provider_call() ->
     mock_deduct.assert_not_called()
     mock_build_prompt.assert_not_called()
     mock_get_llm.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generation_worker_unready_rejects_before_charge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = uuid4()
+    spec_stage = _make_stage(workspace_id, "spec", status="draft")
+    workspace = _make_workspace([spec_stage])
+    user = _make_user()
+    db = _MultiQueryDB([spec_stage, workspace, []])
+    svc = StageManager(redis_client=_FakeRedis())
+
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.setattr(settings, "generation_worker_readiness_required", True)
+    with (
+        patch(
+            "services.pipeline.stage_manager.generation_worker_snapshot",
+            new_callable=AsyncMock,
+            return_value={
+                "ready": False,
+                "queue_depth": 3,
+                "oldest_job_age_seconds": 90,
+            },
+        ),
+        patch(
+            "services.pipeline.stage_manager.credit_service.deduct",
+            new_callable=AsyncMock,
+        ) as deduct,
+        patch.object(svc, "_enqueue_generation_job", new_callable=AsyncMock) as enqueue,
+    ):
+        with pytest.raises(PreflightError) as exc_info:
+            async for _ in svc.generate(spec_stage.id, user, db):
+                pass
+
+    assert exc_info.value.code == "generation_worker_unavailable"
+    deduct.assert_not_awaited()
+    enqueue.assert_not_awaited()
+    assert spec_stage.status == "draft"
 
 
 @pytest.mark.asyncio

@@ -494,8 +494,10 @@ Key invariants:
   providers must use `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and `GOOGLE_API_KEY`.
 - OpenRouter (issue #152) is a fourth, optional provider reached through
   `OPENROUTER_API_KEY`. The ladder is all-DeepSeek-V4 (Flash at `mid`, Pro at
-  `strong`) behind a thin `chat_completions` adapter, with every request pinned
-  to DeepSeek's own upstream host — the only one that supports prompt caching.
+  `strong`) behind a thin `chat_completions` adapter. Every request is restricted
+  to DeepSeek's own evaluated upstream host with parameter-support and
+  no-data-collection requirements, so availability routing cannot silently
+  change output ceilings, quantisation, retention policy, latency, or price.
   It participates in routing only once it is also added to
   `LLM_PROVIDER_PRIORITY`, gated by `docs/evals/ROUTE_PROMOTION.md`.
 - Cross-provider fallback is never silent. It requires an explicit

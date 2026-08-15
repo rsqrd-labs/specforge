@@ -53,6 +53,7 @@ from services.llm.model_catalog import (  # noqa: E402
 )
 
 _ENDPOINTS_URL = "https://openrouter.ai/api/v1/models/{model_id}/endpoints"
+_MODELS_URL = "https://openrouter.ai/api/v1/models"
 _TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=5.0)
 
 # Rates are compared as USD-per-million with a relative tolerance rather than
@@ -112,7 +113,12 @@ def _pinned_endpoint(payload: dict, entry: ModelCatalogEntry) -> dict | None:
     return None
 
 
-def _check_entry(entry: ModelCatalogEntry, client: httpx.Client) -> Drift:
+def _check_entry(
+    entry: ModelCatalogEntry,
+    client: httpx.Client,
+    *,
+    model_metadata: dict[str, Any] | None = None,
+) -> Drift:
     drift = Drift(model_id=entry.model_id)
 
     if not entry.upstream_providers:
@@ -183,6 +189,27 @@ def _check_entry(entry: ModelCatalogEntry, client: httpx.Client) -> Drift:
             "pinned host does not accept that parameter"
         )
 
+    # Endpoint metadata says whether the knob exists; model metadata says which
+    # values are currently legal and whether reasoning may be disabled. The
+    # original checker covered only the first half and therefore declared
+    # ``medium`` healthy while both active V4 slugs advertised only high/xhigh.
+    reasoning = (model_metadata or {}).get("reasoning") or {}
+    supported_efforts = set(reasoning.get("supported_efforts") or [])
+    if (
+        entry.reasoning_effort is not None
+        and supported_efforts
+        and entry.reasoning_effort not in supported_efforts
+    ):
+        drift.issues.append(
+            f"catalog reasoning_effort={entry.reasoning_effort!r} is not in live "
+            f"supported_efforts={sorted(supported_efforts)}"
+        )
+    if reasoning.get("mandatory") is True:
+        drift.issues.append(
+            "model now reports reasoning mandatory=true — non-core complete() "
+            "cannot use effort=none and the one-token health probe will fail"
+        )
+
     return drift
 
 
@@ -208,8 +235,18 @@ def main() -> int:
     drifts: list[Drift] = []
     try:
         with httpx.Client(timeout=_TIMEOUT) as client:
+            models_response = client.get(_MODELS_URL)
+            models_response.raise_for_status()
+            models = models_response.json().get("data", [])
+            metadata_by_id = {
+                str(item.get("id")): item for item in models if isinstance(item, dict)
+            }
             for entry in entries:
-                drift = _check_entry(entry, client)
+                drift = _check_entry(
+                    entry,
+                    client,
+                    model_metadata=metadata_by_id.get(entry.model_id),
+                )
                 if drift.issues:
                     drifts.append(drift)
     except httpx.HTTPError as exc:

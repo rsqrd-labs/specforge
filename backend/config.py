@@ -211,6 +211,17 @@ class Settings(BaseSettings):
     # concurrently, so generation-count admission alone does not bound actual
     # provider sockets/RPM pressure.
     max_concurrent_provider_calls_per_process: int = 8
+    # A PLAN has four independent chunks. Sending all four to one upstream at
+    # once turns a single user action into a correlated 429/503 burst and can
+    # trip a provider circuit before a successful sibling reports recovery.
+    # Keep the wave semantics (all chunks remain independent/checkpointable),
+    # but admit at most this many PLAN calls from one generation concurrently.
+    max_concurrent_plan_chunks_per_generation: int = 2
+    # Production/staging must prove that a generation-lane consumer from the
+    # same deploy revision is alive before a cache-miss run may be charged.
+    # Development/test remain usable without running arq; the runtime helper
+    # enforces this flag only outside those local environments.
+    generation_worker_readiness_required: bool = True
     generation_admission_lease_ttl_seconds: int = 720
     generation_rate_per_minute: int = 10
     generation_rate_window_seconds: int = 60
@@ -327,6 +338,13 @@ class Settings(BaseSettings):
     stage_generation_deadline_seconds: int = 600
     stage_generation_finalise_reserve_seconds: int = 30
     stage_provider_call_timeout_seconds: int = 240
+    # A same-provider tier fallback is useful for fast upstream failures, but it
+    # must not consume the independent-provider recovery window. The primary
+    # keeps the full call cap; a later route on that same provider is bounded by
+    # this smaller cap. Runtime clamps it to the main provider-call cap too, so
+    # an existing deployment that lowers only STAGE_PROVIDER_CALL_TIMEOUT_SECONDS
+    # does not fail to boot when this new setting is introduced.
+    stage_same_provider_fallback_timeout_seconds: int = 120
     stage_provider_idle_timeout_seconds: int = 240
     stage_retry_min_remaining_seconds: int = 120
     stage_generation_cancel_poll_seconds: float = 1.0
@@ -361,6 +379,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"STAGE_PROVIDER_CALL_TIMEOUT_SECONDS must be 1..{provider_budget}"
             )
+        if (
+            not 1
+            <= self.stage_same_provider_fallback_timeout_seconds
+            <= provider_budget
+        ):
+            raise ValueError(
+                "STAGE_SAME_PROVIDER_FALLBACK_TIMEOUT_SECONDS must be "
+                f"1..{provider_budget}"
+            )
         if not 1 <= self.stage_provider_idle_timeout_seconds <= provider_budget:
             raise ValueError(
                 f"STAGE_PROVIDER_IDLE_TIMEOUT_SECONDS must be 1..{provider_budget}"
@@ -378,6 +405,10 @@ class Settings(BaseSettings):
             raise ValueError(
                 "STAGE_RETRY_MIN_REMAINING_SECONDS must be smaller than the "
                 "generation provider budget"
+            )
+        if not 1 <= self.max_concurrent_plan_chunks_per_generation <= 4:
+            raise ValueError(
+                "MAX_CONCURRENT_PLAN_CHUNKS_PER_GENERATION must be between 1 and 4"
             )
         if not 1 <= self.stage_technology_check_timeout_seconds <= 10:
             raise ValueError("STAGE_TECHNOLOGY_CHECK_TIMEOUT_SECONDS must be 1..10")
@@ -1248,9 +1279,9 @@ def validate_production_settings() -> None:
             "'placeholder-'-prefixed API key, so every generation would fail "
             "with 'No platform LLM route is currently available'. A "
             "'placeholder-' prefix counts as UNSET. Set at least one of "
-            "ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY to a real "
-            "value (Anthropic is the primary and runs Claude Opus 5 for "
-            "full-artifact generation)."
+            "ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY / "
+            "OPENROUTER_API_KEY to a real value. The configured provider must "
+            "also appear in LLM_PROVIDER_PRIORITY."
         )
 
     if errors:
