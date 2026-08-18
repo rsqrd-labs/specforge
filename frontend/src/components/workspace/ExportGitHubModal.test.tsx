@@ -422,7 +422,11 @@ describe("ExportGitHubModal", () => {
 
     renderModal()
 
-    const filter = await screen.findByLabelText(/filter repositories/i)
+    // The configure phase briefly renders before the repository request flips
+    // its loading flag. Wait for fetched data, not that transient picker, so
+    // the test cannot race the loading placeholder under a busy CI runner.
+    await screen.findByRole("button", { name: /docs-site/i })
+    const filter = screen.getByLabelText(/filter repositories/i)
     fireEvent.change(filter, { target: { value: "DOCS" } })
 
     const listbox = screen.getByRole("listbox", { name: /repositories/i })

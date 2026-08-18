@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -32,6 +33,10 @@ from services.cpu_offload import shutdown_cpu_executor
 from services.observability import run_event_loop_lag_sampler, setup_observability
 from services.pipeline.pdf_export_service import shutdown_pdf_executor
 from services.pipeline.recovery_service import run_recovery_loop
+from services.queue import (
+    generation_worker_readiness_enforced,
+    generation_worker_snapshot,
+)
 
 # setup_observability() owns the guarded sentry_sdk.init call and only enables
 # it when settings.sentry_dsn is configured.
@@ -49,6 +54,7 @@ _SECURITY_HEADERS = {
 }
 _HSTS_HEADER = "Strict-Transport-Security"
 _HSTS_VALUE = "max-age=31536000; includeSubDomains"
+logger = logging.getLogger(__name__)
 
 # Token/cookie-issuing responses that return credentials in the body but carry no
 # request Authorization header, so the header-based rule below can't catch them.
@@ -223,8 +229,30 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
         # short-lived connection if lifespan hasn't run (e.g. unit tests).
         redis = getattr(request.app.state, "redis", None)
         redis_status = await check_redis(redis)
+        generation_worker_status: DependencyStatus = "ok"
+        worker_snapshot: dict[str, object] | None = None
+        if generation_worker_readiness_enforced():
+            if redis_status == "ok" and redis is not None:
+                worker_snapshot = await generation_worker_snapshot(redis)
+                generation_worker_status = (
+                    "ok" if worker_snapshot.get("ready") is True else "error"
+                )
+            else:
+                generation_worker_status = "error"
+            if generation_worker_status != "ok":
+                # Details stay in structured logs, never the production response.
+                # This makes a revision mismatch/backlog diagnosable without
+                # exposing deployment topology on the unauthenticated endpoint.
+                logger.error(
+                    "generation_worker_not_ready",
+                    extra={"generation_worker": worker_snapshot},
+                )
         overall_status: HealthStatus = (
-            "ok" if db_status == "ok" and redis_status == "ok" else "degraded"
+            "ok"
+            if db_status == "ok"
+            and redis_status == "ok"
+            and generation_worker_status == "ok"
+            else "degraded"
         )
         status_code = (
             status.HTTP_200_OK
@@ -234,7 +262,13 @@ def create_app(redis_client: Redis | None = None) -> FastAPI:
 
         content = {"status": overall_status, "version": "1.0.0"}
         if settings.environment.lower() != "production":
-            content.update({"db": db_status, "redis": redis_status})
+            content.update(
+                {
+                    "db": db_status,
+                    "redis": redis_status,
+                    "generation_worker": generation_worker_status,
+                }
+            )
 
         return JSONResponse(status_code=status_code, content=content)
 

@@ -5,6 +5,7 @@ import logging
 import re
 
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -236,7 +237,25 @@ async def build_prompt(
     if dep_keys:
         redis = redis_client or get_shared_redis()  # H-1 — T-177
         for dep_type in dep_keys:
-            content = await _fetch_stage_content(dep_type, workspace.id, db, redis)
+            # The worker loads Workspace.stages in the same authoritative DB
+            # session immediately before prompt assembly. Prefer that snapshot:
+            # it removes Redis from the paid post-charge preflight and guarantees
+            # PLAN never observes a stale finalised SPEC after cache invalidation
+            # failed. Lightweight test/caller stubs without ``stages`` retain the
+            # versioned, fail-open fallback below.
+            dep_stage = next(
+                (
+                    item
+                    for item in (getattr(workspace, "stages", None) or ())
+                    if getattr(item, "type", None) == dep_type
+                ),
+                None,
+            )
+            content = (
+                (getattr(dep_stage, "content", None) or "")
+                if dep_stage is not None
+                else await _fetch_stage_content(dep_type, workspace.id, db, redis)
+            )
             if len(content) > _MAX_UPSTREAM_CHARS:
                 logger.warning(
                     "upstream_content_section_aware_injection",
@@ -312,11 +331,6 @@ async def _fetch_stage_content(
     db: AsyncSession,
     redis: Redis,
 ) -> str:
-    cache_key = f"{_STAGE_CACHE_PREFIX}{workspace_id}:{stage_type}"
-    cached = await redis.get(cache_key)
-    if cached is not None:
-        return cached
-
     result = await db.execute(
         select(Stage).where(
             Stage.workspace_id == workspace_id,
@@ -325,5 +339,19 @@ async def _fetch_stage_content(
     )
     stage = result.scalar_one_or_none()
     content = (stage.content or "") if stage else ""
-    await redis.set(cache_key, content, ex=_STAGE_CACHE_TTL)
+    # The version is part of the key, so a failed invalidation can never make a
+    # later generation consume an older finalised dependency. The DB read above
+    # is the authority; Redis is only a best-effort mirror for legacy callers.
+    version = int(getattr(stage, "current_version", 0) or 0)
+    cache_key = f"{_STAGE_CACHE_PREFIX}{workspace_id}:{stage_type}:v{version}"
+    try:
+        cached = await redis.get(cache_key)
+        if cached is not None:
+            return cached.decode("utf-8") if isinstance(cached, bytes) else str(cached)
+        await redis.set(cache_key, content, ex=_STAGE_CACHE_TTL)
+    except (RedisError, UnicodeError):
+        logger.warning(
+            "stage_dependency_cache_unavailable",
+            extra={"workspace_id": str(workspace_id), "stage": stage_type},
+        )
     return content

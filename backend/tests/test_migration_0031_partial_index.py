@@ -37,12 +37,12 @@ def test_0031_revises_0030_and_history_is_linear() -> None:
 
     revised = {m.down_revision for m in modules if m.down_revision}
     heads = [m.revision for m in modules if m.revision not in revised]
-    # The single head advances as migrations are added (0044 adds the
-    # workspaces.restricted_environment column). The guard is that there
+    # The single head advances as migrations are added (0045 adds the
+    # eval_results judge-provenance columns). The guard is that there
     # is exactly ONE head — a branched history breaks `alembic upgrade head` on
     # deploy.
-    assert heads == ["0044"], (
-        f"Expected a single migration head (0044), got {heads!r} — a branched "
+    assert heads == ["0045"], (
+        f"Expected a single migration head (0045), got {heads!r} — a branched "
         "history breaks `alembic upgrade head` on deploy."
     )
 

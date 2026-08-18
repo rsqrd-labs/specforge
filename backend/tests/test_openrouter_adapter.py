@@ -3,9 +3,11 @@
 Mirrors test_openai_adapter.py's guard coverage (the chat-completions path
 this adapter is modelled on) plus OpenRouter-specific behavior: usage/cost
 accounting (stream_options + usage.include, since — unlike OpenAI's dead
-chat-completions path — this IS the live path), route pinning
-(data_collection=deny, allow_fallbacks=false), reasoning.effort gating on
-the catalog value, and BatchUnsupportedError on all three batch methods.
+chat-completions path — this IS the live path), evaluated-host allow-list routing
+(provider.order + provider.only from the catalog, privacy filtering, and strict
+parameter support), reasoning gating — effort from the catalog on core
+generation, effort=none on the cheap non-core `complete()` path and NEVER on a
+stream — and BatchUnsupportedError on all three batch methods.
 """
 
 from __future__ import annotations
@@ -22,6 +24,8 @@ from services.llm.base import (
     BatchUnsupportedError,
     ProviderError,
     ProviderRateLimitError,
+    ProviderTerminalError,
+    ProviderUnavailableError,
 )
 
 # ---------------------------------------------------------------------------
@@ -55,14 +59,22 @@ async def _fake_stream(chunks: list[Any]) -> AsyncIterator[Any]:
 def _make_adapter(
     chunks: list[Any] | None = None,
     *,
-    model: str = "deepseek/deepseek-v3.2",
+    model: str = "deepseek/deepseek-v4-flash",
     reasoning_effort: str | None = None,
+    upstream_providers: tuple[str, ...] = ("deepseek",),
+    supports_reasoning: bool = True,
+    is_core_generation: bool = True,
 ) -> Any:
     from services.llm.openrouter_adapter import OpenRouterAdapter
 
     adapter = OpenRouterAdapter.__new__(OpenRouterAdapter)
     adapter.model = model
-    adapter._request_policy = {"reasoning_effort": reasoning_effort}
+    adapter._request_policy = {
+        "reasoning_effort": reasoning_effort,
+        "upstream_providers": upstream_providers,
+        "supports_reasoning": supports_reasoning,
+        "is_core_generation": is_core_generation,
+    }
     adapter.last_completion = None
 
     mock_create = AsyncMock()
@@ -204,6 +216,47 @@ async def test_openai_error_is_wrapped_as_provider_error_labelled_openrouter() -
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "choices",
+    [
+        [],
+        [
+            SimpleNamespace(
+                message=SimpleNamespace(content=None),
+                finish_reason=None,
+            )
+        ],
+    ],
+)
+async def test_empty_completion_is_retryable_unavailability(choices) -> None:
+    adapter = _make_adapter()
+    response = SimpleNamespace(choices=choices, usage=None, model=adapter.model)
+    adapter._client.chat.completions.create = AsyncMock(return_value=response)
+
+    with pytest.raises(ProviderUnavailableError) as raised:
+        await adapter.complete("sys", "user", 100)
+
+    assert raised.value.error_type == "empty_response"
+
+
+@pytest.mark.asyncio
+async def test_policy_filtered_empty_completion_is_terminal() -> None:
+    adapter = _make_adapter()
+    choice = SimpleNamespace(
+        message=SimpleNamespace(content=None, refusal="blocked"),
+        finish_reason="content_filter",
+    )
+    response = SimpleNamespace(choices=[choice], usage=None, model=adapter.model)
+    adapter._client.chat.completions.create = AsyncMock(return_value=response)
+
+    with pytest.raises(ProviderTerminalError) as raised:
+        await adapter.complete("sys", "user", 100)
+
+    assert raised.value.failover_allowed is False
+    assert raised.value.error_type == "content_policy_violation"
+
+
+@pytest.mark.asyncio
 async def test_rate_limit_error_is_wrapped_with_retry_after() -> None:
     adapter = _make_adapter()
 
@@ -224,39 +277,187 @@ async def test_rate_limit_error_is_wrapped_with_retry_after() -> None:
     assert raised.value.retry_after == 30.0
 
 
+def test_openrouter_payment_error_allows_cross_provider_failover() -> None:
+    from services.llm.openrouter_adapter import _wrap_openrouter_error
+
+    error = RuntimeError("insufficient provider credits")
+    error.status_code = 402  # type: ignore[attr-defined]
+    wrapped = _wrap_openrouter_error(error)  # type: ignore[arg-type]
+
+    assert isinstance(wrapped, ProviderTerminalError)
+    assert wrapped.retryable is False
+    assert wrapped.failover_allowed is True
+    assert wrapped.error_code.startswith("openrouter_terminal_402")
+
+
+def test_openrouter_impossible_route_is_terminal_but_can_fail_over() -> None:
+    from services.llm.openrouter_adapter import _wrap_openrouter_error
+
+    error = RuntimeError("No available model provider meets routing requirements")
+    error.status_code = 503  # type: ignore[attr-defined]
+    error.body = {  # type: ignore[attr-defined]
+        "error": {
+            "message": str(error),
+            "metadata": {"error_type": "no_available_provider"},
+        }
+    }
+    wrapped = _wrap_openrouter_error(error)  # type: ignore[arg-type]
+
+    assert isinstance(wrapped, ProviderTerminalError)
+    assert wrapped.failover_allowed is True
+    assert wrapped.error_type == "no_available_provider"
+
+
+def test_openrouter_upstream_502_is_retryable_unavailability() -> None:
+    from services.llm.openrouter_adapter import _wrap_openrouter_error
+
+    error = RuntimeError("upstream bad gateway")
+    error.status_code = 502  # type: ignore[attr-defined]
+    wrapped = _wrap_openrouter_error(error)  # type: ignore[arg-type]
+
+    assert isinstance(wrapped, ProviderUnavailableError)
+    assert wrapped.retryable is True
+    assert wrapped.failover_allowed is True
+
+
+def test_openrouter_typed_overload_503_honours_retry_after_without_circuiting() -> None:
+    from services.llm.openrouter_adapter import _wrap_openrouter_error
+
+    error = RuntimeError("provider temporarily overloaded")
+    error.status_code = 503  # type: ignore[attr-defined]
+    error.headers = {"retry-after": "7"}  # type: ignore[attr-defined]
+    error.body = {  # type: ignore[attr-defined]
+        "error": {
+            "message": str(error),
+            "metadata": {"error_type": "provider_overloaded"},
+        }
+    }
+
+    wrapped = _wrap_openrouter_error(error)  # type: ignore[arg-type]
+
+    assert isinstance(wrapped, ProviderRateLimitError)
+    assert wrapped.status_code == 503
+    assert wrapped.retry_after == 7
+
+
 # ---------------------------------------------------------------------------
 # OR-9: request shape — stream_options, usage.include, pinned provider route
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_stream_request_includes_usage_accounting_and_pinned_route() -> None:
+async def test_stream_request_restricts_to_the_evaluated_catalog_host() -> None:
     adapter = _make_adapter([_chunk("hi")])
 
     async for _ in adapter.stream("sys", "user", 4096):
         pass
 
     kwargs = adapter._client.chat.completions.create.await_args.kwargs
-    assert kwargs["model"] == "deepseek/deepseek-v3.2"
+    assert kwargs["model"] == "deepseek/deepseek-v4-flash"
     assert kwargs["stream"] is True
     assert kwargs["stream_options"] == {"include_usage": True}
     assert kwargs["extra_body"]["usage"] == {"include": True}
+    # The app owns cross-provider fallback. OpenRouter may retry/fallback only
+    # inside the explicitly evaluated upstream set.
     assert kwargs["extra_body"]["provider"] == {
         "data_collection": "deny",
-        "allow_fallbacks": False,
+        "allow_fallbacks": True,
+        "require_parameters": True,
+        "order": ["deepseek"],
+        "only": ["deepseek"],
     }
-    # No reasoning field when the catalog entry sets no effort (deepseek-v3.2).
+    # No reasoning field when the catalog entry sets no effort.
     assert "reasoning" not in kwargs["extra_body"]
 
 
 @pytest.mark.asyncio
+async def test_upstream_order_is_omitted_when_catalog_declares_none() -> None:
+    adapter = _make_adapter([_chunk("hi")], upstream_providers=())
+
+    async for _ in adapter.stream("sys", "user", 4096):
+        pass
+
+    provider_block = adapter._client.chat.completions.create.await_args.kwargs[
+        "extra_body"
+    ]["provider"]
+    assert "order" not in provider_block
+    assert provider_block == {
+        "data_collection": "deny",
+        "allow_fallbacks": True,
+        "require_parameters": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_reasoning_effort_sent_only_when_catalog_declares_it() -> None:
+    adapter = _make_adapter([_chunk("hi")], reasoning_effort="medium")
+
+    async for _ in adapter.stream("sys", "user", 4096):
+        pass
+
+    kwargs = adapter._client.chat.completions.create.await_args.kwargs
+    assert kwargs["extra_body"]["reasoning"] == {"effort": "medium"}
+
+
+@pytest.mark.asyncio
+async def test_streaming_never_suppresses_reasoning_even_for_non_core_ops() -> None:
+    """Reasoning deltas are the stream watchdog's liveness sentinel (issue #19):
+    they arrive as real `data:` events with delta.content=None and reset the
+    idle timer. OpenRouter's `: OPENROUTER PROCESSING` keepalives are dropped by
+    the openai SDK's decoder, so suppressing reasoning on a stream would leave
+    NOTHING resetting the 180s idle bound."""
     adapter = _make_adapter(
-        [_chunk("hi")], model="z-ai/glm-5.2", reasoning_effort="medium"
+        [_chunk("hi")], reasoning_effort="medium", is_core_generation=False
     )
 
     async for _ in adapter.stream("sys", "user", 4096):
         pass
+
+    kwargs = adapter._client.chat.completions.create.await_args.kwargs
+    assert kwargs["extra_body"]["reasoning"] == {"effort": "medium"}
+
+
+@pytest.mark.asyncio
+async def test_complete_suppresses_reasoning_for_cheap_non_core_operations() -> None:
+    """Reasoning tokens bill as output AND count against max_tokens on
+    OpenRouter. eval.score/refine.focused/summary.create run on 4-8K budgets, so
+    a medium-effort burst returns empty text at finish_reason=length — and the
+    critic is fail-open, so that failure is silent."""
+    adapter = _make_adapter(reasoning_effort="medium", is_core_generation=False)
+    adapter._client.chat.completions.create = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="{}"), finish_reason="stop"
+                )
+            ],
+            usage=None,
+            model="deepseek/deepseek-v4-flash",
+        )
+    )
+
+    await adapter.complete("sys", "user", 4096)
+
+    kwargs = adapter._client.chat.completions.create.await_args.kwargs
+    assert kwargs["extra_body"]["reasoning"] == {"effort": "none"}
+
+
+@pytest.mark.asyncio
+async def test_complete_keeps_declared_effort_for_core_generation() -> None:
+    adapter = _make_adapter(reasoning_effort="medium", is_core_generation=True)
+    adapter._client.chat.completions.create = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="x"), finish_reason="stop"
+                )
+            ],
+            usage=None,
+            model="deepseek/deepseek-v4-flash",
+        )
+    )
+
+    await adapter.complete("sys", "user", 4096)
 
     kwargs = adapter._client.chat.completions.create.await_args.kwargs
     assert kwargs["extra_body"]["reasoning"] == {"effort": "medium"}
@@ -269,7 +470,7 @@ async def test_reasoning_effort_sent_only_when_catalog_declares_it() -> None:
 
 @pytest.mark.asyncio
 async def test_complete_extracts_message_content_and_captures_usage() -> None:
-    adapter = _make_adapter(model="qwen/qwen3.8-max", reasoning_effort="medium")
+    adapter = _make_adapter(model="deepseek/deepseek-v4-pro", reasoning_effort="medium")
     response = SimpleNamespace(
         choices=[
             SimpleNamespace(
@@ -278,7 +479,7 @@ async def test_complete_extracts_message_content_and_captures_usage() -> None:
             )
         ],
         usage=SimpleNamespace(prompt_tokens=12, completion_tokens=3, cost=0.0005),
-        model="qwen/qwen3.8-max",
+        model="deepseek/deepseek-v4-pro",
     )
     adapter._client.chat.completions.create = AsyncMock(return_value=response)
 
@@ -290,7 +491,7 @@ async def test_complete_extracts_message_content_and_captures_usage() -> None:
     assert "stream" not in kwargs
     assert adapter.last_completion is not None
     assert adapter.last_completion.usage["cost"] == 0.0005
-    assert adapter.last_completion.raw["resolved_model"] == "qwen/qwen3.8-max"
+    assert adapter.last_completion.raw["resolved_model"] == "deepseek/deepseek-v4-pro"
 
 
 # ---------------------------------------------------------------------------
@@ -304,9 +505,10 @@ def test_adapter_targets_the_openrouter_base_url(
     from services.llm.openrouter_adapter import OpenRouterAdapter
 
     monkeypatch.setattr("config.settings.openrouter_api_key", "sk-or-test")
-    adapter = OpenRouterAdapter("deepseek/deepseek-v3.2", api_key="sk-or-test")
+    adapter = OpenRouterAdapter("deepseek/deepseek-v4-flash", api_key="sk-or-test")
 
     assert str(adapter._client.base_url).rstrip("/") == "https://openrouter.ai/api/v1"
+    assert adapter._client.max_retries == 0
 
 
 # ---------------------------------------------------------------------------

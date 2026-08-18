@@ -108,40 +108,41 @@ In `provider_status.py`, temporarily raise `_UNHEALTHY_FAILURE_THRESHOLD` or set
 
 `_FAILURES` is **per-worker-process**. In multi-worker deployments (Gunicorn + multiple uvicorn workers) each process maintains an independent failure count. A provider may be circuit-open in one worker and healthy in another. This is an accepted trade-off — a distributed circuit would require a shared Redis counter. Monitor `thought2build_llm_circuit_rejections_total` across all instances to detect partial activation.
 
-### The Circuit Breaker IS the Provider-Failover Mechanism
+### Circuit Breaker and Runtime Provider Recovery
 
-There is deliberately **no separate cross-provider failover machinery**. Core
-generation resolves through `resolve_platform_route_by_provider`, which walks
-`LLM_PROVIDER_PRIORITY` and skips any provider that fails **either**
-`is_provider_configured()` (blank / `placeholder-` key) **or** `can_route()`
-(circuit open). Those two checks cover both failure modes operators care about —
-"no Anthropic key" and "Claude is not responding" — and the next configured
-provider simply wins the route. Nothing needs to be flipped by hand.
+Initial routing walks `LLM_PROVIDER_PRIORITY` and skips unconfigured or
+circuit-open providers. In addition, an already-running durable generation now
+recovers at the chunk-call boundary: transient failures try the configured
+same-provider recovery tier, then another configured provider while the run's
+retry reserve remains. Exhausted 429 retries skip the same-provider ladder and
+move directly to a different provider so throttling is never amplified by a
+larger model on the same account.
 
 Know its real semantics before you rely on it:
 
 | Property | Behaviour | Consequence |
 |---|---|---|
-| Threshold | 3 failures / 600s, **per process** | With `WEB_CONCURRENCY > 1` plus the two worker services, roughly 3 failures *per process* are burned before the fleet fully sheds a dead provider |
-| Rate limits | 429/529/503 are **excluded** from the failure count (they meter on `thought2build_llm_provider_rate_limited_total` instead) | A throttled provider is retried in place with `Retry-After` backoff, not failed over. Folding them in would 503 the very backoff retry — see §14 |
-| In-flight generations | **Not rescued.** `_runtime_fallback_route` is pinned to the same provider (`allow_cross_provider=False`) | A generation already streaming when the breaker trips de-escalates Opus 5 → Sonnet 5 on the *same* dead provider, then errors. The *next* generation fails over cleanly |
+| Threshold | 3 failures / 600s, **per process** | Each generation worker replica learns independently; runtime fallback protects the current run before fleet-wide circuit convergence |
+| Rate limits | 429/529/503 are **excluded** from breaker failures | Retry with `Retry-After`; after the bounded retry budget, move to another configured provider |
+| In-flight generations | Rescued at a failed chunk-call boundary while retry reserve remains | Completed chunks stay checkpointed; only the failed chunk moves routes |
 | Artifact tier on failover | Every provider runs `(strong, mid)` for full artifacts | OpenAI failover lands on **GPT-5.5**, not the cheap `mini` tier — a user charged frontier-tier credits never silently receives a much weaker artifact |
 
-**Alert on the state gauge, not on a fallback counter:**
+**Alert on both circuit state and actual runtime fallback:**
 
 ```promql
 # Anthropic (the primary) has been shed — traffic is now on a fallback provider.
 max by (provider) (thought2build_llm_circuit_state{provider="anthropic"}) == 1
+
+sum by (provider, outcome) (
+  rate(thought2build_pipeline_generation_fallbacks_total[5m])
+) > 0
 ```
 
 `max by (provider)` is required because the gauge is per-process.
 
-> ⚠️ **Do not alert on `llm_cross_provider_fallback_total`.** That flag is set
-> only by `resolve_llm_route`'s explicit cross-provider loop, which core
-> generation does not use — a breaker-driven provider switch leaves
-> `cross_provider_fallback` **false**, so the counter never moves and the alert
-> would wait forever. Forensics for "what actually ran" come from the
-> `llm_cost_events` ledger (`provider`, `model`, `model_tier` columns).
+Forensics for what actually ran come from `llm_cost_events` (`provider`,
+`model`, `model_tier`, retry metadata) plus `stage.chunk_generation_fallback`
+logs keyed by durable generation id.
 
 **Cost note:** GPT-5.5 is frontier-priced. During a sustained Anthropic outage,
 watch `llm_estimated_cost_usd_total{provider="openai"}` — fallback generations
@@ -302,8 +303,10 @@ GET /health
 ```
 
 Returns HTTP 200 with `{"status":"ok","version":"1.0.0"}` when healthy and
-HTTP 503 with `status:"degraded"` on dependency failure. In non-production the
-response also includes `db` and `redis`; production omits dependency details.
+HTTP 503 with `status:"degraded"` on a database, Redis, or enforced
+generation-worker-readiness failure. In non-production the response also
+includes `db`, `redis`, and `generation_worker`; production omits dependency
+details.
 
 ### LLM Provider Health
 
@@ -786,12 +789,12 @@ reports `ok`.
    be denied the one model this deployment depends on. Also confirm the usage
    tier can absorb *primary* traffic, not just fallback overflow.
 
-2. Set `ANTHROPIC_API_KEY` on **all three Railway services** — `backend`,
-   `worker`, and `worker-fast`. Use a **Shared Variable / Variable Reference**
-   so it is one value, not three pastes that can drift. A worker missing the key
+2. Set `ANTHROPIC_API_KEY` on **all four Railway services** — `backend`,
+   `worker`, `worker-fast`, and `worker-generation`. Use a **Shared Variable /
+   Variable Reference** so it is one value, not four pastes that can drift. A worker missing the key
    fails silently per job; nothing validates it at job start.
 
-3. Redeploy all three (Deployments → Deploy). A variable change alone does not
+3. Redeploy all four (Deployments → Deploy). A variable change alone does not
    restart a service.
 
 4. Revoke the old key in the Anthropic Console **only after** the verification
@@ -850,10 +853,10 @@ reports `ok`.
      python scripts/production_smoke.py
    ```
 
-   Set `THOUGHT2BUILD_RUN_LLM_SMOKE=1` to additionally stream one real spec
-   generation (this **does** consume credits).
+   Set `THOUGHT2BUILD_RUN_LLM_SMOKE=1` to additionally generate and finalise one
+   real SPEC, then generate its dependent PLAN (this **does** consume credits).
 
-**Rollback:** restore the previous `ANTHROPIC_API_KEY` on all three services and
+**Rollback:** restore the previous `ANTHROPIC_API_KEY` on all four services and
 redeploy. If the old key is already revoked and no replacement works, fail over
 to another platform with an **env-only** change — no redeploy of code:
 
@@ -870,28 +873,45 @@ GPT-5.5, which is the closer substitute.
 
 **A fourth, optional provider — OpenRouter (issue #152).** `OPENROUTER_API_KEY`
 defaults to unset and is never required to boot; shipping its catalog/adapter
-wiring is inert while `LLM_PROVIDER_PRIORITY` omits `"openrouter"`. Day-one
-scope is open-weight models only (`deepseek/deepseek-v3.2` small,
-`z-ai/glm-5.2` mid, `qwen/qwen3.8-max` strong) reached through a thin
-`chat_completions` adapter over the `openai` SDK pointed at
-`https://openrouter.ai/api/v1`. If a key is set, install it the same way as
-`ANTHROPIC_API_KEY` — a Shared Variable across all three Railway services
-(`backend`, `worker`, `worker-fast`) — but do **not** add `"openrouter"` to
-`LLM_PROVIDER_PRIORITY` in production without first completing the four-item
-promotion gate: (1) the live golden-corpus run
-(`docs/evals/ROUTE_PROMOTION.md`), (2) a fixed-in-advance judge-agreement
-check — the flip moves the critic, the eval judge, the Rung-2 problem
-compressor, and the `pr_check` evaluator onto the openrouter judge model
-(`JUDGE_MODELS["openrouter"]`, currently `deepseek/deepseek-v3.2`) in the same
-instant it moves generation, and none of that is exercised by an artifact-only
-eval, (3) an updated Privacy Policy naming the new sub-processors (the
-day-one models route through DeepSeek/Z.ai/Alibaba upstreams via the
-OpenRouter proxy — not currently disclosed), and (4) confirming the adapter
-pins `provider.data_collection=deny` / `provider.allow_fallbacks=false` on
-every request (it does, by default) so the upstream host actually serving a
-model slug is stable and reproducible run-to-run. Verify with
-`GET /providers/health?model=deepseek/deepseek-v3.2` the same way §8.5's
-Anthropic steps verify `claude-opus-5`.
+wiring is inert while `LLM_PROVIDER_PRIORITY` omits `"openrouter"`. The ladder
+is **all-DeepSeek-V4** — `deepseek/deepseek-v4-flash` (`mid`, the cheap primary
+and judge) escalating to `deepseek/deepseek-v4-pro` (`strong`, full-artifact
+generation) — reached through a thin `chat_completions` adapter over the
+`openai` SDK pointed at `https://openrouter.ai/api/v1`. If a key is set, install
+it the same way as `ANTHROPIC_API_KEY` — a Shared Variable across all four
+Railway services (`backend`, `worker`, `worker-fast`, `worker-generation`) — but do **not** add
+`"openrouter"` to `LLM_PROVIDER_PRIORITY` in production without completing the
+promotion gate in `docs/evals/ROUTE_PROMOTION.md`.
+
+*Why every tier is DeepSeek, and why DeepSeek's endpoint is required.*
+OpenRouter serves one model slug from many upstream hosts. The request uses
+matching `provider.order=["deepseek"]` and `provider.only=["deepseek"]` lists,
+`require_parameters=true`, and `data_collection="deny"`. Fallback remains enabled
+only within that allow-list; cross-provider recovery belongs to the durable
+application pipeline. This restriction matters because prompt caching exists on
+**1 of 19** hosts serving `deepseek-v4-flash` (DeepSeek's own) and on **0 of 32**
+serving the retired `z-ai/glm-5.2`; hosts disagree on real
+`max_completion_tokens` by up to **32x** against the 32,768 the pipeline sends;
+and catalog rates are the pinned host's, which differ from the model alias's.
+
+*Failure modes specific to this provider.*
+
+* **No privacy-compatible endpoint.** `data_collection: "deny"` can still
+  narrow the pool to zero, which OpenRouter answers with "no available model
+  provider meets your routing requirements". Detect it
+  with `GET /providers/health?model=deepseek/deepseek-v4-pro` (admin) — the
+  probe carries the same routing policy a generation does, and `probe_error` on the
+  response distinguishes an empty pool from a bad key. Run this **before** the
+  env flip, the same way §8.5's Anthropic steps verify `claude-opus-5`.
+* **A 502/503 triggers application fallback.** Typed overloads honor
+  `Retry-After` with bounded in-place retries. Other transient failures move to
+  the next DeepSeek tier and then the next configured platform provider while
+  the durable deadline still has a real retry window.
+* **Silent catalog drift.** Rates, output ceilings and caching support all move
+  under a floating slug. `uv run python ../scripts/check_openrouter_catalog_drift.py`
+  diffs the catalog against the *preferred endpoint* and exits non-zero on drift.
+  Run it at the quarterly `CATALOG_HYGIENE.md` review; it is deliberately not in
+  CI (network dependency, and a scheduled job bills ~1 minute per firing).
 
 ---
 
@@ -2013,7 +2033,7 @@ silently turns an existing verified package red.
 
 ## 14. Generation Admission Control & Provider Budget (Scalability P0)
 
-The P0 remediation of `docs/SCALABILITY_AUDIT.md`. Two layers protect the core
+The P0 remediation of `docs/SCALABILITY_AUDIT.md`. Three layers protect the core
 **generate / regenerate** path from a concurrent-generation burst, plus 429-aware
 backoff so a throttled provider key degrades gracefully instead of amplifying.
 
@@ -2022,20 +2042,26 @@ backoff so a throttled provider key degrades gracefully instead of amplifying.
 - **Admission control** (`services/pipeline/admission.py`) — before any provider
   call (and after the generation-cache miss, so a cache hit consumes no slot), a
   generation must acquire a slot across three budgets, in order:
-  1. **Per-process** (`MAX_CONCURRENT_GENERATIONS_PER_PROCESS`, default 20) —
+  1. **Per-process** (`MAX_CONCURRENT_GENERATIONS_PER_PROCESS`, default 4) —
      in-memory; the primary valve so one worker cannot self-immolate.
   2. **Per-user** (`MAX_CONCURRENT_GENERATIONS_PER_USER`, default 3) — a
      self-healing Redis lease (TTL `GENERATION_ADMISSION_LEASE_TTL_SECONDS`), so
      it holds across instances and recovers if a process dies.
   3. **Per-provider** (`PROVIDER_MAX_INFLIGHT_GENERATIONS` /
-     `PROVIDER_MAX_GENERATIONS_PER_MINUTE`, default **0 = unlimited**) — global
-     Redis budget against the shared platform key.
+     `PROVIDER_MAX_GENERATIONS_PER_MINUTE`) — global Redis budget against the
+     shared platform key. In-flight defaults to **4**; RPM defaults to **0 =
+     unlimited** until the account limit is measured. The API transfers this
+     lease with the queued job, so queued and running paid generations both
+     occupy capacity and excess work is rejected before charging.
   Over budget ⇒ fast-fail carrying `Retry-After`. **Redis budgets fail OPEN** (a
   Redis blip never blocks a generation; the per-process limiter still applies).
   **Scope:** these budgets count the **core generate/regenerate path only**.
   Storyboard / increment / harness gap-patch hit the same key but are governed by
   their own rate tiers and are NOT counted here — `PROVIDER_MAX_*` is a
   core-generation budget, not a whole-account budget.
+- **Provider-call bulkhead** (`MAX_CONCURRENT_PROVIDER_CALLS_PER_PROCESS`,
+  default 8) — caps actual worker-local model calls. This is distinct from
+  generation admission because one artifact can fan out several chunk calls.
 - **HTTP-native generation tier** (`middleware/rate_limit.py`,
   `GENERATION_RATE_PER_MINUTE` / `_WINDOW_SECONDS`) — a true **429 + Retry-After**
   at the edge for `/stages/{id}/(generate|regenerate|regenerate-gaps)`, before the
@@ -2044,14 +2070,16 @@ backoff so a throttled provider key degrades gracefully instead of amplifying.
 - **429-aware backoff** (`services/pipeline/stage_manager.py`) — a provider
   429/529/503 is a *throughput* failure, retried **in place on the same tier**
   (honor `Retry-After` → exponential backoff + jitter, bounded by
-  `PROVIDER_RATE_LIMIT_MAX_RETRIES`), **never escalated** to a bigger model. The
+  `PROVIDER_RATE_LIMIT_MAX_RETRIES`), never escalated within that throttled
+  provider. After bounded retries are exhausted, generation moves to a different
+  configured provider when one is healthy. The
   circuit breaker excludes rate-limits, so a 429 cannot open the circuit and then
   hard-fail its own backoff retry.
 
 ### Sizing the provider budget (measure, don't guess)
 
-`PROVIDER_MAX_*` ship at 0 because the binding constraint is the per-org provider
-limit, which is account-specific. Before enabling them:
+The in-flight ceiling ships conservatively at 4; the RPM ceiling ships at 0
+because the binding per-org rate limit is account-specific. Before tuning them:
 
 1. Get the **per-org RPM / TPM / concurrent-request** limits for each provider
    account (Anthropic/OpenAI/Google dashboards or support).
@@ -2076,7 +2104,8 @@ thought2build_generation_inflight_process
 # Provider throttling — the binding-constraint signal (the shared key is at its ceiling):
 sum by (provider) (rate(thought2build_llm_provider_rate_limited_total[5m]))
 
-# 429-aware in-place retries; "exhausted" = bounded retries used up, failure surfaced:
+# 429-aware retries; "exhausted" means the local retry budget was used before
+# alternate-provider recovery or terminal failure:
 sum by (provider, outcome) (rate(thought2build_pipeline_provider_rate_limit_retries_total[5m]))
 ```
 
@@ -2091,7 +2120,9 @@ investigate the pipeline `finally` release).
 Every knob is env-driven (`config.py`) and independently disable-able with **0**:
 `MAX_CONCURRENT_GENERATIONS_PER_PROCESS=0` (disable the per-process valve),
 `MAX_CONCURRENT_GENERATIONS_PER_USER=0`, `GENERATION_RATE_PER_MINUTE=0` (disable
-the HTTP tier), `PROVIDER_MAX_*=0` (unlimited). The 429-aware backoff is always on
+the HTTP tier), `PROVIDER_MAX_*=0` (unlimited). Keep
+`MAX_CONCURRENT_PROVIDER_CALLS_PER_PROCESS` positive; lower it to reduce upstream
+pressure. The 429-aware backoff is always on
 (it has no off switch — it only ever *helps* under throttling); to make it less
 aggressive lower `PROVIDER_RATE_LIMIT_MAX_RETRIES`. No migration or restart
 ordering is required — these take effect on the next process start.
@@ -2120,8 +2151,8 @@ P1 unblocks running **N API + worker instances** without exhausting Postgres
 `max_connections`. Three levers:
 
 - **F3 — transaction pooler (PgBouncer).** Each API/worker process holds up to
-  `DB_POOL_SIZE`+`DB_MAX_OVERFLOW` (=30) connections; 2 API workers + 2 worker
-  lanes already ≈ 120, crowding a default managed-Postgres limit of 100 **before**
+  `DB_POOL_SIZE`+`DB_MAX_OVERFLOW` (=30) connections; 2 API workers + 3 worker
+  lanes can already crowd a default managed-Postgres limit of 100 **before**
   any scale-out. A transaction-mode pooler multiplexes all app connections onto a
   small fixed server pool, so the Postgres connection count stays **flat**
   regardless of instance count. It is compatible because the generation pipeline
@@ -2197,7 +2228,7 @@ The `/metrics` endpoint now exposes the SQLAlchemy pool per instance (F3):
 | `thought2build_db_pool_overflow` | overflow beyond `pool_size` (negative = not full) |
 | `thought2build_db_pool_total_open` | **total open Postgres connections from this instance** |
 | `thought2build_db_pool_max` | this instance's peak ceiling (`pool_size`+`max_overflow`) |
-| `thought2build_background_tasks{registry}` | live detached tasks (pipeline/eval/critic/verifier) — F6 |
+| `thought2build_background_tasks{registry}` | live detached advisory tasks (eval/critic/verifier) — F6 |
 
 **Acceptance gate / alert:** `sum(thought2build_db_pool_total_open)` across instances
 must stay under the confirmed `max_connections` with margin. With the pooler in
@@ -2207,7 +2238,7 @@ bound (a fan-out leak past the F1 admission cap).
 
 ---
 
-## 16. Worker Lanes — Fast/Bulk Queue Split (Scalability P1)
+## 16. Worker Lanes — Fast/Bulk/Generation Queues (Scalability P1)
 
 **Reference:** `docs/SCALABILITY_AUDIT.md` §F5/§F6
 **Modules:** `backend/worker.py`, `backend/services/queue.py`,
@@ -2227,25 +2258,31 @@ class, each drained by its **own process**:
 - **Fast lane** — `arq worker.FastWorkerSettings`, a dedicated queue
   (`arq:queue:fast`). Paid credit grants (`billing_process_webhook`) + the PR
   status check (`pr_check`), plus the billing recovery crons.
+- **Generation lane** — `arq worker.GenerationWorkerSettings`, dedicated queue
+  `arq:queue:generation`. It owns research, prompt compression, provider calls,
+  checkpoints, validation, and persistence for paid stage generation. API
+  processes only enqueue and observe durable DB state.
 
 Routing is by job **name** via `services.queue.queue_for_job` (single source of
-truth; every `enqueue()` call site is unchanged). Both lanes are stateless and
+truth; every `enqueue()` call site is unchanged). All lanes are stateless and
 scale to **N replicas** — jobs are idempotent/checkpointed and arq dedups crons
 **per queue**, so each cron fires once per lane regardless of replica count.
 
-### ⚠️ DEPLOY INVARIANT — the fast worker must run everywhere
+### ⚠️ DEPLOY INVARIANT — fast and generation workers must run everywhere
 
 Because `billing_process_webhook` and `pr_check` route to `arq:queue:fast`, those
 jobs **only drain if a `FastWorkerSettings` process is running**. The billing 60s
 sweep re-enqueues to the same fast queue, so it is **not** a substitute consumer.
-Deploy **both** worker process types in every environment:
+The generation queue likewise only drains when `GenerationWorkerSettings` is
+running; without it a paid run remains `in_progress` until bounded recovery
+refunds it. Deploy **all three** worker process types in every environment:
 
-- **docker-compose:** the `worker` (bulk) and `worker-fast` services.
-- **Procfile (Railway/etc.):** the `worker` and `worker_fast` process types
-  (`arq worker.WorkerSettings` / `arq worker.FastWorkerSettings`).
+- **docker-compose:** `worker`, `worker-fast`, and `worker-generation`.
+- **Procfile (Railway/etc.):** `worker`, `worker_fast`, and `worker_generation`.
 
-For Railway, provision three services named `backend`, `worker`, and
-`worker-fast`, all rooted at `/backend`. Set each service's **Config File Path**
+For Railway, provision four services named `backend`, `worker`, `worker-fast`,
+and `worker-generation`, all rooted at `/backend`. Set each service's
+**Config File Path**
 explicitly (Railway config paths are repository-absolute):
 
 | Service | Config File Path |
@@ -2253,8 +2290,9 @@ explicitly (Railway config paths are repository-absolute):
 | `backend` | `/backend/railway.json` |
 | `worker` | `/backend/railway.worker.json` |
 | `worker-fast` | `/backend/railway.worker-fast.json` |
+| `worker-generation` | `/backend/railway.worker-generation.json` |
 
-The production GitHub Actions deploy job targets all three services. The API
+All four services must auto-deploy the same successful `main` commit. The API
 config calls `entrypoint.sh`, preserving migrate → seed templates → Gunicorn;
 worker configs intentionally run neither migrations nor template seeding.
 
@@ -2265,11 +2303,21 @@ A missing/stalled fast worker surfaces as:
 queued jobs and the next sweep drain it; grants are idempotent so nothing
 double-grants.
 
+A missing/stalled generation worker surfaces as
+`thought2build_worker_queue_oldest_age_seconds{queue="arq:queue:generation"}`
+climbing while generation runs remain in `preparing`. Production and staging
+also require a generation-worker heartbeat from the same deploy revision:
+`/health` becomes degraded and cache-miss generation fails before charging when
+that heartbeat is missing, stale, or belongs to the previous rollout. **Recovery:**
+start the matching generation worker; queued jobs retain their stable run ids
+and drain safely.
+
 ### Per-queue backpressure metrics
 
 A lightweight per-worker cron (`sample_queue_stats`, every minute at :45) samples
-the queue **that worker consumes** — sampled from a cron, not on job start, so a
-stalled queue (which starts no jobs) still reports:
+the queue **that worker consumes**. The API independently samples the generation
+queue during readiness checks, so a completely absent generation consumer is
+still visible in API-process metrics:
 
 | Metric | Meaning |
 |---|---|

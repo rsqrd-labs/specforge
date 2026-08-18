@@ -45,6 +45,14 @@ class EvalResult(Base):
         default=0,
         server_default=text("0"),
     )
+    # Which judge produced this score (issue #152). Scores from different judge
+    # models are NOT comparable, and the judge moves with LLM_PROVIDER_PRIORITY
+    # — so without this an ``overall_score`` trend line silently splices two
+    # graders at whatever commit the provider flipped. Nullable with no backfill:
+    # rows predating this column were all scored by the Anthropic judge, and
+    # writing that in retroactively would assert a fact the row never recorded.
+    judge_provider: Mapped[str | None] = mapped_column(Text)
+    judge_model: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=False,

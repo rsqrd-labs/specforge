@@ -29,6 +29,7 @@ import pytest
 
 from config import settings
 from services.evals import online_eval as oe
+from services.llm.model_catalog import REQUIRED_PROVIDERS
 from services.pipeline import artifact_validator as av
 from services.pipeline import stage_manager as sm
 
@@ -925,7 +926,9 @@ def test_the_two_harness_chunks_fit_the_run_budget_together():
     chunk's target could authorise ~207s and leave the chunk carrying every
     runnable test file ~63s. The targets are now sized to add up.
     """
-    chars_per_second = 145  # measured: ~38 tok/s at effort=medium, ~3.5 chars/tok
+    # The named constant, not a literal: one set of targets is sent to every
+    # provider, so the binding rate is the slowest MEASURED route.
+    chars_per_second = sm.binding_chars_per_second()
     provider_seconds = (
         settings.stage_generation_deadline_seconds
         - settings.stage_generation_finalise_reserve_seconds
@@ -967,7 +970,9 @@ def test_the_spec_and_task_waves_fit_the_run_budget_together():
     its single whole_document chunks its own wave, so there is only ever one
     wave and no cross-wave sum to overflow.
     """
-    chars_per_second = 145  # measured: ~38 tok/s at effort=medium, ~3.5 chars/tok
+    # The named constant, not a literal: one set of targets is sent to every
+    # provider, so the binding rate is the slowest MEASURED route.
+    chars_per_second = sm.binding_chars_per_second()
     provider_seconds = (
         settings.stage_generation_deadline_seconds
         - settings.stage_generation_finalise_reserve_seconds
@@ -1085,3 +1090,32 @@ def test_standard_mode_chunks_always_keep_the_cache_write():
             assert (
                 sm._should_cache_system_prompt("standard", chunk, "anthropic") is True
             )
+
+
+def test_unmeasured_generation_providers_are_declared() -> None:
+    """Chunk length targets are wall-clock budgets denominated in characters,
+    converted by `_MEASURED_CHARS_PER_SECOND`. The two budget-arithmetic tests
+    above stay green no matter which model actually runs, because they are
+    arithmetic over the advertised targets — so a provider swap can invalidate
+    the rate underneath them silently. That is exactly what happened when the
+    openrouter ladder was added against a constant measured on Opus 5.
+
+    This does not force a measurement (the shipped targets are conservative for
+    the one provider that has one). It forces the DEBT to be declared: adding a
+    provider without either timing a real chunk or listing it here fails.
+    """
+    known_unmeasured = {"openai", "google", "openrouter"}
+
+    table = sm._MEASURED_CHARS_PER_SECOND
+    assert set(table) == set(
+        REQUIRED_PROVIDERS
+    ), "every routable provider needs an entry — None is a valid, tracked value"
+    unmeasured = {provider for provider, rate in table.items() if rate is None}
+    assert unmeasured == known_unmeasured, (
+        f"unmeasured providers changed: {unmeasured} != {known_unmeasured}. If a "
+        "measurement was added, drop it from known_unmeasured and re-derive the "
+        "_chunk_length_target numbers and the harness two-chunk split TOGETHER — "
+        "they are one arithmetic."
+    )
+    # The binding rate is the slowest measured one, never an unmeasured guess.
+    assert sm.binding_chars_per_second() == min(rate for rate in table.values() if rate)

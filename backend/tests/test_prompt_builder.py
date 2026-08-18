@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 from prometheus_client import REGISTRY
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from models import Stage, Workspace
 from prompts import harness, plan, spec, tasks
@@ -173,6 +174,56 @@ async def test_build_prompt_plan_contains_spec_content() -> None:
     assert '<untrusted_content source="spec_content" nonce="' in user_prompt
     assert "BEGIN_UNTRUSTED_CONTENT:spec_content" in user_prompt
     assert "END_UNTRUSTED_CONTENT:spec_content" in user_prompt
+
+
+@pytest.mark.asyncio
+async def test_build_prompt_prefers_authoritative_stage_over_stale_cache() -> None:
+    workspace = _make_workspace()
+    spec_stage = Stage(
+        id=uuid4(),
+        workspace_id=workspace.id,
+        type="spec",
+        status="finalised",
+        content="AUTHORITATIVE SPEC v2",
+        current_version=2,
+        review_gate_acknowledged=False,
+    )
+    workspace.stages = [spec_stage]
+    redis = _FakeRedis()
+    redis._store[f"stage:{workspace.id}:spec"] = "STALE SPEC v1"
+
+    _, user_prompt, _ = await build_prompt("plan", workspace, _FakeDB(), redis)
+
+    assert "AUTHORITATIVE SPEC v2" in user_prompt
+    assert "STALE SPEC v1" not in user_prompt
+
+
+@pytest.mark.asyncio
+async def test_dependency_cache_outage_falls_back_to_database() -> None:
+    workspace = _make_workspace()
+    spec_stage = Stage(
+        id=uuid4(),
+        workspace_id=workspace.id,
+        type="spec",
+        status="finalised",
+        content="DATABASE SPEC",
+        current_version=3,
+        review_gate_acknowledged=False,
+    )
+
+    class _DownRedis(_FakeRedis):
+        async def get(self, _key: str) -> str | None:
+            raise RedisConnectionError("down")
+
+        async def set(self, _key: str, _value: str, ex: int = 0) -> None:
+            del ex
+            raise RedisConnectionError("down")
+
+    _, user_prompt, _ = await build_prompt(
+        "plan", workspace, _FakeDB({"spec": spec_stage}), _DownRedis()
+    )
+
+    assert "DATABASE SPEC" in user_prompt
 
 
 @pytest.mark.asyncio

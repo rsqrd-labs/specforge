@@ -117,14 +117,17 @@ PROVIDER_GATE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
         "summary.create": {"baseline_tier": "mini", "candidate_tiers": ["mini"]},
         "eval.score": {"baseline_tier": "mini", "candidate_tiers": ["mini"]},
     },
-    # Mirrors the anthropic shape: deepseek-v3.2 (small) is openrouter's cheap
-    # core-gen default and carries refine.focused/summary.create/eval.score,
-    # so a future `run_llm_route_eval.py --provider openrouter` resolves
-    # instead of dying on the base table's mini/mid baseline (issue #152).
+    # Mirrors the GOOGLE shape, not anthropic's: openrouter's ladder floor is
+    # `mid` (deepseek-v4-flash), and it has no active `small` entry at all —
+    # every tier must be a pinnable DeepSeek V4 slug for prompt caching to work
+    # (model_catalog.CORE_GENERATION_TIER_LADDER). Pointing these at `small`
+    # would resolve nothing and `run_llm_route_eval.py --provider openrouter`
+    # — the dry run docs/evals/ROUTE_PROMOTION.md gates on — would die on an
+    # unroutable baseline (issue #152).
     "openrouter": {
-        "refine.focused": {"baseline_tier": "small", "candidate_tiers": ["small"]},
-        "summary.create": {"baseline_tier": "small", "candidate_tiers": ["small"]},
-        "eval.score": {"baseline_tier": "small", "candidate_tiers": ["small"]},
+        "refine.focused": {"baseline_tier": "mid", "candidate_tiers": ["mid"]},
+        "summary.create": {"baseline_tier": "mid", "candidate_tiers": ["mid"]},
+        "eval.score": {"baseline_tier": "mid", "candidate_tiers": ["mid"]},
     },
 }
 

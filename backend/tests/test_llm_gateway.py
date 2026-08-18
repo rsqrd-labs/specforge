@@ -13,6 +13,18 @@ from services.llm.base import BaseLLMAdapter, ProviderError
 from services.llm.gateway import clear_llm_cache, get_llm
 
 
+@pytest.fixture(autouse=True)
+def isolate_gateway_state():
+    """Provider failures from unrelated suites must not leak into gateway tests."""
+    from services.llm import provider_status
+
+    provider_status._FAILURES.clear()
+    clear_llm_cache()
+    yield
+    clear_llm_cache()
+    provider_status._FAILURES.clear()
+
+
 def test_get_llm_unknown_provider_raises() -> None:
     with pytest.raises(ValueError, match="Unknown LLM provider"):
         get_llm("unknown", "model")
@@ -60,7 +72,11 @@ def test_get_llm_cache_is_operation_policy_aware() -> None:
     second = get_llm("openai", "gpt-5.4-mini", operation="refine.section")
     third = get_llm("openai", "gpt-5.4-mini", operation="plan.generate")
 
-    assert first is third
+    # Cached entries are immutable adapter templates. Each request receives a
+    # shallow call-local fork so mutable completion metadata cannot race across
+    # parallel chunks, while the expensive SDK connection pool is still shared.
+    assert first is not third
+    assert first._client is third._client
     assert first is not second
     assert len(gateway._INSTANCES) == 2
     clear_llm_cache()

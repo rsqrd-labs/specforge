@@ -8,10 +8,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Mapping
+
+from redis.exceptions import RedisError
 
 DEFAULT_GENERATION_CACHE_TTL_SECONDS = 60 * 60 * 24
 GENERATION_CACHE_PREFIX = "llmcache:v1:"
+logger = logging.getLogger(__name__)
 
 
 def build_generation_cache_key(
@@ -45,11 +49,23 @@ def build_generation_cache_key(
 
 
 async def get_cached_generation(redis, key: str) -> str | None:
-    value = await redis.get(key)
+    try:
+        value = await redis.get(key)
+    except RedisError:
+        # Generation output caching is an optimisation, never a correctness or
+        # availability dependency. A cache outage must proceed to the provider.
+        logger.warning("generation_cache_read_failed", exc_info=True)
+        return None
     if value is None:
         return None
     if isinstance(value, bytes):
-        return value.decode("utf-8")
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            # Treat a corrupt optional entry as a miss. The regenerated result
+            # will overwrite it after validation.
+            logger.warning("generation_cache_decode_failed", exc_info=True)
+            return None
     return str(value)
 
 
@@ -59,4 +75,10 @@ async def set_cached_generation(
     output: str,
     ttl_seconds: int = DEFAULT_GENERATION_CACHE_TTL_SECONDS,
 ) -> None:
-    await redis.set(key, output, ex=ttl_seconds)
+    try:
+        await redis.set(key, output, ex=ttl_seconds)
+    except RedisError:
+        # The artifact has already passed validation/persistence when this is
+        # called. Failing the paid run because the optional mirror is down would
+        # convert success into an unnecessary refund.
+        logger.warning("generation_cache_write_failed", exc_info=True)

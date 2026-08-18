@@ -18,6 +18,8 @@ from urllib.parse import quote, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 TIMEOUT_SECONDS = 20
+LLM_STREAM_TIMEOUT_SECONDS = 12 * 60
+QUALITY_GATE_TIMEOUT_SECONDS = 2 * 60
 PROBLEM_STATEMENT = (
     "Build a production smoke test workspace that validates authentication, "
     "credits, persistence, and stage wiring without touching customer data."
@@ -38,11 +40,15 @@ def validate_api_url(url: str) -> str:
     if parsed.username or parsed.password:
         raise SmokeFailure("THOUGHT2BUILD_API_URL must not contain userinfo")
     if not parsed.hostname or parsed.query or parsed.fragment:
-        raise SmokeFailure("THOUGHT2BUILD_API_URL must be an origin without query/fragment")
+        raise SmokeFailure(
+            "THOUGHT2BUILD_API_URL must be an origin without query/fragment"
+        )
     if parsed.scheme != "https" and not (
         parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
     ):
-        raise SmokeFailure("THOUGHT2BUILD_API_URL must use HTTPS (except loopback testing)")
+        raise SmokeFailure(
+            "THOUGHT2BUILD_API_URL must use HTTPS (except loopback testing)"
+        )
     return url.rstrip("/")
 
 
@@ -168,15 +174,19 @@ class SmokeClient:
         started = time.monotonic()
         saw_token = False
         try:
-            with _URL_OPENER.open(request, timeout=120) as response:
+            with _URL_OPENER.open(
+                request, timeout=LLM_STREAM_TIMEOUT_SECONDS
+            ) as response:
                 if response.status != 200:
                     raise SmokeFailure(
                         f"POST /stages/{stage_id}/generate returned "
                         f"HTTP {response.status}"
                     )
                 for raw_line in response:
-                    if time.monotonic() - started > 120:
-                        raise SmokeFailure("LLM stream exceeded 120 seconds")
+                    if time.monotonic() - started > LLM_STREAM_TIMEOUT_SECONDS:
+                        raise SmokeFailure(
+                            "LLM stream exceeded the 12-minute settlement bound"
+                        )
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line.startswith("data:"):
                         continue
@@ -198,6 +208,22 @@ class SmokeClient:
             raise SmokeFailure(f"LLM stream failed to connect: {exc}") from exc
 
         raise SmokeFailure("LLM stream ended before done event")
+
+    def wait_until_finalisable(self, stage_id: str) -> dict[str, Any]:
+        """Wait for detached technology/quality checks to leave ``checking``."""
+
+        deadline = time.monotonic() + QUALITY_GATE_TIMEOUT_SECONDS
+        while True:
+            _, stage, _ = self.request("GET", f"/stages/{stage_id}")
+            gate = stage.get("quality_gate")
+            gate_status = gate.get("status") if isinstance(gate, dict) else None
+            if gate_status != "checking":
+                return stage
+            if time.monotonic() >= deadline:
+                raise SmokeFailure(
+                    "SPEC quality verification did not settle within two minutes"
+                )
+            time.sleep(2)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -337,36 +363,88 @@ def run() -> None:
     )
     workspace_id = workspace.get("id")
     stages = workspace.get("stages")
-    if not workspace_id or not isinstance(stages, list) or len(stages) != 4:
+    if not workspace_id:
         raise SmokeFailure(f"Workspace response missing id or stages: {workspace}")
 
-    _, fetched, _ = client.request("GET", f"/workspaces/{workspace_id}")
-    if fetched.get("id") != workspace_id:
-        raise SmokeFailure("Created workspace could not be fetched by id")
+    try:
+        if not isinstance(stages, list) or len(stages) != 4:
+            raise SmokeFailure(f"Workspace response missing id or stages: {workspace}")
+        _, fetched, _ = client.request("GET", f"/workspaces/{workspace_id}")
+        if fetched.get("id") != workspace_id:
+            raise SmokeFailure("Created workspace could not be fetched by id")
 
-    _, updated, _ = client.request(
-        "PATCH",
-        f"/workspaces/{workspace_id}",
-        body={"name": f"{workspace_name}-verified"},
-        use_csrf=True,
-    )
-    if updated.get("name") != f"{workspace_name}-verified":
-        raise SmokeFailure("Workspace update did not persist")
+        _, updated, _ = client.request(
+            "PATCH",
+            f"/workspaces/{workspace_id}",
+            body={"name": f"{workspace_name}-verified"},
+            use_csrf=True,
+        )
+        if updated.get("name") != f"{workspace_name}-verified":
+            raise SmokeFailure("Workspace update did not persist")
 
-    if config.run_llm_smoke:
-        check("live LLM stream")
-        spec_stage = next((s for s in stages if s.get("type") == "spec"), None)
-        if spec_stage is None:
-            raise SmokeFailure("Created workspace has no spec stage")
-        client.stream_stage(spec_stage["id"])
+        if config.run_llm_smoke:
+            check("live SPEC generation")
+            spec_stage = next((s for s in stages if s.get("type") == "spec"), None)
+            plan_stage = next((s for s in stages if s.get("type") == "plan"), None)
+            if spec_stage is None or plan_stage is None:
+                raise SmokeFailure("Created workspace is missing SPEC or PLAN")
+            client.stream_stage(spec_stage["id"])
+            generated_spec = client.wait_until_finalisable(spec_stage["id"])
+            if generated_spec.get("status") != "draft" or not generated_spec.get(
+                "content"
+            ):
+                raise SmokeFailure(
+                    "SPEC generation did not persist a draft "
+                    f"(status={generated_spec.get('status')!r}, "
+                    f"content_present={bool(generated_spec.get('content'))})"
+                )
 
-    check("workspace archive")
-    client.request(
-        "DELETE",
-        f"/workspaces/{workspace_id}",
-        use_csrf=True,
-        expected={204},
-    )
+            check("finalise generated SPEC")
+            _, finalised_spec, _ = client.request(
+                "POST",
+                f"/stages/{spec_stage['id']}/finalise",
+                use_csrf=True,
+            )
+            if finalised_spec.get("status") != "finalised":
+                raise SmokeFailure(
+                    "SPEC did not finalise "
+                    f"(status={finalised_spec.get('status')!r})"
+                )
+
+            # This is the revenue-critical path the old smoke missed: dependency
+            # loading after charge, the dedicated generation worker, PLAN's
+            # four-chunk wave/checkpoints, validation, persistence and SSE observer.
+            check("live PLAN generation")
+            client.stream_stage(plan_stage["id"])
+            _, generated_plan, _ = client.request("GET", f"/stages/{plan_stage['id']}")
+            if generated_plan.get("status") != "draft" or not generated_plan.get(
+                "content"
+            ):
+                raise SmokeFailure(
+                    "PLAN generation did not persist a draft "
+                    f"(status={generated_plan.get('status')!r}, "
+                    f"content_present={bool(generated_plan.get('content'))})"
+                )
+    finally:
+        # Smoke resources must never accumulate after a mid-pipeline failure.
+        # Preserve the primary failure when best-effort cleanup also fails; on a
+        # successful run, cleanup failure is itself a smoke failure.
+        active_failure = sys.exc_info()[0] is not None
+        try:
+            check("workspace archive")
+            client.request(
+                "DELETE",
+                f"/workspaces/{workspace_id}",
+                use_csrf=True,
+                expected={204},
+            )
+        except Exception as cleanup_error:
+            if not active_failure:
+                raise
+            print(
+                f"[smoke]   cleanup warning: {cleanup_error}",
+                file=sys.stderr,
+            )
 
     print("[smoke] production smoke passed")
 

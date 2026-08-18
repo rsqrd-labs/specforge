@@ -196,7 +196,7 @@ describe("StreamingOverlay generation activity", () => {
 
     expect(screen.getByRole("status")).toHaveTextContent(/stopping server-side work/i)
     expect(document.querySelector(".generation-deadline")).toHaveTextContent(
-      /five-minute limit/i,
+      /processing limit/i,
     )
     expect(screen.getByRole("button", { name: "Stopping…" })).toBeDisabled()
   })

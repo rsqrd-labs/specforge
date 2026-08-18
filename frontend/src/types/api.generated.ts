@@ -670,6 +670,12 @@ export interface paths {
          *     *permission* are different things — an Anthropic key can authenticate
          *     against the Haiku judge model and still be denied ``claude-opus-5``, which
          *     is the model this deployment's full-artifact generation depends on.
+         *
+         *     On **openrouter** the probe also proves the upstream-host pin resolves: the
+         *     adapter sends the catalog's ``provider.only`` allowlist on every call, so an
+         *     empty pinned pool (``data_collection: "deny"`` filtering out every allowed
+         *     host) fails here with a 503 rather than on a paying user's first generation.
+         *     Probe this before flipping ``LLM_PROVIDER_PRIORITY`` — see RUNBOOK §8.5.
          */
         get: operations["get_provider_health_providers_health_get"];
         put?: never;

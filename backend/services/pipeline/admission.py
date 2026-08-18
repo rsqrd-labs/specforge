@@ -17,8 +17,8 @@ Budgets, in acquire order (cheapest/most-local first):
    holds across processes/instances and recovers if a process dies.
 3. **Per-provider budget** (F2) — a global Redis concurrency lease + RPM sliding
    window against the shared key, so the system sheds on *our* budget before the
-   provider returns a 429. Ships at 0 (unlimited): the real per-org limits must be
-   measured first (audit §F2/§6).
+   provider returns a 429. Concurrency ships conservatively bounded; RPM remains
+   unlimited until the real per-org limit is measured (audit §F2/§6).
 
 The lease tracks exactly which budgets it took so a rejection at a later budget
 unwinds the earlier acquisitions (no slot leak), and ``release()`` is idempotent
@@ -83,6 +83,11 @@ local member = ARGV[3]
 local deadline = tonumber(ARGV[4])
 local ttl = tonumber(ARGV[5])
 redis.call('ZREMRANGEBYSCORE', key, '-inf', now)
+if redis.call('ZSCORE', key, member) then
+  redis.call('ZADD', key, deadline, member)
+  redis.call('EXPIRE', key, ttl)
+  return 1
+end
 local count = redis.call('ZCARD', key)
 if limit > 0 and count >= limit then
   return 0
@@ -172,6 +177,29 @@ class GenerationAdmission:
         self.took_provider = False
         self._released = False
 
+    def handoff_payload(self) -> dict[str, str | bool]:
+        """Return the bounded Redis-lease identity stored on a durable job."""
+        if self._released:
+            raise RuntimeError("cannot hand off a released generation admission")
+        return {
+            "member": self._member,
+            "user_id": self._user_id,
+            "provider": self._provider,
+            "took_user": self.took_user,
+            "took_provider": self.took_provider,
+        }
+
+    def complete_handoff(self) -> None:
+        """Transfer Redis leases to the queued job and release API-local state."""
+        if self._released:
+            return
+        if self.took_process:
+            _process_limiter.release()
+            self.took_process = False
+        # The worker reconstructs ownership from handoff_payload(). The API must
+        # no longer ZREM those shared leases in its surrounding finally block.
+        self._released = True
+
     async def release(self) -> None:
         if self._released:
             return
@@ -206,6 +234,7 @@ async def admit_generation(
     *,
     user_id: str,
     provider: str,
+    count_provider_rpm: bool = True,
 ) -> GenerationAdmission:
     """Acquire a generation slot across all configured budgets, or reject (F1/F2).
 
@@ -213,7 +242,9 @@ async def admit_generation(
     full, unwinding budgets already taken so no slot leaks. Redis budgets fail
     **open** on a Redis outage; the per-process limiter still applies. The caller
     owns the returned admission and must ``release()`` it exactly once when the
-    generation terminates.
+    generation terminates. A durable worker re-admits the already-counted API
+    request with ``count_provider_rpm=False`` so one generation consumes one RPM
+    slot, not one slot at enqueue and a second when its job starts.
     """
     # The per-process and per-user/provider leases use a shared member id so a
     # single ZREM per key cleans up on release.
@@ -256,7 +287,7 @@ async def admit_generation(
             admission.took_provider = True
 
         provider_rpm = settings.provider_max_generations_per_minute
-        if provider_rpm > 0:
+        if count_provider_rpm and provider_rpm > 0:
             allowed = await sliding_window_check(
                 redis, _provider_rpm_key(provider), provider_rpm, 60
             )
@@ -271,6 +302,106 @@ async def admit_generation(
     return admission
 
 
+def _admission_from_handoff(
+    redis: Redis,
+    handoff: dict,
+    *,
+    user_id: str,
+    provider: str,
+) -> GenerationAdmission:
+    """Validate and reconstruct a durable admission without taking new slots."""
+    if not isinstance(handoff, dict):
+        raise ValueError("generation admission handoff is missing")
+    member = handoff.get("member")
+    if not isinstance(member, str) or len(member) != 32:
+        raise ValueError("generation admission handoff member is invalid")
+    try:
+        if uuid.UUID(hex=member).hex != member:
+            raise ValueError
+    except ValueError as exc:
+        raise ValueError("generation admission handoff member is invalid") from exc
+    if handoff.get("user_id") != user_id or handoff.get("provider") != provider:
+        raise ValueError("generation admission handoff scope does not match run")
+    took_user = handoff.get("took_user")
+    took_provider = handoff.get("took_provider")
+    if not isinstance(took_user, bool) or not isinstance(took_provider, bool):
+        raise ValueError("generation admission handoff flags are invalid")
+    admission = GenerationAdmission(
+        redis,
+        user_id=user_id,
+        provider=provider,
+        member=member,
+    )
+    admission.took_user = took_user
+    admission.took_provider = took_provider
+    return admission
+
+
+async def resume_generation_admission(
+    redis: Redis,
+    *,
+    handoff: dict,
+    user_id: str,
+    provider: str,
+) -> GenerationAdmission:
+    """Reacquire worker-local capacity and refresh transferred Redis leases."""
+    admission = _admission_from_handoff(
+        redis,
+        handoff,
+        user_id=user_id,
+        provider=provider,
+    )
+    if not _process_limiter.try_acquire(
+        settings.max_concurrent_generations_per_process
+    ):
+        # Preserve the transferred Redis reservation while arq waits to retry.
+        raise _reject(REASON_PROCESS)
+    admission.took_process = True
+
+    try:
+        user_limit = settings.max_concurrent_generations_per_user
+        if admission.took_user and user_limit > 0:
+            if not await _acquire_lease_with_member(
+                redis,
+                _user_inflight_key(user_id),
+                user_limit,
+                admission._member,
+            ):
+                await admission.release()
+                raise _reject(REASON_USER)
+
+        provider_limit = settings.provider_max_inflight_generations
+        if admission.took_provider and provider_limit > 0:
+            if not await _acquire_lease_with_member(
+                redis,
+                _provider_inflight_key(provider),
+                provider_limit,
+                admission._member,
+            ):
+                await admission.release()
+                raise _reject(REASON_PROVIDER_INFLIGHT)
+    except RedisError:
+        logger.warning("admission.resume_redis_unavailable_fail_open", exc_info=True)
+    return admission
+
+
+async def release_generation_admission_handoff(
+    redis: Redis,
+    *,
+    handoff: dict,
+    user_id: str,
+    provider: str,
+) -> None:
+    """Best-effort cleanup when a queued job is already terminal on delivery."""
+    admission = _admission_from_handoff(
+        redis,
+        handoff,
+        user_id=user_id,
+        provider=provider,
+    )
+    await admission.release()
+
+
 async def _acquire_lease_with_member(
     redis: Redis, key: str, limit: int, member: str
 ) -> bool:
@@ -280,7 +411,14 @@ async def _acquire_lease_with_member(
     ``ZREM key member`` on release cleans every key the admission added.
     """
     now_ms = int(time.time() * 1000)
-    ttl_seconds = max(1, settings.generation_admission_lease_ttl_seconds)
+    # Never let a live durable run outlast its admission reservation. The
+    # configured TTL remains an operator floor; deadline + two minutes bounds
+    # stale capacity after an API/worker outage while covering terminal cleanup.
+    ttl_seconds = max(
+        1,
+        settings.generation_admission_lease_ttl_seconds,
+        settings.stage_generation_deadline_seconds + 120,
+    )
     deadline_ms = now_ms + ttl_seconds * 1000
     result = await redis.eval(
         _LEASE_ACQUIRE_LUA,

@@ -9,7 +9,7 @@ on:
         default: staging
         type: environment
       run_llm_smoke:
-        description: "Exercise live LLM streaming"
+        description: "Exercise live SPEC -> finalise -> PLAN generation"
         required: true
         default: false
         type: boolean
@@ -17,7 +17,7 @@ on:
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     environment: ${{ inputs.environment }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

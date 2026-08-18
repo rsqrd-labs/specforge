@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 
 from services.llm.prompt_cache import PromptCachePolicy
 
@@ -46,9 +48,40 @@ class BatchUnsupportedError(NotImplementedError):
 
 
 class ProviderError(Exception):
-    def __init__(self, provider: str, original: Exception) -> None:
+    """Provider-neutral error with stable retry/observability metadata."""
+
+    def __init__(
+        self,
+        provider: str,
+        original: Exception,
+        *,
+        status_code: int | None = None,
+        error_type: str | None = None,
+        provider_code: str | None = None,
+        retryable: bool = True,
+        failover_allowed: bool | None = None,
+        retry_after: float | None = None,
+    ) -> None:
         self.provider = provider
         self.original = original
+        self.status_code = (
+            status_code
+            if status_code is not None
+            else classify_provider_status(original)
+        )
+        self.error_type = error_type or type(original).__name__
+        self.provider_code = provider_code
+        self.retryable = retryable
+        self.failover_allowed = (
+            retryable if failover_allowed is None else failover_allowed
+        )
+        self.retry_after = retry_after
+        self.error_code = _provider_error_code(
+            provider,
+            self.status_code,
+            self.error_type,
+            retryable=retryable,
+        )
         super().__init__(f"{provider} error: {original}")
 
 
@@ -58,6 +91,8 @@ class ProviderTimeoutError(ProviderError):
         super().__init__(
             provider,
             TimeoutError(f"generation exceeded {timeout_seconds:g} seconds"),
+            error_type="timeout",
+            retryable=True,
         )
 
 
@@ -67,8 +102,9 @@ class ProviderRateLimitError(ProviderError):
     A distinct subclass of ``ProviderError`` (scalability audit F2): a rate-limit
     is a *throughput* failure, not a *quality* or *availability* failure, so the
     generation pipeline must treat it differently — retry in place on the SAME
-    tier honoring ``retry_after``/backoff, and NEVER escalate to a bigger model
-    (escalation amplifies load against an already-throttled org, audit §F2.3).
+    tier honoring ``retry_after``/backoff, and NEVER escalate within the same
+    throttled provider. After bounded local retries are exhausted, a different
+    configured provider is still a safe recovery route.
     Because it subclasses ``ProviderError``, every existing ``except
     ProviderError`` still catches it, so the only behaviour change is at the call
     sites that opt into the distinct handling.
@@ -83,9 +119,66 @@ class ProviderRateLimitError(ProviderError):
         original: Exception,
         *,
         retry_after: float | None = None,
+        status_code: int | None = None,
+        error_type: str | None = None,
+        provider_code: str | None = None,
+        failover_allowed: bool = True,
     ) -> None:
-        self.retry_after = retry_after
-        super().__init__(provider, original)
+        super().__init__(
+            provider,
+            original,
+            status_code=status_code,
+            error_type=error_type or "rate_limit",
+            provider_code=provider_code,
+            retryable=True,
+            failover_allowed=failover_allowed,
+            retry_after=retry_after,
+        )
+
+
+class ProviderUnavailableError(ProviderError):
+    """Transient model/upstream unavailability (for example OpenRouter 502)."""
+
+
+class ProviderTerminalError(ProviderError):
+    """A request/configuration failure that retrying unchanged cannot repair."""
+
+    def __init__(
+        self,
+        provider: str,
+        original: Exception,
+        *,
+        status_code: int | None = None,
+        error_type: str | None = None,
+        provider_code: str | None = None,
+        failover_allowed: bool = False,
+    ) -> None:
+        super().__init__(
+            provider,
+            original,
+            status_code=status_code,
+            error_type=error_type,
+            provider_code=provider_code,
+            retryable=False,
+            failover_allowed=failover_allowed,
+        )
+
+
+def _provider_error_code(
+    provider: str,
+    status_code: int | None,
+    error_type: str | None,
+    *,
+    retryable: bool,
+) -> str:
+    """Bounded terminal code suitable for DB rows, metrics, and SSE."""
+
+    raw = (error_type or "error").strip().lower()
+    safe = "".join(character if character.isalnum() else "_" for character in raw)
+    safe = "_".join(part for part in safe.split("_") if part)[:64] or "error"
+    status = f"_{status_code}" if status_code is not None else ""
+    disposition = "transient" if retryable else "terminal"
+    return f"{provider}_{disposition}{status}_{safe}"
 
 
 # HTTP status codes that mean "you are being throttled / the provider is
@@ -117,13 +210,16 @@ def extract_retry_after(exc: Exception) -> float | None:
     """Best-effort ``Retry-After`` (seconds) from a provider SDK exception.
 
     Provider SDK errors carry the originating ``httpx.Response`` on ``.response``;
-    the ``Retry-After`` header is either a delta-seconds integer or an HTTP date.
-    Only the numeric form is honored (the common provider case); a non-numeric or
-    absent header returns ``None`` and the caller falls back to backoff. Never
-    raises — header parsing is purely advisory.
+    the ``Retry-After`` header is either delta-seconds or an HTTP date. Both forms
+    are honored; malformed/absent values return ``None`` and the caller falls
+    back to bounded exponential backoff. Never raises — parsing is advisory.
     """
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", None)
+    # Some OpenAI-compatible gateways expose response headers directly on the
+    # exception rather than retaining the underlying HTTP response.
+    if headers is None:
+        headers = getattr(exc, "headers", None)
     if headers is None:
         return None
     try:
@@ -135,7 +231,13 @@ def extract_retry_after(exc: Exception) -> float | None:
     try:
         seconds = float(str(raw).strip())
     except (TypeError, ValueError):
-        return None
+        try:
+            retry_at = parsedate_to_datetime(str(raw).strip())
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=UTC)
+            seconds = (retry_at - datetime.now(UTC)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return None
     return seconds if seconds >= 0 else None
 
 

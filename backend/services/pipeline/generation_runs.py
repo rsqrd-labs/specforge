@@ -310,6 +310,26 @@ async def load_checkpoint_content(db: AsyncSession, run_id: UUID) -> str:
     return "\n\n".join(chunk.content for chunk in chunks if chunk.content.strip())
 
 
+async def load_checkpoint_map(db: AsyncSession, run_id: UUID) -> dict[str, str]:
+    """Return completed chunks keyed for same-run crash/retry continuation."""
+    chunks = (
+        (
+            await db.execute(
+                select(StageGenerationChunk)
+                .where(StageGenerationChunk.generation_run_id == run_id)
+                .order_by(StageGenerationChunk.ordinal)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        chunk.chunk_key: chunk.content
+        for chunk in chunks
+        if chunk.content and chunk.content.strip()
+    }
+
+
 async def load_resume_seed(
     db: AsyncSession, *, stage: Stage
 ) -> tuple[UUID, dict[str, str], list[str]] | None:

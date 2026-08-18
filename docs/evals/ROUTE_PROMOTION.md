@@ -119,14 +119,35 @@ key. That env flip is a **separate, gated promotion** — the four items below,
 not just the golden-corpus run every other route change requires — because it
 moves more than generation.
 
+0. **Privacy-compatible pool preflight — do this first; it can invalidate everything
+   below.** `GET /providers/health?model=deepseek/deepseek-v4-pro` (admin) makes
+   a real 1-token call carrying the catalog's upstream-host preference and
+   privacy policy. If `data_collection: "deny"` filters out every host, the pool is
+   empty, OpenRouter answers a permanent **503 "no available model provider
+   meets your routing requirements"**, and every generation fails identically.
+   The response's `probe_error` field distinguishes that from a bad key. There
+   is no way to determine this from code — DeepSeek's data policy is not exposed
+   on the public API. Do not weaken the data-retention policy to make the probe
+   pass; keep a direct provider next in `LLM_PROVIDER_PRIORITY` instead.
+
 1. **Live golden-corpus run.** Same procedure as the rest of this document:
    run the expanded golden corpus through real openrouter calls
-   (`deepseek/deepseek-v3.2` small, `z-ai/glm-5.2` mid, `qwen/qwen3.8-max`
-   strong) from an operator-approved branch and attach the saved report.
+   (`deepseek/deepseek-v4-flash` mid, `deepseek/deepseek-v4-pro` strong) from an
+   operator-approved branch and attach the saved report.
+
+   **Also capture throughput.** Every chunk length target is a wall-clock budget
+   converted at `stage_manager._MEASURED_CHARS_PER_SECOND`, where openrouter is
+   `None` (unmeasured) and the shipped numbers come from Opus 5 at
+   `effort=medium`. Read `latency_ms` and output length back from
+   `llm_cost_events` for one spec and one harness generation, derive chars/s,
+   and record it. If it diverges materially, re-derive `_chunk_length_target`'s
+   numbers **and** the harness two-chunk split together — they are one
+   arithmetic, and `test_the_two_harness_chunks_fit_the_run_budget_together` is
+   arithmetic over the advertised targets, so it stays green either way.
 
 2. **Judge-agreement check — required before step 1's quality numbers can be
    trusted, not after.** `provider_config.JUDGE_MODELS["openrouter"]` resolves
-   to `deepseek/deepseek-v3.2`. Because `call_judge_model`'s routing is
+   to `deepseek/deepseek-v4-flash`. Because `call_judge_model`'s routing is
    `judge_provider = provider if provider in JUDGE_MODELS else
    _DEFAULT_JUDGE_PROVIDER` (`gateway.py`), the flip moves the **critic**
    (`services/pipeline/critic.py`), the **eval judge** itself, the **Rung-2
@@ -136,7 +157,7 @@ moves more than generation.
    that did not change. Score ≥30 stored artifacts spanning all four stages
    and both modes (standard + Demo Day) under both
    `JUDGE_MODELS["anthropic"]` (Haiku 4.5) and `JUDGE_MODELS["openrouter"]`
-   (deepseek-v3.2) before the golden-corpus run's quality numbers are
+   (deepseek-v4-flash) before the golden-corpus run's quality numbers are
    accepted. **Accept only if** mean `|Δ overall_score|` ≤ 0.03 and no scored
    artifact crosses a `QualityBadge` colour boundary. These numbers are a
    starting proposal, fixed **before** the run — not chosen after looking at
@@ -145,24 +166,38 @@ moves more than generation.
 3. **Privacy Policy update, merged first.**
    `frontend/src/pages/LegalPrivacy.tsx` currently names only Anthropic,
    OpenAI, and Google as AI model providers. The day-one openrouter ladder
-   routes through DeepSeek/Z.ai/Alibaba upstreams via the OpenRouter proxy —
-   undisclosed sub-processors today. Update the policy (and its
+   routes through **DeepSeek** via the OpenRouter proxy — an undisclosed
+   sub-processor today, headquartered in **CN** with no datacenter list
+   published on OpenRouter's provider API. Update the policy (and its
    `LegalPrivacy.test.tsx` coverage) to name openrouter and its upstream
    models before the env flip ships to production — shipping the adapter
    inert changes nothing here; the flip is what starts transmitting user
    content to them.
 
-4. **Pinned upstream route (already shipped in code, verify it stays that
-   way).** `services/llm/openrouter_adapter.py` sends
-   `provider: {"data_collection": "deny", "allow_fallbacks": false}` on every
-   request. Without this, OpenRouter can silently answer a model slug from a
-   different upstream host on every call — different quantisation, latency,
-   real output ceiling, and data-retention policy — which would make the
-   golden-corpus run ungraded evidence for "the model that answers next
-   time." Record the resolved upstream (`last_completion.raw[
-   "resolved_upstream_provider"]`, carried through to
+4. **Preferred upstream route with same-model fallback — verify both.**
+   `services/llm/openrouter_adapter.py` sends
+   `provider: {"order": [...], "allow_fallbacks": true, "data_collection":
+   "deny"}`, where `order` comes from the catalog entry's `upstream_providers`.
+
+   `order` keeps DeepSeek's cache-capable/costed endpoint first in the normal
+   case; `allow_fallbacks: true` lets OpenRouter use another endpoint for the
+   same model when that host is unavailable. On `deepseek-v4-flash` just 1 of
+   19 upstream hosts supports prefix caching, hosts disagree on real output
+   ceiling by up to 32x, and catalog rates describe the preferred host rather
+   than the alias, so resolved-upstream usage metadata is authoritative when a
+   fallback occurs.
+
+   Verify with `uv run python ../scripts/check_openrouter_catalog_drift.py`
+   (exit 0), and record the resolved upstream
+   (`last_completion.raw["resolved_upstream_provider"]`, carried through to
    `llm_cost_events.provider_usage_raw`) in the promotion report so a future
    reviewer can confirm which host actually served the corpus.
+
+5. **Judge provenance is recorded.** `eval_results.judge_provider` /
+   `judge_model` (migration 0045) are written on both the synchronous and
+   batch-collect paths. Confirm new rows carry them before the flip — they are
+   what makes the step-2 agreement numbers joinable and stop pre/post
+   `overall_score` trends from silently splicing two graders.
 
 Two of these four are not code, which is exactly why they are called out here
 rather than assumed: a clean `pytest` run and a passing dry-run eval do not

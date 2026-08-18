@@ -15,6 +15,8 @@ Covers:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from types import SimpleNamespace
 
 import anthropic
@@ -75,6 +77,16 @@ def test_extract_retry_after(raw, expected) -> None:
 
 def test_extract_retry_after_no_response() -> None:
     assert extract_retry_after(SimpleNamespace()) is None
+
+
+def test_extract_retry_after_accepts_http_date() -> None:
+    retry_at = format_datetime(datetime.now(UTC) + timedelta(seconds=10), usegmt=True)
+    exc = SimpleNamespace(response=_resp(503, retry_after=retry_at))
+
+    delay = extract_retry_after(exc)
+
+    assert delay is not None
+    assert 8 <= delay <= 10
 
 
 # ---------------------------------------------------------------------------

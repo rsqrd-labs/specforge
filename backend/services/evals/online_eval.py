@@ -1517,6 +1517,8 @@ async def run_eval(
         content_generation_id=content_generation_id,
         generation_provider=generation_provider,
         generation_model=generation_model,
+        judge_provider=provider,
+        judge_model=resolved_judge_model,
         mode=mode,
         spec_content=spec_content,
     )
@@ -1558,6 +1560,8 @@ async def persist_eval_from_raw(
     content_generation_id: str | None = None,
     generation_provider: str | None = None,
     generation_model: str | None = None,
+    judge_provider: str | None = None,
+    judge_model: str | None = None,
     mode: str = "standard",
     spec_content: str = "",
 ) -> EvalResult | None:
@@ -1586,6 +1590,8 @@ async def persist_eval_from_raw(
         content_generation_id=content_generation_id,
         generation_provider=generation_provider,
         generation_model=generation_model,
+        judge_provider=judge_provider,
+        judge_model=judge_model,
         mode=mode,
         spec_content=spec_content,
     )
@@ -1632,6 +1638,8 @@ async def _persist_eval_data(
     content_generation_id: str | None,
     generation_provider: str | None = None,
     generation_model: str | None = None,
+    judge_provider: str | None = None,
+    judge_model: str | None = None,
     mode: str = "standard",
     spec_content: str = "",
 ) -> EvalResult:
@@ -1690,6 +1698,14 @@ async def _persist_eval_data(
     eval_result.uncovered_reqs = uncovered_reqs
     eval_result.tasks_without_ref = tasks_without_ref
     eval_result.flagged = flagged
+    # Judge provenance (issue #152): scores from different judge models are not
+    # comparable, and the judge moves with LLM_PROVIDER_PRIORITY. Only overwrite
+    # when known — the inline structural persist creates this same row with no
+    # judge call at all, so writing None here would erase a recorded judge.
+    if judge_provider is not None:
+        eval_result.judge_provider = judge_provider
+    if judge_model is not None:
+        eval_result.judge_model = judge_model
     if stage_type == "tasks" and harness_content:
         eval_result.structural_validator_version = STRUCTURAL_TASK_VALIDATOR_VERSION
     db.add(eval_result)

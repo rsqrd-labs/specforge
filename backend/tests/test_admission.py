@@ -24,6 +24,7 @@ from services.pipeline import admission as adm
 from services.pipeline.admission import (
     GenerationCapacityError,
     admit_generation,
+    resume_generation_admission,
 )
 
 
@@ -58,6 +59,9 @@ class _ZSetRedis:
             cutoff = now
             for m in [m for m, s in zset_items.items() if s <= cutoff]:
                 del zset_items[m]
+            if member in zset_items:
+                zset_items[member] = deadline
+                return 1
             if limit > 0 and len(zset_items) >= limit:
                 return 0
             zset_items[member] = deadline
@@ -247,6 +251,64 @@ async def test_provider_rpm_budget_rejects_and_unwinds(monkeypatch) -> None:
     assert adm.process_inflight() == 2  # only the two admitted hold a slot
     await a1.release()
     await a2.release()
+
+
+@pytest.mark.asyncio
+async def test_worker_readmission_does_not_double_count_provider_rpm(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "max_concurrent_generations_per_process", 100)
+    monkeypatch.setattr(settings, "max_concurrent_generations_per_user", 0)
+    monkeypatch.setattr(settings, "provider_max_inflight_generations", 0)
+    monkeypatch.setattr(settings, "provider_max_generations_per_minute", 1)
+    redis = _ZSetRedis()
+
+    api_admission = await admit_generation(redis, user_id="u1", provider="anthropic")
+    worker_admission = await admit_generation(
+        redis,
+        user_id="u1",
+        provider="anthropic",
+        count_provider_rpm=False,
+    )
+
+    rpm_key = f"ratelimit:{adm._provider_rpm_key('anthropic')}"
+    assert redis.count(rpm_key) == 1
+    await api_admission.release()
+    await worker_admission.release()
+
+
+@pytest.mark.asyncio
+async def test_durable_handoff_keeps_global_leases_until_worker_finishes(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "max_concurrent_generations_per_process", 5)
+    monkeypatch.setattr(settings, "max_concurrent_generations_per_user", 1)
+    monkeypatch.setattr(settings, "provider_max_inflight_generations", 1)
+    monkeypatch.setattr(settings, "provider_max_generations_per_minute", 0)
+    redis = _ZSetRedis()
+
+    api_admission = await admit_generation(redis, user_id="u1", provider="anthropic")
+    handoff = api_admission.handoff_payload()
+    api_admission.complete_handoff()
+
+    assert adm.process_inflight() == 0
+    assert redis.count(adm._user_inflight_key("u1")) == 1
+    assert redis.count(adm._provider_inflight_key("anthropic")) == 1
+    # The API's finally block is now a no-op; it cannot steal worker ownership.
+    await api_admission.release()
+    assert redis.count(adm._user_inflight_key("u1")) == 1
+
+    worker_admission = await resume_generation_admission(
+        redis,
+        handoff=handoff,
+        user_id="u1",
+        provider="anthropic",
+    )
+    assert adm.process_inflight() == 1
+    await worker_admission.release()
+    assert adm.process_inflight() == 0
+    assert redis.count(adm._user_inflight_key("u1")) == 0
+    assert redis.count(adm._provider_inflight_key("anthropic")) == 0
 
 
 # ---------------------------------------------------------------------------

@@ -662,7 +662,7 @@ describe("createSSEConnection progress heartbeats", () => {
     const body =
       'data: not-json\n\n' +
       'data: {"generation_started":{"generation_id":"g1","deadline":"soon","action":"regenerate","total_parts":2}}\n\n' +
-      'data: {"generation_terminal":{"generation_id":"g1","status":"timed_out","partial_saved":false,"refunded_credits":10}}\n\n'
+      'data: {"generation_terminal":{"generation_id":"g1","status":"timed_out","partial_saved":false,"refunded_credits":10,"error_code":"generation_deadline_exceeded"}}\n\n'
     vi.spyOn(globalThis, "fetch").mockImplementation(() => mockFetchOk(body))
     const onGenerationStarted = vi.fn()
     const onGenerationTerminal = vi.fn()
@@ -673,8 +673,14 @@ describe("createSSEConnection progress heartbeats", () => {
     })
     await vi.runAllTimersAsync()
     expect(onGenerationStarted).toHaveBeenCalledWith(expect.objectContaining({ generation_id: "g1" }))
-    expect(onGenerationTerminal).toHaveBeenCalledOnce()
-    expect(onError.mock.calls[0][0]).toMatchObject({ code: "generation_timed_out" })
+    expect(onGenerationTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      error_code: "generation_deadline_exceeded",
+    }))
+    expect(onError.mock.calls[0][0]).toMatchObject({
+      code: "generation_timed_out",
+      diagnosticCode: "generation_deadline_exceeded",
+      message: "Generation reached its processing time limit.",
+    })
   })
 
   it.each([
