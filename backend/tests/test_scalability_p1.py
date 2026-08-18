@@ -380,6 +380,59 @@ async def test_generation_worker_heartbeat_publishes_and_swallows_errors(
     await worker.generation_worker_heartbeat({"redis": redis})
 
 
+def test_capacity_retry_budget_outlives_the_run_deadline() -> None:
+    """The fold makes capacity bounces routine, so the budget must cover them.
+
+    On its own lane arq pulled at most ``max_concurrent_generations_per_process``
+    generation jobs, so admission almost never bounced one. The bulk lane pulls
+    up to ``_MAX_JOBS`` (20) against a much smaller admission ceiling, so most of
+    a burst gets ``QueuedGenerationCapacityError`` -> ``Retry(defer=retry_after)``
+    — and every bounce burns one ``max_tries``. If the budget ran out first, a
+    paid run would die of backpressure before its own deadline settled it.
+    """
+
+    import worker
+    from services.pipeline.admission import _RETRY_AFTER, REASON_PROCESS
+
+    deadline = worker.settings.stage_generation_deadline_seconds
+    # The per-process limiter is the valve arq will trip against, and it
+    # advertises the shortest Retry-After — i.e. the fastest way to burn tries.
+    assert _RETRY_AFTER[REASON_PROCESS] == min(_RETRY_AFTER.values())
+    assert worker._MAX_JOBS > worker.settings.max_concurrent_generations_per_process
+    assert (
+        worker._GENERATION_JOB_MAX_TRIES * _RETRY_AFTER[REASON_PROCESS] > deadline
+    ), "a run can exhaust its arq retries before the deadline settles it"
+
+
+def test_e2e_generation_worker_construction_matches_production_registration() -> None:
+    """The browser-E2E stack builds a real arq worker off the production class.
+
+    ``create_worker(..., cron_jobs=...)`` is only exercised by that script, and a
+    failure there surfaces as a `kill -0` in CI after a full frontend build. Pin
+    it here, where it costs milliseconds.
+    """
+
+    from arq.worker import create_worker
+
+    import worker
+
+    heartbeat = [
+        job
+        for job in worker.WorkerSettings.cron_jobs
+        if job.coroutine is worker.generation_worker_heartbeat
+    ]
+    assert len(heartbeat) == 1
+
+    built = create_worker(worker.WorkerSettings, cron_jobs=heartbeat)
+
+    assert built.queue_name == worker.BULK_QUEUE_NAME
+    assert "stage_generate" in built.functions
+    # The heartbeat must survive: a single boot-time publish expires after
+    # GENERATION_WORKER_HEARTBEAT_TTL_SECONDS and would take the paid path down
+    # in any environment where readiness is enforced.
+    assert [c.name for c in built.cron_jobs] == ["cron:generation_worker_heartbeat"]
+
+
 def test_generation_job_bounds_survive_sharing_the_bulk_lane() -> None:
     """Pin what arq actually does with a per-function timeout on a shared lane.
 
