@@ -62,16 +62,15 @@ logger = structlog.get_logger(__name__)
 #   - BULK_QUEUE_NAME = arq's DEFAULT queue. Kept as the default deliberately so
 #     any job enqueued by older code (or in flight across the deploy) still
 #     drains — nothing is stranded at the cutover. Carries the GitHub bulk I/O
-#     (export/periodic-backfill/increment/projects) and the LLM eval batch jobs.
+#     (export/periodic-backfill/increment/projects), LLM eval batch jobs, and
+#     durable stage generation. Generation has its own admission and provider-call
+#     bulkheads, so it can safely share this already-provisioned process.
 #   - FAST_QUEUE_NAME = a separate queue drained by its OWN worker process
 #     (`arq worker.FastWorkerSettings`), so a bulk-export storm cannot occupy its
 #     job slots. Carries paid credit grants and latency-sensitive GitHub updates.
-#   - GENERATION_QUEUE_NAME = a separate durable lane for paid LLM artifacts,
-#     isolated from both bulk exports and webhook/credit latency.
-#
 # Routing is by job NAME via queue_for_job(), so every enqueue() call site is
 # unchanged — the home queue is resolved centrally (DRY) and worker.py partitions
-# the three WorkerSettings classes off the SAME table.
+# the two WorkerSettings classes off the SAME table.
 #
 # DEPLOY INVARIANT: the FastWorkerSettings process MUST be running in every
 # environment, or fast-queue jobs (paid grants) never drain. The
@@ -81,11 +80,6 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 BULK_QUEUE_NAME = "arq:queue"  # arq's built-in default queue name.
 FAST_QUEUE_NAME = "arq:queue:fast"
-# Paid LLM generation has a different failure and capacity profile from both
-# GitHub bulk I/O and billing webhooks.  It therefore gets an independently
-# scalable worker lane: a deploy/restart may interrupt a worker process, but arq
-# retains and retries the generation job under its durable generation-run id.
-GENERATION_QUEUE_NAME = "arq:queue:generation"
 
 # Generation-worker readiness is deliberately stored under the deployment
 # revision. During a rolling deploy an old worker may still be healthy enough to
@@ -179,9 +173,9 @@ async def generation_worker_snapshot(redis: Redis) -> dict[str, Any]:
                 and age <= GENERATION_WORKER_HEARTBEAT_TTL_SECONDS
             )
 
-        depth = int(await redis.zcard(GENERATION_QUEUE_NAME))
+        depth = int(await redis.zcard(BULK_QUEUE_NAME))
         oldest_age = 0.0
-        oldest = await redis.zrange(GENERATION_QUEUE_NAME, 0, 0, withscores=True)
+        oldest = await redis.zrange(BULK_QUEUE_NAME, 0, 0, withscores=True)
         if oldest:
             score_ms = float(oldest[0][1])
             oldest_age = max(0.0, (time.time() * 1000 - score_ms) / 1000)
@@ -192,7 +186,7 @@ async def generation_worker_snapshot(redis: Redis) -> dict[str, Any]:
         # generation consumer is the component that disappeared.
         from services.observability import record_worker_queue_stats  # noqa: PLC0415
 
-        record_worker_queue_stats(GENERATION_QUEUE_NAME, depth, oldest_age)
+        record_worker_queue_stats(BULK_QUEUE_NAME, depth, oldest_age)
     except Exception as exc:
         # Readiness is false on malformed/missing Redis state. The caller decides
         # whether that is fatal for its environment; never leak Redis details.
@@ -215,8 +209,6 @@ _FAST_QUEUE_JOBS = frozenset(
     }
 )
 
-_GENERATION_QUEUE_JOBS = frozenset({"stage_generate"})
-
 
 def queue_for_job(job: str) -> str:
     """Resolve a job's home queue from its name (F5 — single source of truth).
@@ -225,8 +217,6 @@ def queue_for_job(job: str) -> str:
     partition which functions each WorkerSettings class drains), so the split can
     never drift between the producer and consumer sides.
     """
-    if job in _GENERATION_QUEUE_JOBS:
-        return GENERATION_QUEUE_NAME
     return FAST_QUEUE_NAME if job in _FAST_QUEUE_JOBS else BULK_QUEUE_NAME
 
 

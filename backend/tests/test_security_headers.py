@@ -246,43 +246,9 @@ def test_health_hides_dependency_detail_in_production() -> None:
         ),
         patch("main.check_database", return_value="ok"),
         patch("main.check_redis", return_value="ok"),
-        patch(
-            "main.generation_worker_snapshot",
-            return_value={"ready": True},
-        ),
     ):
         with TestClient(create_app(redis_client=_NoopRedis())) as client:
             response = client.get("/health")
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "version": "1.0.0"}
-
-
-def test_health_fails_closed_for_missing_generation_worker_in_production() -> None:
-    with (
-        patch.object(settings, "environment", _PRODUCTION_PATCHES["environment"]),
-        patch.object(settings, "metrics_token", _PRODUCTION_PATCHES["metrics_token"]),
-        patch.object(settings, "frontend_url", _PRODUCTION_PATCHES["frontend_url"]),
-        patch.object(
-            settings,
-            "jwt_private_key",
-            _PRODUCTION_PATCHES["jwt_private_key"],
-        ),
-        patch.object(
-            settings,
-            "encryption_master_key",
-            _PRODUCTION_PATCHES["encryption_master_key"],
-        ),
-        patch.object(settings, "allowed_hosts", _PRODUCTION_PATCHES["allowed_hosts"]),
-        patch("main.check_database", return_value="ok"),
-        patch("main.check_redis", return_value="ok"),
-        patch(
-            "main.generation_worker_snapshot",
-            return_value={"ready": False, "error": None},
-        ),
-    ):
-        with TestClient(create_app(redis_client=_NoopRedis())) as client:
-            response = client.get("/health")
-
-    assert response.status_code == 503
-    assert response.json() == {"status": "degraded", "version": "1.0.0"}

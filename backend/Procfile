@@ -3,4 +3,3 @@ worker: arq worker.WorkerSettings
 # F5: the FAST lane MUST run in every environment, or paid credit grants +
 # PR status checks never drain. See RUNBOOK §16.
 worker_fast: arq worker.FastWorkerSettings
-worker_generation: arq worker.GenerationWorkerSettings

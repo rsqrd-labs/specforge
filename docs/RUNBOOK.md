@@ -122,7 +122,7 @@ Know its real semantics before you rely on it:
 
 | Property | Behaviour | Consequence |
 |---|---|---|
-| Threshold | 3 failures / 600s, **per process** | Each generation worker replica learns independently; runtime fallback protects the current run before fleet-wide circuit convergence |
+| Threshold | 3 failures / 600s, **per process** | Each generation-capable worker replica learns independently; runtime fallback protects the current run before fleet-wide circuit convergence |
 | Rate limits | 429/529/503 are **excluded** from breaker failures | Retry with `Retry-After`; after the bounded retry budget, move to another configured provider |
 | In-flight generations | Rescued at a failed chunk-call boundary while retry reserve remains | Completed chunks stay checkpointed; only the failed chunk moves routes |
 | Artifact tier on failover | Every provider runs `(strong, mid)` for full artifacts | OpenAI failover lands on **GPT-5.5**, not the cheap `mini` tier — a user charged frontier-tier credits never silently receives a much weaker artifact |
@@ -303,10 +303,11 @@ GET /health
 ```
 
 Returns HTTP 200 with `{"status":"ok","version":"1.0.0"}` when healthy and
-HTTP 503 with `status:"degraded"` on a database, Redis, or enforced
-generation-worker-readiness failure. In non-production the response also
-includes `db`, `redis`, and `generation_worker`; production omits dependency
-details.
+HTTP 503 with `status:"degraded"` on a database or Redis failure. In
+non-production the response also includes `db` and `redis`; production omits
+dependency details. Generation-worker readiness is enforced only at the
+cache-miss generation boundary, before charging, so a rolling worker deploy does
+not take unrelated API routes out of service.
 
 ### LLM Provider Health
 
@@ -789,12 +790,12 @@ reports `ok`.
    be denied the one model this deployment depends on. Also confirm the usage
    tier can absorb *primary* traffic, not just fallback overflow.
 
-2. Set `ANTHROPIC_API_KEY` on **all four Railway services** — `backend`,
-   `worker`, `worker-fast`, and `worker-generation`. Use a **Shared Variable /
-   Variable Reference** so it is one value, not four pastes that can drift. A worker missing the key
+2. Set `ANTHROPIC_API_KEY` on **all three Railway services** — `backend`,
+   `worker`, and `worker-fast`. Use a **Shared Variable / Variable Reference**
+   so it is one value, not three pastes that can drift. A worker missing the key
    fails silently per job; nothing validates it at job start.
 
-3. Redeploy all four (Deployments → Deploy). A variable change alone does not
+3. Redeploy all three (Deployments → Deploy). A variable change alone does not
    restart a service.
 
 4. Revoke the old key in the Anthropic Console **only after** the verification
@@ -856,7 +857,7 @@ reports `ok`.
    Set `THOUGHT2BUILD_RUN_LLM_SMOKE=1` to additionally generate and finalise one
    real SPEC, then generate its dependent PLAN (this **does** consume credits).
 
-**Rollback:** restore the previous `ANTHROPIC_API_KEY` on all four services and
+**Rollback:** restore the previous `ANTHROPIC_API_KEY` on all three services and
 redeploy. If the old key is already revoked and no replacement works, fail over
 to another platform with an **env-only** change — no redeploy of code:
 
@@ -878,8 +879,8 @@ is **all-DeepSeek-V4** — `deepseek/deepseek-v4-flash` (`mid`, the cheap primar
 and judge) escalating to `deepseek/deepseek-v4-pro` (`strong`, full-artifact
 generation) — reached through a thin `chat_completions` adapter over the
 `openai` SDK pointed at `https://openrouter.ai/api/v1`. If a key is set, install
-it the same way as `ANTHROPIC_API_KEY` — a Shared Variable across all four
-Railway services (`backend`, `worker`, `worker-fast`, `worker-generation`) — but do **not** add
+it the same way as `ANTHROPIC_API_KEY` — a Shared Variable across all three
+Railway services (`backend`, `worker`, `worker-fast`) — but do **not** add
 `"openrouter"` to `LLM_PROVIDER_PRIORITY` in production without completing the
 promotion gate in `docs/evals/ROUTE_PROMOTION.md`.
 
@@ -2238,7 +2239,7 @@ bound (a fan-out leak past the F1 admission cap).
 
 ---
 
-## 16. Worker Lanes — Fast/Bulk/Generation Queues (Scalability P1)
+## 16. Worker Lanes — Fast/Bulk Queues (Scalability P1)
 
 **Reference:** `docs/SCALABILITY_AUDIT.md` §F5/§F6
 **Modules:** `backend/worker.py`, `backend/services/queue.py`,
@@ -2252,36 +2253,32 @@ credit grants users had already paid for. F5 splits the live queues by latency
 class, each drained by its **own process**:
 
 - **Bulk lane** — `arq worker.WorkerSettings`, arq's **default** queue
-  (`arq:queue`). GitHub bulk I/O (export/backfill/increment/projects/reconcile) +
-  LLM eval batches. Kept on the default queue so nothing enqueued before the split
-  is stranded.
+  (`arq:queue`). GitHub bulk I/O (export/backfill/increment/projects/reconcile),
+  LLM eval batches, and durable paid stage generation. Generation keeps its own
+  concurrency/provider-call bulkheads and per-job retry/timeout contract. The
+  default queue ensures nothing enqueued before the split is stranded.
 - **Fast lane** — `arq worker.FastWorkerSettings`, a dedicated queue
   (`arq:queue:fast`). Paid credit grants (`billing_process_webhook`) + the PR
   status check (`pr_check`), plus the billing recovery crons.
-- **Generation lane** — `arq worker.GenerationWorkerSettings`, dedicated queue
-  `arq:queue:generation`. It owns research, prompt compression, provider calls,
-  checkpoints, validation, and persistence for paid stage generation. API
-  processes only enqueue and observe durable DB state.
-
 Routing is by job **name** via `services.queue.queue_for_job` (single source of
 truth; every `enqueue()` call site is unchanged). All lanes are stateless and
 scale to **N replicas** — jobs are idempotent/checkpointed and arq dedups crons
 **per queue**, so each cron fires once per lane regardless of replica count.
 
-### ⚠️ DEPLOY INVARIANT — fast and generation workers must run everywhere
+### ⚠️ DEPLOY INVARIANT — both workers must run everywhere
 
 Because `billing_process_webhook` and `pr_check` route to `arq:queue:fast`, those
 jobs **only drain if a `FastWorkerSettings` process is running**. The billing 60s
 sweep re-enqueues to the same fast queue, so it is **not** a substitute consumer.
-The generation queue likewise only drains when `GenerationWorkerSettings` is
-running; without it a paid run remains `in_progress` until bounded recovery
-refunds it. Deploy **all three** worker process types in every environment:
+The bulk worker also owns paid stage generation; without it a paid run remains
+`in_progress` until bounded recovery refunds it. Deploy **both** worker process
+types in every environment:
 
-- **docker-compose:** `worker`, `worker-fast`, and `worker-generation`.
-- **Procfile (Railway/etc.):** `worker`, `worker_fast`, and `worker_generation`.
+- **docker-compose:** `worker` and `worker-fast`.
+- **Procfile (Railway/etc.):** `worker` and `worker_fast`.
 
-For Railway, provision four services named `backend`, `worker`, `worker-fast`,
-and `worker-generation`, all rooted at `/backend`. Set each service's
+For Railway, provision three services named `backend`, `worker`, and
+`worker-fast`, all rooted at `/backend`. Set each service's
 **Config File Path**
 explicitly (Railway config paths are repository-absolute):
 
@@ -2290,9 +2287,8 @@ explicitly (Railway config paths are repository-absolute):
 | `backend` | `/backend/railway.json` |
 | `worker` | `/backend/railway.worker.json` |
 | `worker-fast` | `/backend/railway.worker-fast.json` |
-| `worker-generation` | `/backend/railway.worker-generation.json` |
 
-All four services must auto-deploy the same successful `main` commit. The API
+All three services must auto-deploy the same successful `main` commit. The API
 config calls `entrypoint.sh`, preserving migrate → seed templates → Gunicorn;
 worker configs intentionally run neither migrations nor template seeding.
 
@@ -2303,20 +2299,19 @@ A missing/stalled fast worker surfaces as:
 queued jobs and the next sweep drain it; grants are idempotent so nothing
 double-grants.
 
-A missing/stalled generation worker surfaces as
-`thought2build_worker_queue_oldest_age_seconds{queue="arq:queue:generation"}`
-climbing while generation runs remain in `preparing`. Production and staging
-also require a generation-worker heartbeat from the same deploy revision:
-`/health` becomes degraded and cache-miss generation fails before charging when
-that heartbeat is missing, stale, or belongs to the previous rollout. **Recovery:**
-start the matching generation worker; queued jobs retain their stable run ids
-and drain safely.
+A missing/stalled bulk worker surfaces as
+`thought2build_worker_queue_oldest_age_seconds{queue="arq:queue"}` climbing while
+generation runs remain in `preparing`. Production and staging require a
+generation-capable bulk-worker heartbeat from the same deploy revision before a
+cache-miss generation is charged. This dependency intentionally does not make
+the entire API `/health` endpoint fail during rolling deploys. **Recovery:** start
+the matching `worker`; queued jobs retain their stable run ids and drain safely.
 
 ### Per-queue backpressure metrics
 
 A lightweight per-worker cron (`sample_queue_stats`, every minute at :45) samples
-the queue **that worker consumes**. The API independently samples the generation
-queue during readiness checks, so a completely absent generation consumer is
+the queue **that worker consumes**. The API independently samples the bulk queue
+during generation-readiness checks, so a completely absent consumer is
 still visible in API-process metrics:
 
 | Metric | Meaning |

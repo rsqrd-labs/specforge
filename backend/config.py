@@ -217,7 +217,7 @@ class Settings(BaseSettings):
     # Keep the wave semantics (all chunks remain independent/checkpointable),
     # but admit at most this many PLAN calls from one generation concurrently.
     max_concurrent_plan_chunks_per_generation: int = 2
-    # Production/staging must prove that a generation-lane consumer from the
+    # Production/staging must prove that a generation-capable worker from the
     # same deploy revision is alive before a cache-miss run may be charged.
     # Development/test remain usable without running arq; the runtime helper
     # enforces this flag only outside those local environments.

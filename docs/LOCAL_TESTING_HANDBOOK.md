@@ -341,7 +341,7 @@ docker compose up --build
 The first run takes a few minutes — Docker downloads the base images and
 installs dependencies. Subsequent starts are much faster.
 
-You will see interleaved log output from all four services. Wait until you
+You will see interleaved log output from the stack services. Wait until you
 see both of these lines:
 
 ```

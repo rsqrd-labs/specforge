@@ -68,8 +68,8 @@ services:
   worker:
     # Durable background worker — BULK lane (Phase 21 — T-269; F5). Shares the
     # backend image and REDIS_URL/DATABASE_URL with `api`; drains the default
-    # queue (GitHub bulk I/O + LLM eval batches) off the request path. No
-    # migrations here — `api` owns those.
+    # queue (GitHub bulk I/O + LLM eval batches + durable paid generation) off
+    # the request path. No migrations here — `api` owns those.
     build: ./backend
     env_file:
       - backend/.env
@@ -111,26 +111,6 @@ services:
       # Same .venv mask as `api` — see comment there.
       - worker_venv:/app/.venv
     entrypoint: ["/bin/sh", "-c", "uv sync --frozen --no-dev && uv run --no-sync arq worker.FastWorkerSettings"]
-
-  worker-generation:
-    # Durable paid-generation lane. API reloads and browser disconnects only
-    # stop observing the run; this worker continues from the Redis-backed job.
-    build: ./backend
-    env_file:
-      - backend/.env
-    environment:
-      DATABASE_URL: postgresql+asyncpg://thought2build:thought2build@db:5432/thought2build
-      REDIS_URL: redis://redis:6379/0
-      FRONTEND_URL: http://localhost:5173
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    volumes:
-      - ./backend:/app
-      - worker_venv:/app/.venv
-    entrypoint: ["/bin/sh", "-c", "uv sync --frozen --no-dev && uv run --no-sync arq worker.GenerationWorkerSettings"]
 
   github-webhook-forwarder:
     # Local-development ingress for a GitHub App whose webhook URL is a Smee
