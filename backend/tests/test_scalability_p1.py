@@ -380,6 +380,44 @@ async def test_generation_worker_heartbeat_publishes_and_swallows_errors(
     await worker.generation_worker_heartbeat({"redis": redis})
 
 
+def test_generation_job_bounds_survive_sharing_the_bulk_lane() -> None:
+    """Pin what arq actually does with a per-function timeout on a shared lane.
+
+    ``func(stage_generate, timeout=...)`` bounds the RUN. It does NOT bound the
+    crashed-job in-progress lease: arq derives ONE lease per worker from
+    ``max(f.timeout_s or job_timeout)`` across every registered function, so the
+    bulk lane's 1800s GitHub-export ceiling sets it. That is the accepted cost of
+    dropping the dedicated generation lane (which needed a Railway service that
+    does not exist) — asserted here so nobody re-derives it from the comment
+    alone, and so a future attempt to shorten it fails loudly instead of
+    silently.
+    """
+
+    from arq.worker import create_worker
+
+    import worker
+
+    built = create_worker(worker.WorkerSettings)
+    registered = built.functions["stage_generate"]
+
+    # The run bound IS per-function, and stays under the durable run deadline.
+    assert registered.timeout_s == worker._GENERATION_JOB_TIMEOUT_SECONDS
+    assert registered.max_tries == worker._GENERATION_JOB_MAX_TRIES
+    assert (
+        worker._GENERATION_JOB_SLICE_SECONDS
+        < worker.settings.stage_generation_deadline_seconds
+    )
+    # The lease is worker-wide, not per-function.
+    assert built.job_timeout_s == worker._JOB_TIMEOUT_SECONDS
+    assert built.in_progress_timeout_s == worker._JOB_TIMEOUT_SECONDS + 10
+    # A late retry after that lease is inert rather than a second paid run: the
+    # handler no-ops on a run that is no longer `running`, and the API-side
+    # recovery sweep has already settled and refunded it by then.
+    assert (
+        built.in_progress_timeout_s > worker.settings.stage_generation_deadline_seconds
+    )
+
+
 async def test_bulk_worker_startup_publishes_generation_readiness(monkeypatch) -> None:
     import worker
     from services import observability

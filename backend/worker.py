@@ -87,6 +87,18 @@ _GENERATION_JOB_SLICE_SECONDS = max(
 )
 # Leave cleanup/requeue headroom outside the handler-owned slice. A healthy job
 # always exits or raises Retry before this outer ARQ timeout is reached.
+#
+# ACCEPTED CONSEQUENCE of sharing the bulk lane: arq derives ONE worker-wide
+# in-progress lease from ``max(f.timeout_s or job_timeout for f in functions)``
+# (arq/worker.py), so this per-function timeout bounds the RUN, not the lease —
+# the lease is the bulk lane's ``_JOB_TIMEOUT_SECONDS`` (a large GitHub export)
+# plus ten seconds. Every graceful path (Retry, slice exhaustion, SIGTERM on a
+# Railway redeploy) clears the key immediately, so this only bites on a hard
+# kill (OOM/SIGKILL) mid-generation: that job's RESUME waits out the long lease
+# instead of the short one. It is not a stranded charge — the API-side recovery
+# sweep settles the run at ``stage_generation_deadline_seconds`` and refunds,
+# and ``execute_queued_generation`` no-ops on a run that is no longer
+# ``running``, so the late retry is inert rather than a double generation.
 _GENERATION_JOB_TIMEOUT_SECONDS = _GENERATION_JOB_SLICE_SECONDS + 30
 # Capacity retries are expected queue backpressure, not job failure. Keep trying
 # throughout the durable run deadline instead of exhausting the general-purpose
@@ -501,8 +513,14 @@ async def _on_startup(ctx: dict[str, Any]) -> None:
     if queue == BULK_QUEUE_NAME:
         lane_max_jobs = _MAX_JOBS
         # Publish before startup returns so the API can become ready without
-        # waiting for the first cron tick.
-        await record_generation_worker_heartbeat(ctx["redis"])
+        # waiting for the first cron tick. Guarded for the same reason the cron
+        # body is: this lane drains GitHub, evals AND paid generation, and a
+        # transient Redis blip at boot must not crash-loop all three. The next
+        # ten-second tick republishes.
+        try:
+            await record_generation_worker_heartbeat(ctx["redis"])
+        except Exception:
+            logger.warning("generation.worker_heartbeat_failed", exc_info=True)
     else:
         lane_max_jobs = _FAST_MAX_JOBS if queue == FAST_QUEUE_NAME else _MAX_JOBS
     logger.info("worker.started", queue=queue, max_jobs=lane_max_jobs)

@@ -2260,10 +2260,30 @@ class, each drained by its **own process**:
 - **Fast lane** — `arq worker.FastWorkerSettings`, a dedicated queue
   (`arq:queue:fast`). Paid credit grants (`billing_process_webhook`) + the PR
   status check (`pr_check`), plus the billing recovery crons.
+
 Routing is by job **name** via `services.queue.queue_for_job` (single source of
 truth; every `enqueue()` call site is unchanged). All lanes are stateless and
 scale to **N replicas** — jobs are idempotent/checkpointed and arq dedups crons
 **per queue**, so each cron fires once per lane regardless of replica count.
+
+**Accepted consequence — paid generation is NOT isolated from bulk exports.**
+Generation briefly had its own lane and its own Railway service; that service was
+never provisioned, so the API's `/health` failed its Railway healthcheck and the
+deploy could not go green. Sharing the already-provisioned bulk lane is the
+no-new-infrastructure trade, and it is a real trade: a bulk-export storm can
+occupy bulk job slots ahead of a paid run. Two things bound the damage — F1
+admission (§14) caps in-flight generations independently of arq, and `max_jobs`
+on the bulk lane is 20 against `MAX_CONCURRENT_GENERATIONS_PER_PROCESS`. If
+export backlogs start delaying paid runs, the fix is a second `worker` **replica**
+(no new service, no new config file), not a new lane.
+
+A second consequence of the shared lane: arq computes ONE in-progress lease per
+worker from `max(function timeout)` (`arq/worker.py`), so a generation job's
+crash lease is the bulk lane's 1800s, not its own ~360s. Every graceful path
+(`Retry`, slice exhaustion, SIGTERM on redeploy) releases it immediately; only a
+hard kill (OOM/SIGKILL) delays that run's **resume**. The charge is not stranded —
+the API recovery sweep settles and refunds at `stage_generation_deadline_seconds`,
+and a late retry no-ops because the run is no longer `running`.
 
 ### ⚠️ DEPLOY INVARIANT — both workers must run everywhere
 
@@ -2301,18 +2321,35 @@ double-grants.
 
 A missing/stalled bulk worker surfaces as
 `thought2build_worker_queue_oldest_age_seconds{queue="arq:queue"}` climbing while
-generation runs remain in `preparing`. Production and staging require a
-generation-capable bulk-worker heartbeat from the same deploy revision before a
-cache-miss generation is charged. This dependency intentionally does not make
-the entire API `/health` endpoint fail during rolling deploys. **Recovery:** start
-the matching `worker`; queued jobs retain their stable run ids and drain safely.
+generation runs remain in `preparing`. Production and staging require a **live**
+generation-capable worker heartbeat (`worker:heartbeat:generation`, TTL 45s,
+refreshed every 10s) before a cache-miss generation is charged; without one the
+user gets `generation_worker_unavailable` and **no credits are deducted**. This
+dependency deliberately does not fail the whole API `/health` endpoint — that is
+what made the deploy healthcheck itself fail.
+
+Readiness is **liveness, not code identity**. The heartbeat payload carries the
+worker's deploy revision, and a live worker on a different revision from the API
+logs `generation.worker_revision_mismatch` but stays ready — `backend` and
+`worker` are independently deployed Railway services, so a mismatch is the normal
+state for the minute between two deploys landing, and gating on it would turn
+every rolling deploy into a paid-path outage. Set
+`GENERATION_WORKER_REVISION_MATCH_REQUIRED=true` only for a deployment that can
+guarantee the two services move atomically. `GENERATION_WORKER_READINESS_REQUIRED=false`
+disables the gate entirely (generations are then charged with no proof anything
+will drain them).
+
+**Recovery:** start the matching `worker`; queued jobs retain their stable run
+ids and drain safely.
 
 ### Per-queue backpressure metrics
 
 A lightweight per-worker cron (`sample_queue_stats`, every minute at :45) samples
-the queue **that worker consumes**. The API independently samples the bulk queue
-during generation-readiness checks, so a completely absent consumer is
-still visible in API-process metrics:
+the queue **that worker consumes** and is the only writer of these gauges. The
+readiness snapshot reads the same backlog for its own log line but deliberately
+does **not** publish it — with generation on the bulk lane, the bulk worker's own
+cron already covers that queue, and an API-side write would race it under the
+same label:
 
 | Metric | Meaning |
 |---|---|
