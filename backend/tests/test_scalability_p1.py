@@ -151,7 +151,6 @@ def test_queue_for_job_routes_fast_and_bulk() -> None:
     from services.queue import (
         BULK_QUEUE_NAME,
         FAST_QUEUE_NAME,
-        GENERATION_QUEUE_NAME,
         queue_for_job,
     )
 
@@ -159,7 +158,7 @@ def test_queue_for_job_routes_fast_and_bulk() -> None:
     assert queue_for_job("pr_check") == FAST_QUEUE_NAME
     assert queue_for_job("reconcile_issue_event") == FAST_QUEUE_NAME
     assert queue_for_job("refresh_task_states") == FAST_QUEUE_NAME
-    assert queue_for_job("stage_generate") == GENERATION_QUEUE_NAME
+    assert queue_for_job("stage_generate") == BULK_QUEUE_NAME
     for bulk in (
         "export_push",
         "backfill_repo",
@@ -194,7 +193,7 @@ async def test_enqueue_routes_to_resolved_queue() -> None:
     await queue_mod.enqueue("export_push", 2, pool=_FakePool())
     assert captured["queue"] == queue_mod.BULK_QUEUE_NAME
     await queue_mod.enqueue("stage_generate", {}, pool=_FakePool())
-    assert captured["queue"] == queue_mod.GENERATION_QUEUE_NAME
+    assert captured["queue"] == queue_mod.BULK_QUEUE_NAME
     # Explicit override wins over the routing table.
     await queue_mod.enqueue("export_push", 3, queue_name="custom", pool=_FakePool())
     assert captured["queue"] == "custom"
@@ -205,31 +204,24 @@ def test_worker_settings_partition_is_disjoint_and_complete() -> None:
     from services.queue import (
         BULK_QUEUE_NAME,
         FAST_QUEUE_NAME,
-        GENERATION_QUEUE_NAME,
         queue_for_job,
     )
 
-    bulk = {f.__name__ for f in worker.WorkerSettings.functions}
-    fast = {f.__name__ for f in worker.FastWorkerSettings.functions}
-    generation = {
+    bulk = {
         getattr(f, "__name__", getattr(f, "name", None))
-        for f in worker.GenerationWorkerSettings.functions
+        for f in worker.WorkerSettings.functions
     }
+    fast = {f.__name__ for f in worker.FastWorkerSettings.functions}
     # No job is registered on both lanes.
     assert bulk.isdisjoint(fast)
-    assert bulk.isdisjoint(generation)
-    assert fast.isdisjoint(generation)
     # Each lane's queue_name matches its routing.
     assert worker.WorkerSettings.queue_name == BULK_QUEUE_NAME
     assert worker.FastWorkerSettings.queue_name == FAST_QUEUE_NAME
-    assert worker.GenerationWorkerSettings.queue_name == GENERATION_QUEUE_NAME
     # Every registered job lands on the lane the routing table sends it to.
     for name in bulk:
         assert queue_for_job(name) == BULK_QUEUE_NAME
     for name in fast:
         assert queue_for_job(name) == FAST_QUEUE_NAME
-    for name in generation:
-        assert queue_for_job(name) == GENERATION_QUEUE_NAME
     # The fast lane carries exactly the latency-sensitive jobs.
     assert fast == {
         "billing_process_webhook",
@@ -237,19 +229,18 @@ def test_worker_settings_partition_is_disjoint_and_complete() -> None:
         "reconcile_issue_event",
         "refresh_task_states",
     }
-    assert generation == {"stage_generate"}
-    assert (
-        worker.GenerationWorkerSettings.functions[0].max_tries
-        == worker._GENERATION_JOB_MAX_TRIES
+    assert "stage_generate" in bulk
+    generation = next(
+        f
+        for f in worker.WorkerSettings.functions
+        if getattr(f, "name", None) == "stage_generate"
     )
+    assert generation.max_tries == worker._GENERATION_JOB_MAX_TRIES
+    assert generation.timeout_s == worker._GENERATION_JOB_TIMEOUT_SECONDS
     assert worker._GENERATION_JOB_MAX_TRIES >= 100
     # keep_result is inherited from the shared base (the re-export dedup guard).
     assert worker.WorkerSettings.keep_result == 0
     assert worker.FastWorkerSettings.keep_result == 0
-    assert worker.GenerationWorkerSettings.keep_result == 0
-    assert worker.GenerationWorkerSettings.job_timeout == (
-        worker._GENERATION_JOB_SLICE_SECONDS + 30
-    )
     assert worker._GENERATION_JOB_SLICE_SECONDS <= (
         worker.settings.stage_generation_deadline_seconds
         - worker.settings.stage_retry_min_remaining_seconds
@@ -286,15 +277,11 @@ def test_global_crons_registered_on_exactly_one_lane() -> None:
 
     bulk_crons = {c.name for c in worker.WorkerSettings.cron_jobs}
     fast_crons = {c.name for c in worker.FastWorkerSettings.cron_jobs}
-    generation_crons = {c.name for c in worker.GenerationWorkerSettings.cron_jobs}
     # The per-queue sampler is the ONLY cron intentionally on both lanes (it
     # samples each lane's own queue). Every other (global) cron is on one lane —
     # arq dedups a cron per queue, so a global cron on both would fire twice.
     assert bulk_crons & fast_crons == {"cron:sample_queue_stats"}
-    assert generation_crons == {
-        "cron:generation_worker_heartbeat",
-        "cron:sample_queue_stats",
-    }
+    assert "cron:generation_worker_heartbeat" in bulk_crons
     # Billing recovery crons live on the fast lane; GitHub/LLM on the bulk lane.
     assert "cron:billing_reconcile" in fast_crons
     assert "cron:reconcile_drift" in bulk_crons
@@ -312,7 +299,6 @@ def test_shared_settings_visible_to_arq_cli_introspection() -> None:
     for lane in (
         worker.WorkerSettings,
         worker.FastWorkerSettings,
-        worker.GenerationWorkerSettings,
     ):
         kwargs = get_kwargs(lane)
         for attr in (
@@ -392,3 +378,118 @@ async def test_generation_worker_heartbeat_publishes_and_swallows_errors(
 
     monkeypatch.setattr(worker, "record_generation_worker_heartbeat", _fail)
     await worker.generation_worker_heartbeat({"redis": redis})
+
+
+def test_capacity_retry_budget_outlives_the_run_deadline() -> None:
+    """The fold makes capacity bounces routine, so the budget must cover them.
+
+    On its own lane arq pulled at most ``max_concurrent_generations_per_process``
+    generation jobs, so admission almost never bounced one. The bulk lane pulls
+    up to ``_MAX_JOBS`` (20) against a much smaller admission ceiling, so most of
+    a burst gets ``QueuedGenerationCapacityError`` -> ``Retry(defer=retry_after)``
+    — and every bounce burns one ``max_tries``. If the budget ran out first, a
+    paid run would die of backpressure before its own deadline settled it.
+    """
+
+    import worker
+    from services.pipeline.admission import _RETRY_AFTER, REASON_PROCESS
+
+    deadline = worker.settings.stage_generation_deadline_seconds
+    # The per-process limiter is the valve arq will trip against, and it
+    # advertises the shortest Retry-After — i.e. the fastest way to burn tries.
+    assert _RETRY_AFTER[REASON_PROCESS] == min(_RETRY_AFTER.values())
+    assert worker._MAX_JOBS > worker.settings.max_concurrent_generations_per_process
+    assert (
+        worker._GENERATION_JOB_MAX_TRIES * _RETRY_AFTER[REASON_PROCESS] > deadline
+    ), "a run can exhaust its arq retries before the deadline settles it"
+
+
+def test_e2e_generation_worker_construction_matches_production_registration() -> None:
+    """The browser-E2E stack builds a real arq worker off the production class.
+
+    ``create_worker(..., cron_jobs=...)`` is only exercised by that script, and a
+    failure there surfaces as a `kill -0` in CI after a full frontend build. Pin
+    it here, where it costs milliseconds.
+    """
+
+    from arq.worker import create_worker
+
+    import worker
+
+    heartbeat = [
+        job
+        for job in worker.WorkerSettings.cron_jobs
+        if job.coroutine is worker.generation_worker_heartbeat
+    ]
+    assert len(heartbeat) == 1
+
+    built = create_worker(worker.WorkerSettings, cron_jobs=heartbeat)
+
+    assert built.queue_name == worker.BULK_QUEUE_NAME
+    assert "stage_generate" in built.functions
+    # The heartbeat must survive: a single boot-time publish expires after
+    # GENERATION_WORKER_HEARTBEAT_TTL_SECONDS and would take the paid path down
+    # in any environment where readiness is enforced.
+    assert [c.name for c in built.cron_jobs] == ["cron:generation_worker_heartbeat"]
+
+
+def test_generation_job_bounds_survive_sharing_the_bulk_lane() -> None:
+    """Pin what arq actually does with a per-function timeout on a shared lane.
+
+    ``func(stage_generate, timeout=...)`` bounds the RUN. It does NOT bound the
+    crashed-job in-progress lease: arq derives ONE lease per worker from
+    ``max(f.timeout_s or job_timeout)`` across every registered function, so the
+    bulk lane's 1800s GitHub-export ceiling sets it. That is the accepted cost of
+    dropping the dedicated generation lane (which needed a Railway service that
+    does not exist) — asserted here so nobody re-derives it from the comment
+    alone, and so a future attempt to shorten it fails loudly instead of
+    silently.
+    """
+
+    from arq.worker import create_worker
+
+    import worker
+
+    built = create_worker(worker.WorkerSettings)
+    registered = built.functions["stage_generate"]
+
+    # The run bound IS per-function, and stays under the durable run deadline.
+    assert registered.timeout_s == worker._GENERATION_JOB_TIMEOUT_SECONDS
+    assert registered.max_tries == worker._GENERATION_JOB_MAX_TRIES
+    assert (
+        worker._GENERATION_JOB_SLICE_SECONDS
+        < worker.settings.stage_generation_deadline_seconds
+    )
+    # The lease is worker-wide, not per-function.
+    assert built.job_timeout_s == worker._JOB_TIMEOUT_SECONDS
+    assert built.in_progress_timeout_s == worker._JOB_TIMEOUT_SECONDS + 10
+    # A late retry after that lease is inert rather than a second paid run: the
+    # handler no-ops on a run that is no longer `running`, and the API-side
+    # recovery sweep has already settled and refunded it by then.
+    assert (
+        built.in_progress_timeout_s > worker.settings.stage_generation_deadline_seconds
+    )
+
+
+async def test_bulk_worker_startup_publishes_generation_readiness(monkeypatch) -> None:
+    import worker
+    from services import observability
+
+    class _BulkRedis:
+        default_queue_name = "arq:queue"
+
+    redis = _BulkRedis()
+    published: list[object] = []
+
+    async def _record(value) -> None:
+        published.append(value)
+
+    monkeypatch.setattr(observability, "configure_logging", lambda: None)
+    monkeypatch.setattr(settings, "sentry_dsn", "")
+    monkeypatch.setattr(database, "_initialize_redis", lambda _redis: None)
+    monkeypatch.setattr(database, "build_redis_client", object)
+    monkeypatch.setattr(worker, "record_generation_worker_heartbeat", _record)
+
+    await worker._on_startup({"redis": redis})
+
+    assert published == [redis]

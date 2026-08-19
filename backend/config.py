@@ -217,11 +217,18 @@ class Settings(BaseSettings):
     # Keep the wave semantics (all chunks remain independent/checkpointable),
     # but admit at most this many PLAN calls from one generation concurrently.
     max_concurrent_plan_chunks_per_generation: int = 2
-    # Production/staging must prove that a generation-lane consumer from the
+    # Production/staging must prove that a generation-capable worker from the
     # same deploy revision is alive before a cache-miss run may be charged.
     # Development/test remain usable without running arq; the runtime helper
     # enforces this flag only outside those local environments.
     generation_worker_readiness_required: bool = True
+    # Strict mode: additionally require the worker's deploy revision to equal the
+    # API's. Off by default — the API and worker are independently deployed
+    # Railway services, so a mismatch is the normal state for the minute between
+    # two deploys landing, and gating paid generation on it turns every rolling
+    # deploy into a user-visible outage. A live-but-behind worker is logged
+    # (``generation.worker_revision_mismatch``) either way.
+    generation_worker_revision_match_required: bool = False
     generation_admission_lease_ttl_seconds: int = 720
     generation_rate_per_minute: int = 10
     generation_rate_window_seconds: int = 60

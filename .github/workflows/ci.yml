@@ -492,10 +492,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The durable bulk, fast, and paid-generation worker lanes share this
-      # backend image (same image, different start command; compose `worker`,
-      # `worker-fast`, and `worker-generation`). Building it here proves the
-      # image is deployable
+      # The durable bulk/generation and fast worker lanes share this backend
+      # image (same image, different start command; compose `worker` and
+      # `worker-fast`). Building it here proves the image is deployable
       # before main is allowed to ship.
       - name: Build backend / worker image
         run: docker build -t thought2build-worker:ci ./backend
@@ -894,13 +893,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Railway (backend + worker + worker-fast + worker-generation) is NOT
-      # deployed from here. All four services are connected to `main` with
+      # Railway (backend + worker + worker-fast) is NOT deployed from here. All
+      # three services are connected to `main` with
       # "Auto deploys when pushed to GitHub" + "Wait for CI" enabled, so Railway
       # builds each service itself once this workflow goes green. Each service
       # also carries config-as-code (`/backend/railway.json`,
-      # `railway.worker.json`, `railway.worker-fast.json`, and
-      # `railway.worker-generation.json`) plus root directory
+      # `railway.worker.json`, and `railway.worker-fast.json`) plus root directory
       # `/backend`, all resolved *relative to the repo root* — which is exactly
       # why the old `railway up ./backend --path-as-root` step could never work:
       # it uploaded the backend folder AS the snapshot root, so Railway looked
